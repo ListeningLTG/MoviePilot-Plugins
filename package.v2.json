@@ -1,16 +1,14 @@
 {
-  "BugReporter": {
-    "name": "Bug反馈",
-    "description": "自动上报异常，协助开发者发现和解决问题。",
+  "MHNotify": {
+    "name": "MediaHelper通知",
+    "description": "整理完成115里的媒体后，通知MediaHelper进行增量同步（strm生成）",
     "labels": "开发",
-    "version": "1.3",
-    "icon": "Alist_encrypt_A.png",
-    "author": "jxxghp",
+    "version": "0.1",
+    "icon": "mh.png",
+    "author": "ListeningLTG",
     "level": 1,
     "history": {
-      "v1.3": "减少网络异常信息上送",
-      "v1.2": "优化上报信息量",
-      "v1.1": "加强脱敏处理"
+      "v0.1": "首次提交"
     }
   }
 }
