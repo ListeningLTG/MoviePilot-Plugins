@@ -15,15 +15,15 @@ class MHNotify(_PluginBase):
     # 插件名称
     plugin_name = "MediaHelper通知"
     # 插件描述
-    plugin_desc = "整理完成115里的媒体后，通知MediaHelper进行增量同步（strm生成）"
+    plugin_desc = "整理完媒体后，通知MediaHelper执行strm生成任务"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "0.1"
+    plugin_version = "0.2"
     # 插件作者
-    plugin_author = "ListeningLTG"
+    plugin_author = "listening"
     # 作者主页
-    author_url = "https://github.com/ListeningLTG"
+    author_url = "https://github.com/listening"
     # 插件配置项ID前缀
     plugin_config_prefix = "mhnotify_"
     # 加载顺序
@@ -32,7 +32,6 @@ class MHNotify(_PluginBase):
     auth_level = 1
 
     # 私有属性
-    _mh_notify_type = None
     _mh_domain = None
     _mh_username = None
     _mh_password = None
@@ -45,7 +44,6 @@ class MHNotify(_PluginBase):
     def init_plugin(self, config: dict = None):
         if config:
             self._enabled = config.get("enabled")
-            self._mh_notify_type = config.get("mh_notify_type")
             self._mh_domain = config.get("mh_domain")
             self._mh_username = config.get('mh_username')
             self._mh_password = config.get('mh_password')
@@ -114,33 +112,7 @@ class MHNotify(_PluginBase):
                             }
                         ]
                     },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 12
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'model': 'mh_notify_type',
-                                            'label': '通知类型',
-                                            'items': [
-                                                {'title': '增量同步',
-                                                    'value': 'lift_sync'},
-                                                # {'title': '增量同步+自动整理',
-                                                #     'value': 'auto_organize'},
-                                            ]
-                                        }
-                                    }
-                                ]
-                            },
-                        ]
-                    },
+                    
                     {
                         'component': 'VRow',
                         'content': [
@@ -216,7 +188,7 @@ class MHNotify(_PluginBase):
                                             'model': 'mh_job_names',
                                             'label': 'strm任务名称（英文逗号分隔）',
                                             'placeholder': '例如：115网盘1,115网盘2',
-                                            'hint': '填写名称后将匹配 /api/v1/scheduled/tasks 中启用的 cloud_strm_sync 任务，按名称获取对应UUID批量执行；留空则默认匹配名称含“115网盘”'
+                                            'hint': '填写strm生成任务名称；留空则默认匹配名称含“115网盘”'
                                         }
                                     }
                                 ]
@@ -237,7 +209,7 @@ class MHNotify(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '当MP整理或刮削好115里的媒体后，会通知MediaHelper进行增量同步（strm生成）'
+                                            'text': '当MP整理或刮削媒体后，通知MediaHelper执行strm生成任务'
                                         }
                                     }
                                 ]
@@ -269,11 +241,10 @@ class MHNotify(_PluginBase):
             }
         ], {
             "enabled": False,
-            "mh_notify_type": "lift_sync",
-            "mh_username": "admin",
-            "mh_password": "admin",
-            "mh_job_names": "115网盘1,天翼云盘1",
-            "mh_domain": "http://192.168.100.139:3303"
+            "mh_username": "",
+            "mh_password": "",
+            "mh_job_names": "",
+            "mh_domain": ""
         }
 
     def get_page(self) -> List[dict]:
@@ -326,19 +297,15 @@ class MHNotify(_PluginBase):
             transferinfo = event_data["transferinfo"]
             success = transferinfo["success"]
             if success:
-                storage = transferinfo["target_diritem"]["storage"]
                 name = transferinfo["target_item"]["name"]
-                if storage == "u115":
-                    logger.info(f"115整理完成：{name}")
-                    self._wait_notify_count += 1
-                    self._last_event_time = self.__get_time()
-        elif event_type == "metadata.scrape":
-            storage = event_data["fileitem"]
-            name = event_data["name"]
-            if storage == "u115":
+                logger.info(f"整理完成：{name}")
                 self._wait_notify_count += 1
                 self._last_event_time = self.__get_time()
-                logger.info(f"115刮削完成：{name}")
+        elif event_type == "metadata.scrape":
+            name = event_data.get("name")
+            logger.info(f"刮削完成：{name}")
+            self._wait_notify_count += 1
+            self._last_event_time = self.__get_time()
 
     def __get_time(self):
         return int(time.time())
