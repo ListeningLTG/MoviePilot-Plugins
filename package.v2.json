@@ -8,6 +8,7 @@
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v0.3": "优化请求生成strm的时间逻辑",
       "v0.2": "优化配置",
       "v0.1": "首次提交"
     }

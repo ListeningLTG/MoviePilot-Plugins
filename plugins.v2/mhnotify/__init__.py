@@ -19,7 +19,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "0.2"
+    plugin_version = "0.3"
     # 插件作者
     plugin_author = "listening"
     # 作者主页
@@ -38,6 +38,8 @@ class MHNotify(_PluginBase):
     _mh_job_names = None
     _enabled = False
     _last_event_time = 0
+    # 下一次允许通知的时间戳（用于等待窗口）
+    _next_notify_time = 0
     # 等待通知数量
     _wait_notify_count = 0
 
@@ -310,10 +312,43 @@ class MHNotify(_PluginBase):
     def __get_time(self):
         return int(time.time())
 
+    def __has_running_transfers(self) -> bool:
+        """
+        检测是否有正在运行的整理任务
+        """
+        try:
+            from app.chain.transfer import TransferChain
+            jobs = TransferChain().list_jobs()
+            if not jobs:
+                return False
+            for job in jobs:
+                tasks = getattr(job, 'tasks', [])
+                if any((getattr(t, 'state', '') == 'running') for t in tasks):
+                    return True
+            return False
+        except Exception:
+            # 检测失败时，保守起见认为存在运行中任务，避免频繁触发
+            return True
+
     def __notify_mh(self):
         try:
-            # 当等待通知数量超过1000或者有等待通知且最后事件时间超过60秒时触发通知
-            if self._wait_notify_count > 0 and (self._wait_notify_count > 1000 or self.__get_time() - self._last_event_time > 60):
+            # 当有待通知时，根据是否存在运行中整理任务决定立即触发或进入5分钟等待窗口
+            now_ts = self.__get_time()
+            if self._wait_notify_count > 0:
+                if self.__has_running_transfers():
+                    # 若存在运行中任务：设置或延长5分钟等待窗口
+                    if self._next_notify_time == 0 or now_ts >= self._next_notify_time:
+                        self._next_notify_time = now_ts + 300
+                    # 在等待窗口期间不触发通知
+                    logger.info(f"检测到正在运行的整理任务，延迟触发至 {self._next_notify_time}")
+                    return
+                else:
+                    # 无运行中任务：若设置了等待窗口但未到期，继续等待；否则立即触发
+                    if self._next_notify_time and now_ts < self._next_notify_time:
+                        logger.info(f"等待窗口未到期（{self._next_notify_time - now_ts}s），暂不触发通知")
+                        return
+                    # 立即触发通知，重置等待窗口
+                    self._next_notify_time = 0
                 # 登录获取 access_token
                 login_url = f"{self._mh_domain}/api/v1/auth/login"
                 login_payload = {
