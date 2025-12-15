@@ -21,9 +21,9 @@ class MHNotify(_PluginBase):
     # 插件版本
     plugin_version = "0.3"
     # 插件作者
-    plugin_author = "listening"
+    plugin_author = "ListeningLTG"
     # 作者主页
-    author_url = "https://github.com/listening"
+    author_url = "https://github.com/ListeningLTG"
     # 插件配置项ID前缀
     plugin_config_prefix = "mhnotify_"
     # 加载顺序
