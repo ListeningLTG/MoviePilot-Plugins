@@ -19,7 +19,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "0.3"
+    plugin_version = "0.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -42,6 +42,8 @@ class MHNotify(_PluginBase):
     _next_notify_time = 0
     # 等待通知数量
     _wait_notify_count = 0
+    # 延迟分钟数（存在运行中整理任务时的等待窗口）
+    _wait_minutes = 5
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -50,6 +52,10 @@ class MHNotify(_PluginBase):
             self._mh_username = config.get('mh_username')
             self._mh_password = config.get('mh_password')
             self._mh_job_names = config.get('mh_job_names') or ""
+            try:
+                self._wait_minutes = int(config.get('wait_minutes') or 5)
+            except Exception:
+                self._wait_minutes = 5
 
     def get_state(self) -> bool:
         return self._enabled
@@ -207,11 +213,21 @@ class MHNotify(_PluginBase):
                                 },
                                 'content': [
                                     {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'wait_minutes',
+                                            'label': '延迟分钟数',
+                                            'type': 'number',
+                                            'placeholder': '默认 5',
+                                            'hint': '检测到仍有整理运行时，延迟等待该分钟数；等待期间如有新整理完成将滚动延长'
+                                        }
+                                    },
+                                    {
                                         'component': 'VAlert',
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '当MP整理或刮削媒体后，通知MediaHelper执行strm生成任务'
+                                            'text': '当MP整理或刮削媒体后，将通知MediaHelper执行strm生成任务（无运行任务则立即触发）'
                                         }
                                     }
                                 ]
@@ -232,7 +248,7 @@ class MHNotify(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '为了防止通知次数过于频繁，会有1-2分钟的等待，只有在此期间再无其它整理或刮削时，才会进行通知'
+                                            'text': '为避免频繁触发：若检测到仍有整理运行，将延迟等待（可配置，默认5分钟）；等待期间如有新整理完成将滚动延长，直到无运行任务再触发'
                                         }
                                     }
                                 ]
@@ -246,7 +262,8 @@ class MHNotify(_PluginBase):
             "mh_username": "",
             "mh_password": "",
             "mh_job_names": "",
-            "mh_domain": ""
+            "mh_domain": "",
+            "wait_minutes": 5
         }
 
     def get_page(self) -> List[dict]:
@@ -318,29 +335,35 @@ class MHNotify(_PluginBase):
         """
         try:
             from app.chain.transfer import TransferChain
-            jobs = TransferChain().list_jobs()
+            # 与前端一致，使用 get_queue_tasks()
+            jobs = TransferChain().get_queue_tasks()
             if not jobs:
+                logger.debug("mhnotify: 当前整理队列为空 []")
                 return False
             for job in jobs:
                 tasks = getattr(job, 'tasks', [])
                 if any((getattr(t, 'state', '') == 'running') for t in tasks):
+                    logger.debug("mhnotify: 发现 running 任务，判定为正在整理")
                     return True
+            logger.debug("mhnotify: 队列非空但无 running 任务，判定为不在整理")
             return False
-        except Exception:
-            # 检测失败时，保守起见认为存在运行中任务，避免频繁触发
-            return True
+        except Exception as e:
+            # 记录异常并返回不在整理，避免误报
+            logger.warning(f"mhnotify: 检测整理任务状态异常：{e}，按无运行处理")
+            return False
 
     def __notify_mh(self):
         try:
-            # 当有待通知时，根据是否存在运行中整理任务决定立即触发或进入5分钟等待窗口
+            # 当有待通知时，根据是否存在运行中整理任务决定立即触发或进入等待窗口
             now_ts = self.__get_time()
             if self._wait_notify_count > 0:
                 if self.__has_running_transfers():
-                    # 若存在运行中任务：设置或延长5分钟等待窗口
+                    # 若存在运行中任务：设置或延长等待窗口（单位：分钟）
+                    delay_seconds = max(int(self._wait_minutes) * 60, 0)
                     if self._next_notify_time == 0 or now_ts >= self._next_notify_time:
-                        self._next_notify_time = now_ts + 300
+                        self._next_notify_time = now_ts + delay_seconds
                     # 在等待窗口期间不触发通知
-                    logger.info(f"检测到正在运行的整理任务，延迟触发至 {self._next_notify_time}")
+                    logger.info(f"检测到正在运行的整理任务，延迟 {self._next_notify_time - now_ts}s 后再触发")
                     return
                 else:
                     # 无运行中任务：若设置了等待窗口但未到期，继续等待；否则立即触发
