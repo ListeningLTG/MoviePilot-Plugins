@@ -40,7 +40,7 @@ class MediaServerMsgModify(_PluginBase):
     # 插件图标
     plugin_icon = "mediaplay.png"
     # 插件版本
-    plugin_version = "0.4"
+    plugin_version = "0.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -676,6 +676,18 @@ class MediaServerMsgModify(_PluginBase):
                 resource_quality = self._parse_quality(file_name or "")
                 release_group = self._parse_release_group(file_name or "")
                 time_usage = self._calc_time_usage_movie(event_info, tmdb_info or {})
+                # 评分保留一位小数
+                vote_avg_val = None
+                try:
+                    va = (tmdb_info or {}).get('vote_average') if tmdb_info else None
+                    if isinstance(va, (int, float)):
+                        vote_avg_val = round(float(va), 1)
+                except Exception:
+                    vote_avg_val = None
+
+                # 单集时提供范围与数量（模板统一）
+                s_num, e_num = self._extract_season_episode(event_info)
+                range_str = f"S{s_num:02d}E{e_num:02d}" if s_num is not None and e_num is not None else None
 
                 extras = {
                     "episodes_detail": season_episode or "",
@@ -686,13 +698,18 @@ class MediaServerMsgModify(_PluginBase):
                     "overview": overview,
                     "title_year": title_year,
                     "tmdbid": getattr(event_info, 'tmdb_id', None),
-                    "vote_average": (tmdb_info or {}).get('vote_average') if tmdb_info else None,
+                    "vote_average": vote_avg_val,
                     "media_type": media_type,
                     "resource_quality": resource_quality,
                     "file_count": file_count,
                     "total_size": self._human_size(total_size_bytes),
                     "release_group": release_group,
                     "time_usage": time_usage,
+                    # 新增：单集统一的范围与数量字段
+                    "episode_count": 1 if range_str else None,
+                    "range_from": range_str,
+                    "range_to": range_str,
+                    "range_compact": range_str,
                     "err_msg": None,
                 }
 
@@ -1014,6 +1031,9 @@ class MediaServerMsgModify(_PluginBase):
             # 预计总时长
             time_usage = self._calc_time_usage_tv(events, tmdb_info or {})
 
+            # 计算范围信息
+            r_from, r_to, r_compact, ep_count = self._compute_episode_range(events)
+
             context = self._build_template_context(
                 event=first_event,
                 tmdb=tmdb_info or {},
@@ -1028,6 +1048,14 @@ class MediaServerMsgModify(_PluginBase):
                     "total_size": total_size_str,
                     "release_group": release_group,
                     "time_usage": time_usage,
+                    # 新增：范围与数量
+                    "episode_count": ep_count,
+                    "range_from": r_from,
+                    "range_to": r_to,
+                    "range_compact": r_compact,
+                    # 评分一位小数
+                    "vote_average": (round(float(tmdb_info.get('vote_average')), 1)
+                                      if tmdb_info and isinstance(tmdb_info.get('vote_average'), (int, float)) else None),
                 }
             )
             if getattr(self, "_template_debug", False):
@@ -1385,6 +1413,41 @@ class MediaServerMsgModify(_PluginBase):
             return m.group(1)
         return None
 
+    def _extract_season_episode(self, event: WebhookEventInfo) -> Tuple[Optional[int], Optional[int]]:
+        season, episode = getattr(event, 'season_id', None), getattr(event, 'episode_id', None)
+        jo = getattr(event, 'json_object', None)
+        if isinstance(jo, dict):
+            item = jo.get('Item') or jo
+            s2 = item.get('ParentIndexNumber')
+            e2 = item.get('IndexNumber')
+            season = s2 if s2 is not None else season
+            episode = e2 if e2 is not None else episode
+        try:
+            season = int(season) if season is not None else None
+        except Exception:
+            season = None
+        try:
+            episode = int(episode) if episode is not None else None
+        except Exception:
+            episode = None
+        return season, episode
+
+    def _compute_episode_range(self, events: List[WebhookEventInfo]) -> Tuple[Optional[str], Optional[str], Optional[str], int]:
+        positions: List[Tuple[int, int]] = []
+        for ev in events:
+            s, e = self._extract_season_episode(ev)
+            if s is not None and e is not None:
+                positions.append((s, e))
+        if not positions:
+            return None, None, None, 0
+        positions.sort(key=lambda x: (x[0], x[1]))
+        s_from, e_from = positions[0]
+        s_to, e_to = positions[-1]
+        from_str = f"S{s_from:02d}E{e_from:02d}"
+        to_str = f"S{s_to:02d}E{e_to:02d}"
+        compact = from_str if len(positions) == 1 else f"{from_str}-{to_str}"
+        return from_str, to_str, compact, len(positions)
+
     def _extract_file_metrics(self, event_info: WebhookEventInfo) -> Tuple[int, Optional[int]]:
         count = 1
         total_size = None
@@ -1477,7 +1540,7 @@ class MediaServerMsgModify(_PluginBase):
                 "event_name", "item_name", "item_type", "overview", "user_name", "device_name",
                 "client", "ip", "location", "time", "episodes_detail", "season_episode",
                 "count", "is_multiple", "category", "title_year", "tmdbid", "vote_average",
-                "media_type"
+                "media_type", "episode_count", "range_from", "range_to", "range_compact"
             ]
             for k in keys:
                 if k in context:
