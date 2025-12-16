@@ -40,7 +40,7 @@ class MediaServerMsgModify(_PluginBase):
     # 插件图标
     plugin_icon = "mediaplay.png"
     # 插件版本
-    plugin_version = "0.3"
+    plugin_version = "0.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -725,8 +725,38 @@ class MediaServerMsgModify(_PluginBase):
                                     except Exception as e:
                                         logger.warning(f"渲染模板文本失败，跳过: {e}")
                             rendered = "\n".join([l for l in text_lines if l])
-                    except Exception:
-                        rendered = Template(tpl).render(context)
+                    except Exception as e:
+                        logger.warning(f"JSON 模板解析失败（原始模板），将先渲染后再解析：{e}")
+                        # 先进行 Jinja 渲染，再尝试按 JSON 解析一次
+                        try:
+                            rendered_tpl = Template(tpl).render(context)
+                            parsed2 = json.loads(rendered_tpl)
+                            if isinstance(parsed2, dict):
+                                if 'title' in parsed2 and isinstance(parsed2['title'], str):
+                                    try:
+                                        message_title = Template(parsed2['title']).render(context)
+                                    except Exception as e:
+                                        logger.warning(f"渲染模板标题失败，使用默认标题: {e}")
+                                text_lines = []
+                                if 'text' in parsed2:
+                                    if isinstance(parsed2['text'], list):
+                                        for line in parsed2['text']:
+                                            if isinstance(line, str):
+                                                try:
+                                                    text_lines.append(Template(line).render(context))
+                                                except Exception as e:
+                                                    logger.warning(f"渲染模板文本行失败，跳过: {e}")
+                                    elif isinstance(parsed2['text'], str):
+                                        try:
+                                            text_lines.append(Template(parsed2['text']).render(context))
+                                        except Exception as e:
+                                            logger.warning(f"渲染模板文本失败，跳过: {e}")
+                                rendered = "\n".join([l for l in text_lines if l])
+                            else:
+                                rendered = rendered_tpl
+                        except Exception as e2:
+                            logger.warning(f"渲染后 JSON 解析失败，将按纯文本模板处理：{e2}")
+                            rendered = Template(tpl).render(context)
                 else:
                     rendered = Template(tpl).render(context)
 
@@ -1003,7 +1033,64 @@ class MediaServerMsgModify(_PluginBase):
             if getattr(self, "_template_debug", False):
                 self._log_template_context(context, where="聚合 library.new")
             try:
-                message_content = Template(self._library_new_template).render(context)
+                tpl = self._library_new_template.strip()
+                if tpl.startswith('{') and tpl.endswith('}'):
+                    try:
+                        parsed = json.loads(tpl)
+                        if isinstance(parsed, dict):
+                            if 'title' in parsed and isinstance(parsed['title'], str):
+                                try:
+                                    message_title = Template(parsed['title']).render(context)
+                                except Exception as e:
+                                    logger.warning(f"渲染模板标题失败，使用默认标题: {e}")
+                            text_lines = []
+                            if 'text' in parsed:
+                                if isinstance(parsed['text'], list):
+                                    for line in parsed['text']:
+                                        if isinstance(line, str):
+                                            try:
+                                                text_lines.append(Template(line).render(context))
+                                            except Exception as e:
+                                                logger.warning(f"渲染模板文本行失败，跳过: {e}")
+                                elif isinstance(parsed['text'], str):
+                                    try:
+                                        text_lines.append(Template(parsed['text']).render(context))
+                                    except Exception as e:
+                                        logger.warning(f"渲染模板文本失败，跳过: {e}")
+                            message_content = "\n".join([l for l in text_lines if l])
+                    except Exception as e:
+                        logger.warning(f"JSON 模板解析失败（原始模板），将先渲染后再解析：{e}")
+                        try:
+                            rendered_tpl = Template(tpl).render(context)
+                            parsed2 = json.loads(rendered_tpl)
+                            if isinstance(parsed2, dict):
+                                if 'title' in parsed2 and isinstance(parsed2['title'], str):
+                                    try:
+                                        message_title = Template(parsed2['title']).render(context)
+                                    except Exception as e:
+                                        logger.warning(f"渲染模板标题失败，使用默认标题: {e}")
+                                text_lines = []
+                                if 'text' in parsed2:
+                                    if isinstance(parsed2['text'], list):
+                                        for line in parsed2['text']:
+                                            if isinstance(line, str):
+                                                try:
+                                                    text_lines.append(Template(line).render(context))
+                                                except Exception as e:
+                                                    logger.warning(f"渲染模板文本行失败，跳过: {e}")
+                                    elif isinstance(parsed2['text'], str):
+                                        try:
+                                            text_lines.append(Template(parsed2['text']).render(context))
+                                        except Exception as e:
+                                            logger.warning(f"渲染模板文本失败，跳过: {e}")
+                                message_content = "\n".join([l for l in text_lines if l])
+                            else:
+                                message_content = rendered_tpl
+                        except Exception as e2:
+                            logger.warning(f"渲染后 JSON 解析失败，将按纯文本模板处理：{e2}")
+                            message_content = Template(tpl).render(context)
+                else:
+                    message_content = Template(tpl).render(context)
             except Exception as e:
                 logger.warning(f"渲染自定义模板失败，回退默认内容: {e}")
         logger.debug(f"构建消息内容: {message_content}")
