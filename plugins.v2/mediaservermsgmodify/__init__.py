@@ -1,6 +1,7 @@
 import re
 import threading
 import time
+import json
 from typing import Any, List, Dict, Tuple, Optional
 from jinja2 import Template
 
@@ -39,7 +40,7 @@ class MediaServerMsgModify(_PluginBase):
     # 插件图标
     plugin_icon = "mediaplay.png"
     # 插件版本
-    plugin_version = "0.1"
+    plugin_version = "0.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -107,6 +108,8 @@ class MediaServerMsgModify(_PluginBase):
             self._aggregate_time = int(config.get("aggregate_time", self.DEFAULT_AGGREGATE_TIME))
             # 可选：自定义新入库消息的 Jinja2 模板
             self._library_new_template = config.get("library_new_template") or ""
+            # 模板调试日志开关（默认开启，便于调试，可在UI中关闭）
+            self._template_debug = bool(config.get("template_debug", True))
 
 
     def service_infos(self, type_filter: Optional[str] = None) -> Optional[Dict[str, ServiceInfo]]:
@@ -322,6 +325,28 @@ class MediaServerMsgModify(_PluginBase):
                                     {
                                         'component': 'VSwitch',
                                         'props': {
+                                            'model': 'template_debug',
+                                            'label': '模板调试日志',
+                                            'hint': '开启后将在渲染前输出模板上下文（去敏）到日志，便于排查变量。'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
                                             'model': 'aggregate_enabled',
                                             'label': '启用TV剧集结入库聚合',
                                         }
@@ -403,7 +428,8 @@ class MediaServerMsgModify(_PluginBase):
             "types": [],
             "aggregate_enabled": False,
             "aggregate_time": 15,
-            "library_new_template": ""
+            "library_new_template": "",
+            "template_debug": True
         }
 
     def get_page(self) -> List[dict]:
@@ -588,17 +614,79 @@ class MediaServerMsgModify(_PluginBase):
         # 如果是新入库且配置了模板，尝试用模板渲染内容
         if event_info.event == "library.new" and getattr(self, "_library_new_template", None):
             try:
-                context = self._build_template_context(
-                    event=first_event,
-                    tmdb=tmdb_info or {},
-                    extras={
-                        "episodes_detail": episodes_detail,
-                        "count": events_count,
-                        "is_multiple": is_multiple_episodes,
-                        "category": cat,
-                        "overview": overview,
-                    }
-                )
+                # 非聚合路径，基于 event_info 构建上下文
+                tmdb_info = None
+                cat = None
+                overview = getattr(event_info, 'overview', None)
+                if getattr(event_info, 'tmdb_id', None):
+                    try:
+                        if event_info.item_type in ["TV", "SHOW"]:
+                            tmdb_info = self._get_tmdb_info(tmdb_id=event_info.tmdb_id, mtype=MediaType.TV,
+                                                            season=getattr(event_info, 'season_id', None))
+                        elif event_info.item_type == "MOV":
+                            tmdb_info = self._get_tmdb_info(tmdb_id=event_info.tmdb_id, mtype=MediaType.MOVIE)
+                    except Exception:
+                        tmdb_info = None
+                if tmdb_info:
+                    try:
+                        if tmdb_info.get('media_type') == MediaType.TV:
+                            cat = self.category.get_tv_category(tmdb_info)
+                        else:
+                            cat = self.category.get_movie_category(tmdb_info)
+                    except Exception:
+                        cat = None
+
+                # 解析标题中的年份
+                title_year = None
+                if getattr(event_info, 'item_name', None):
+                    m = re.search(r"\((\d{4})\)", event_info.item_name)
+                    if m:
+                        title_year = m.group(1)
+                if not title_year and tmdb_info:
+                    date_field = tmdb_info.get('release_date') or tmdb_info.get('first_air_date')
+                    if date_field:
+                        m2 = re.match(r"(\d{4})", str(date_field))
+                        if m2:
+                            title_year = m2.group(1)
+
+                # 季集展示（非聚合场景）
+                season_episode = None
+                s = getattr(event_info, 'season_id', None)
+                e = getattr(event_info, 'episode_id', None)
+                if s is not None and e is not None:
+                    try:
+                        season_episode = f"S{int(s):02d}E{int(e):02d}"
+                    except Exception:
+                        season_episode = None
+
+                # 类型映射
+                type_map = {"MOV": "电影", "TV": "剧集", "SHOW": "剧集", "AUD": "有声书"}
+                media_type = type_map.get(getattr(event_info, 'item_type', ''), getattr(event_info, 'item_type', ''))
+
+                # 扩展上下文（缺失字段留空）
+                extras = {
+                    "episodes_detail": season_episode or "",
+                    "season_episode": season_episode or "",
+                    "count": 1,
+                    "is_multiple": False,
+                    "category": cat,
+                    "overview": overview,
+                    "title_year": title_year,
+                    "tmdbid": getattr(event_info, 'tmdb_id', None),
+                    "vote_average": (tmdb_info or {}).get('vote_average') if tmdb_info else None,
+                    "media_type": media_type,
+                    # 可能不存在的字段占位
+                    "resource_quality": None,
+                    "file_count": None,
+                    "total_size": None,
+                    "release_group": None,
+                    "time_usage": None,
+                    "err_msg": None,
+                }
+
+                context = self._build_template_context(event=event_info, tmdb=tmdb_info or {}, extras=extras)
+                if getattr(self, "_template_debug", False):
+                    self._log_template_context(context, where="单条 library.new")
                 tpl = self._library_new_template.strip()
                 rendered = None
                 if (tpl.startswith('{') and tpl.endswith('}')):
@@ -870,6 +958,8 @@ class MediaServerMsgModify(_PluginBase):
                     "overview": overview,
                 }
             )
+            if getattr(self, "_template_debug", False):
+                self._log_template_context(context, where="聚合 library.new")
             try:
                 message_content = Template(self._library_new_template).render(context)
             except Exception as e:
@@ -1100,6 +1190,39 @@ class MediaServerMsgModify(_PluginBase):
             "time": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())),
             **(extras or {})
         }
+
+    def _log_template_context(self, context: Dict[str, Any], where: str = ""):
+        """
+        输出用于模板渲染的上下文的精简版本至日志（去敏）。
+
+        仅保留关键字段，避免输出完整 tmdb 或对象过大内容。
+        """
+        try:
+            safe = {}
+            # 直取一级字段
+            keys = [
+                "event_name", "item_name", "item_type", "overview", "user_name", "device_name",
+                "client", "ip", "location", "time", "episodes_detail", "season_episode",
+                "count", "is_multiple", "category", "title_year", "tmdbid", "vote_average",
+                "media_type"
+            ]
+            for k in keys:
+                if k in context:
+                    safe[k] = context.get(k)
+
+            # tmdb 精简
+            tmdb = context.get("tmdb") or {}
+            if isinstance(tmdb, dict):
+                safe["tmdb_summary"] = {
+                    "media_type": tmdb.get("media_type"),
+                    "vote_average": tmdb.get("vote_average"),
+                    "release_date": tmdb.get("release_date") or tmdb.get("first_air_date"),
+                    "genres": [g.get("name") if isinstance(g, dict) else g for g in (tmdb.get("genres") or [])][:5]
+                }
+
+            logger.info(f"模板上下文{(' - ' + where) if where else ''}: {json.dumps(safe, ensure_ascii=False, indent=2)}")
+        except Exception as e:
+            logger.warning(f"打印模板上下文失败: {e}")
 
     def _get_play_link(self, event_info: WebhookEventInfo) -> Optional[str]:
         """
