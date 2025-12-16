@@ -40,7 +40,7 @@ class MediaServerMsgModify(_PluginBase):
     # 插件图标
     plugin_icon = "mediaplay.png"
     # 插件版本
-    plugin_version = "0.2"
+    plugin_version = "0.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -664,6 +664,19 @@ class MediaServerMsgModify(_PluginBase):
                 media_type = type_map.get(getattr(event_info, 'item_type', ''), getattr(event_info, 'item_type', ''))
 
                 # 扩展上下文（缺失字段留空）
+                # 文件与质量信息
+                file_count, total_size_bytes = self._extract_file_metrics(event_info)
+                file_name = None
+                jo = getattr(event_info, 'json_object', None)
+                if isinstance(jo, dict):
+                    item = jo.get('Item') or jo
+                    file_name = item.get('FileName') or item.get('Name')
+                if not file_name:
+                    file_name = getattr(event_info, 'item_name', None)
+                resource_quality = self._parse_quality(file_name or "")
+                release_group = self._parse_release_group(file_name or "")
+                time_usage = self._calc_time_usage_movie(event_info, tmdb_info or {})
+
                 extras = {
                     "episodes_detail": season_episode or "",
                     "season_episode": season_episode or "",
@@ -675,12 +688,11 @@ class MediaServerMsgModify(_PluginBase):
                     "tmdbid": getattr(event_info, 'tmdb_id', None),
                     "vote_average": (tmdb_info or {}).get('vote_average') if tmdb_info else None,
                     "media_type": media_type,
-                    # 可能不存在的字段占位
-                    "resource_quality": None,
-                    "file_count": None,
-                    "total_size": None,
-                    "release_group": None,
-                    "time_usage": None,
+                    "resource_quality": resource_quality,
+                    "file_count": file_count,
+                    "total_size": self._human_size(total_size_bytes),
+                    "release_group": release_group,
+                    "time_usage": time_usage,
                     "err_msg": None,
                 }
 
@@ -947,6 +959,31 @@ class MediaServerMsgModify(_PluginBase):
 
         # 如果配置了模板，使用模板渲染内容
         if getattr(self, "_library_new_template", None):
+            # 资源与文件信息（聚合）
+            # 使用第一个事件的文件名推断质量/发布组
+            file_name = None
+            jo0 = getattr(first_event, 'json_object', None)
+            if isinstance(jo0, dict):
+                item0 = jo0.get('Item') or jo0
+                file_name = item0.get('FileName') or item0.get('Name')
+            if not file_name:
+                file_name = getattr(first_event, 'item_name', None)
+            resource_quality = self._parse_quality(file_name or "")
+            release_group = self._parse_release_group(file_name or "")
+
+            # 汇总大小
+            total_size_bytes = 0
+            any_size = False
+            for ev in events:
+                cnt_i, size_i = self._extract_file_metrics(ev)
+                if isinstance(size_i, int):
+                    total_size_bytes += size_i
+                    any_size = True
+            total_size_str = self._human_size(total_size_bytes) if any_size else None
+
+            # 预计总时长
+            time_usage = self._calc_time_usage_tv(events, tmdb_info or {})
+
             context = self._build_template_context(
                 event=first_event,
                 tmdb=tmdb_info or {},
@@ -956,6 +993,11 @@ class MediaServerMsgModify(_PluginBase):
                     "is_multiple": is_multiple_episodes,
                     "category": cat,
                     "overview": overview,
+                    "resource_quality": resource_quality,
+                    "file_count": events_count,
+                    "total_size": total_size_str,
+                    "release_group": release_group,
+                    "time_usage": time_usage,
                 }
             )
             if getattr(self, "_template_debug", False):
@@ -1191,6 +1233,150 @@ class MediaServerMsgModify(_PluginBase):
             **(extras or {})
         }
 
+    def _human_size(self, size_bytes: Optional[int]) -> Optional[str]:
+        if not isinstance(size_bytes, (int, float)) or size_bytes <= 0:
+            return None
+        units = ["B", "KB", "MB", "GB", "TB"]
+        s = float(size_bytes)
+        idx = 0
+        while s >= 1024 and idx < len(units) - 1:
+            s /= 1024.0
+            idx += 1
+        if idx == 0:
+            return f"{int(s)} {units[idx]}"
+        return f"{s:.2f} {units[idx]}"
+
+    def _parse_quality(self, name: str) -> Optional[str]:
+        if not name:
+            return None
+        n = name.lower()
+        parts = []
+        # 分辨率
+        if m := re.search(r"(2160p|1080p|720p|480p)", n):
+            parts.append(m.group(1).upper())
+        # 来源
+        if m := re.search(r"(webrip|web[-. ]?dl|bluray|remux|hdtv)", n):
+            src = m.group(1).upper().replace(" ", "").replace("-", "")
+            src = src.replace("WEBDL", "WEB-DL")
+            parts.append(src)
+        # HDR/DV
+        if re.search(r"dolby[\s_-]*vision|\bDV\b", n):
+            parts.append("DV")
+        elif re.search(r"hdr10\+?", n):
+            parts.append("HDR10+")
+        elif re.search(r"\bhdr\b", n):
+            parts.append("HDR")
+        # 视频编码
+        if re.search(r"(hevc|h\.265|h265|x265)", n):
+            parts.append("HEVC")
+        elif re.search(r"(avc|h\.264|h264|x264)", n):
+            parts.append("AVC")
+        # 音频
+        if re.search(r"(dolby[\s_-]*atmos|\batmos\b)", n):
+            parts.append("Atmos")
+        elif re.search(r"dts[- ]?hd(?:[- ]?ma)?", n):
+            parts.append("DTS-HD MA")
+        elif re.search(r"truehd", n):
+            parts.append("TrueHD")
+        elif re.search(r"e-?ac-?3|ddp|dd\+", n):
+            parts.append("EAC3")
+        elif re.search(r"\bac3\b", n):
+            parts.append("AC3")
+        elif re.search(r"\bdts\b", n):
+            parts.append("DTS")
+        elif re.search(r"\baac\b", n):
+            parts.append("AAC")
+        return " ".join(dict.fromkeys(parts)) if parts else None
+
+    def _parse_release_group(self, name: str) -> Optional[str]:
+        if not name:
+            return None
+        base = name.rsplit('.', 1)[0]
+        if m := re.search(r"[-_\.](?P<grp>[A-Za-z0-9._-]{2,})$", base):
+            return m.group("grp")
+        if m := re.search(r"[\[{(]([A-Za-z0-9._-]{2,})[\]})]", base):
+            return m.group(1)
+        return None
+
+    def _extract_file_metrics(self, event_info: WebhookEventInfo) -> Tuple[int, Optional[int]]:
+        count = 1
+        total_size = None
+        jo = getattr(event_info, 'json_object', None)
+        if isinstance(jo, dict):
+            item = jo.get('Item') or jo
+            sources = item.get('MediaSources') or jo.get('MediaSources')
+            if isinstance(sources, list) and sources:
+                count = len(sources)
+                total = 0
+                for s in sources:
+                    try:
+                        v = s.get('Size') if isinstance(s, dict) else None
+                        if isinstance(v, (int, float)):
+                            total += int(v)
+                    except Exception:
+                        continue
+                total_size = total or None
+            else:
+                sz = item.get('Size') or jo.get('Size')
+                if isinstance(sz, (int, float)) and sz > 0:
+                    total_size = int(sz)
+        return count, total_size
+
+    def _calc_time_usage_movie(self, event_info: WebhookEventInfo, tmdb: Dict[str, Any]) -> Optional[str]:
+        minutes = None
+        if tmdb and isinstance(tmdb, dict):
+            v = tmdb.get('runtime')
+            if isinstance(v, (int, float)) and v > 0:
+                minutes = int(v)
+        if minutes is None:
+            jo = getattr(event_info, 'json_object', None)
+            if isinstance(jo, dict):
+                item = jo.get('Item') or jo
+                ticks = item.get('RunTimeTicks') or jo.get('RunTimeTicks')
+                try:
+                    if ticks:
+                        seconds = float(ticks) / 10_000_000.0
+                        minutes = int(round(seconds / 60.0))
+                except Exception:
+                    pass
+        if minutes is None:
+            return None
+        h = minutes // 60
+        m = minutes % 60
+        return f"{h}小时{m}分钟" if h else f"{m}分钟"
+
+    def _calc_time_usage_tv(self, events: List[WebhookEventInfo], tmdb: Dict[str, Any]) -> Optional[str]:
+        minutes = 0
+        got = False
+        if tmdb and isinstance(tmdb, dict):
+            episodes = tmdb.get('episodes')
+            if isinstance(episodes, list) and episodes:
+                for ev in events:
+                    try:
+                        idx = int(getattr(ev, 'episode_id', 0)) - 1
+                        if 0 <= idx < len(episodes):
+                            rt = episodes[idx].get('runtime')
+                            if isinstance(rt, (int, float)) and rt > 0:
+                                minutes += int(rt)
+                                got = True
+                    except Exception:
+                        continue
+        if not got and tmdb:
+            ert = tmdb.get('episode_run_time')
+            if isinstance(ert, list) and ert:
+                try:
+                    avg = int(sum(ert) / len(ert)) if ert else 0
+                    if avg > 0:
+                        minutes = avg * len(events)
+                        got = True
+                except Exception:
+                    pass
+        if not got:
+            return None
+        h = minutes // 60
+        m = minutes % 60
+        return f"{h}小时{m}分钟" if h else f"{m}分钟"
+
     def _log_template_context(self, context: Dict[str, Any], where: str = ""):
         """
         输出用于模板渲染的上下文的精简版本至日志（去敏）。
@@ -1220,7 +1406,8 @@ class MediaServerMsgModify(_PluginBase):
                     "genres": [g.get("name") if isinstance(g, dict) else g for g in (tmdb.get("genres") or [])][:5]
                 }
 
-            logger.info(f"模板上下文{(' - ' + where) if where else ''}: {json.dumps(safe, ensure_ascii=False, indent=2)}")
+            # 使用 default=str 以处理 Enum、datetime 等不可直接序列化的类型
+            logger.info(f"模板上下文{(' - ' + where) if where else ''}: {json.dumps(safe, ensure_ascii=False, indent=2, default=str)}")
         except Exception as e:
             logger.warning(f"打印模板上下文失败: {e}")
 
