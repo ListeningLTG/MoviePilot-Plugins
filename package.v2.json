@@ -13,5 +13,17 @@
       "v0.2": "优化配置",
       "v0.1": "首次提交"
     }
+  },
+  "MediaServerMsgModify": {
+    "name": "媒体库服务器通知-修改版",
+    "description": "发送Emby/Jellyfin/Plex服务器的播放、入库等通知消息。支持自定义入库消息模板。",
+    "labels": "开发",
+    "version": "0.1",
+    "icon": "mediaservermsgmodify.png",
+    "author": "ListeningLTG",
+    "level": 1,
+    "history": {
+      "v0.1": "首次提交，基于jxxghp的媒体库服务器通知插件，添加自定义入库消息模板功能"
+    }
   }
 }
