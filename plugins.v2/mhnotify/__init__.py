@@ -21,7 +21,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "0.9"
+    plugin_version = "1.0"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -52,6 +52,18 @@ class MHNotify(_PluginBase):
     _ASSIST_PENDING_KEY = "mhnotify_assist_pending"
     # 助手：等待MP完成后删除mh订阅的监听映射（mp_sub_id -> {mh_uuid}）
     _ASSIST_WATCH_KEY = "mhnotify_assist_watch"
+    # HDHive 配置
+    _hdhive_enabled: bool = False
+    _hdhive_query_mode: str = "playwright"  # playwright/api
+    _hdhive_username: str = ""
+    _hdhive_password: str = ""
+    _hdhive_cookie: str = ""
+    _hdhive_auto_refresh: bool = False
+    _hdhive_refresh_before: int = 86400
+    # MH登录缓存
+    _mh_token: Optional[str] = None
+    _mh_token_expire_ts: int = 0
+    _mh_token_ttl_seconds: int = 600  # 默认缓存10分钟
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -66,6 +78,18 @@ class MHNotify(_PluginBase):
                 self._wait_minutes = 5
             # mh订阅辅助开关
             self._mh_assist_enabled = bool(config.get("mh_assist", False))
+
+            # HDHive 设置
+            self._hdhive_enabled = bool(config.get("hdhive_enabled", False))
+            self._hdhive_query_mode = config.get("hdhive_query_mode", "playwright") or "playwright"
+            self._hdhive_username = config.get("hdhive_username", "") or ""
+            self._hdhive_password = config.get("hdhive_password", "") or ""
+            self._hdhive_cookie = config.get("hdhive_cookie", "") or ""
+            self._hdhive_auto_refresh = bool(config.get("hdhive_auto_refresh", False))
+            try:
+                self._hdhive_refresh_before = int(config.get("hdhive_refresh_before", 86400) or 86400)
+            except Exception:
+                self._hdhive_refresh_before = 86400
 
             # 清除助手记录（运行一次）
             try:
@@ -177,6 +201,153 @@ class MHNotify(_PluginBase):
                                             'model': 'mh_assist',
                                             'label': 'mh订阅辅助（仅新订阅生效）',
                                             'hint': '开启后，新添加的订阅将默认在MP中暂停，并由插件在MH创建订阅、延时查询进度、按规则删除或恢复MP订阅；不影响已有订阅'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'text': 'HDHive资源查询：支持 Playwright/API 两种模式，获取免费 115 分享链接并自动作为自定义链接随订阅传入'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 3
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'hdhive_enabled',
+                                            'label': '启用 HDHive'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 3
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'hdhive_query_mode',
+                                            'label': 'HDHive 查询模式',
+                                            'placeholder': 'playwright 或 api'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 3
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'hdhive_username',
+                                            'label': 'HDHive 用户名'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 3
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'hdhive_password',
+                                            'label': 'HDHive 密码',
+                                            'type': 'password'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'hdhive_cookie',
+                                            'label': 'HDHive Cookie（API 模式）'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 3
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'hdhive_auto_refresh',
+                                            'label': '自动刷新 Cookie'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 3
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'hdhive_refresh_before',
+                                            'label': 'Cookie提前刷新秒数',
+                                            'type': 'number',
+                                            'placeholder': '默认 86400'
                                         }
                                     }
                                 ]
@@ -350,7 +521,14 @@ class MHNotify(_PluginBase):
             "mh_domain": "",
             "wait_minutes": 5,
             "mh_assist": False,
-            "clear_once": False
+            "clear_once": False,
+            "hdhive_enabled": False,
+            "hdhive_query_mode": "playwright",
+            "hdhive_username": "",
+            "hdhive_password": "",
+            "hdhive_cookie": "",
+            "hdhive_auto_refresh": False,
+            "hdhive_refresh_before": 86400
         }
 
     def get_page(self) -> List[dict]:
@@ -586,6 +764,17 @@ class MHNotify(_PluginBase):
             if not create_payload:
                 logger.error("mhnotify: 构建MH订阅创建参数失败")
                 return
+            # HDHive 查询自定义链接
+            try:
+                links = self.__fetch_hdhive_links(
+                    tmdb_id=create_payload.get("tmdb_id"),
+                    media_type=create_payload.get("media_type")
+                )
+                if links:
+                    create_payload["user_custom_links"] = links
+                    logger.info(f"mhnotify: HDHive 获取到 {len(links)} 个免费115链接，已加入自定义链接")
+            except Exception:
+                logger.error("mhnotify: HDHive 查询链接失败", exc_info=True)
             # 创建订阅
             resp = self.__mh_create_subscription(access_token, create_payload)
             mh_uuid = (resp or {}).get("data", {}).get("subscription_id") or (resp or {}).get("data", {}).get("task", {}).get("uuid")
@@ -611,6 +800,11 @@ class MHNotify(_PluginBase):
     def __mh_login(self) -> Optional[str]:
         """登录 MH 获取 access_token"""
         try:
+            # 使用缓存token，避免每分钟重复登录
+            now_ts = int(time.time())
+            if self._mh_token and now_ts < self._mh_token_expire_ts:
+                logger.debug("mhnotify: 使用缓存的MH access_token")
+                return self._mh_token
             logger.info(f"mhnotify: 准备登录MH，domain={self._mh_domain}, username={self._mh_username}")
             if not self._mh_domain or not self._mh_username or not self._mh_password:
                 logger.error("mhnotify: 登录MH失败，缺少域名或用户名或密码配置")
@@ -634,6 +828,10 @@ class MHNotify(_PluginBase):
             data = res.json() or {}
             token = (data.get("data") or {}).get("access_token")
             logger.info(f"mhnotify: 登录MH成功，access_token获取={'yes' if token else 'no'}")
+            if token:
+                # 写入缓存
+                self._mh_token = token
+                self._mh_token_expire_ts = now_ts + max(60, self._mh_token_ttl_seconds)
             return token
         except Exception:
             logger.error("mhnotify: 登录MH出现异常", exc_info=True)
@@ -838,88 +1036,94 @@ class MHNotify(_PluginBase):
             pending: Dict[str, dict] = self.get_data(self._ASSIST_PENDING_KEY) or {}
             if pending:
                 now_ts = int(time.time())
-                for sid, info in list(pending.items()):
-                    created_at = int(info.get("created_at") or 0)
-                    # 首次查询延迟 2 分钟
-                    if now_ts - created_at < 120:
-                        continue
-                    mh_uuid = info.get("mh_uuid")
-                    # 查询进度
+                # 收集已到查询时间的条目
+                matured_items = {sid: info for sid, info in pending.items() if now_ts - int(info.get("created_at") or 0) >= 120}
+                if matured_items:
                     token = self.__mh_login()
                     if not token:
                         logger.error("mhnotify: 登录MH失败，无法查询订阅进度")
-                        continue
-                    lst = self.__mh_list_subscriptions(token)
-                    subs = (lst.get("data") or {}).get("subscriptions") or []
-                    target = None
-                    for rec in subs:
-                        if (rec.get("uuid") or rec.get("task", {}).get("uuid")) == mh_uuid:
-                            target = rec
-                            break
-                    if not target:
-                        # 未找到，记录重试次数，超过30次则移除记录
-                        attempts = int(info.get("attempts") or 0) + 1
-                        info["attempts"] = attempts
-                        info["last_attempt"] = now_ts
-                        if attempts >= 30:
-                            logger.warning(f"mhnotify: 订阅 {mh_uuid} 未在MH列表中找到，已重试{attempts}次，移除记录")
-                            pending.pop(sid, None)
-                            self.save_data(self._ASSIST_PENDING_KEY, pending)
-                            continue
-                        else:
-                            logger.warning(f"mhnotify: 未在MH列表中找到订阅 {mh_uuid}，第{attempts}次重试，1分钟后继续")
-                            pending[str(sid)] = info
-                            self.save_data(self._ASSIST_PENDING_KEY, pending)
-                            continue
-                    mtype, saved, expected = self.__compute_progress(target)
-                    logger.info(f"mhnotify: 订阅 {mh_uuid} 进度 saved={saved}/{expected} type={mtype}")
-                    with SessionFactory() as db:
-                        subscribe = SubscribeOper(db=db).get(int(sid))
-                    if not subscribe:
-                        # MP订阅已不存在，清理并删除MH订阅
-                        if token and mh_uuid:
-                            self.__mh_delete_subscription(token, mh_uuid)
-                        pending.pop(sid, None)
-                        continue
-                    if mtype == 'movie':
-                        if expected <= 1 and saved >= 1:
-                            # 完成：删除MH，完成MP订阅
-                            self.__mh_delete_subscription(token, mh_uuid)
-                            self.__finish_mp_subscribe(subscribe)
-                            pending.pop(sid, None)
-                        else:
-                            # 未完成：恢复MP订阅并监听MP完成后删除MH
-                            with SessionFactory() as db:
-                                SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
-                            watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
-                            watch[sid] = {"mh_uuid": mh_uuid}
-                            self.save_data(self._ASSIST_WATCH_KEY, watch)
-                            pending.pop(sid, None)
                     else:
-                        # TV
-                        if expected > 0 and saved >= expected:
-                            # 完成：删除MH，完成MP订阅
-                            self.__mh_delete_subscription(token, mh_uuid)
-                            self.__finish_mp_subscribe(subscribe)
-                            pending.pop(sid, None)
-                        else:
-                            # 未完成：删除MH并启用MP订阅
-                            self.__mh_delete_subscription(token, mh_uuid)
+                        lst = self.__mh_list_subscriptions(token)
+                        subs = (lst.get("data") or {}).get("subscriptions") or []
+                        subs_map = {}
+                        for rec in subs:
+                            uid = rec.get("uuid") or rec.get("task", {}).get("uuid")
+                            if uid:
+                                subs_map[uid] = rec
+                        for sid, info in list(matured_items.items()):
+                            mh_uuid = info.get("mh_uuid")
+                            target = subs_map.get(mh_uuid)
+                            if not target:
+                                # 未找到，记录重试次数，超过30次则移除记录
+                                attempts = int(info.get("attempts") or 0) + 1
+                                info["attempts"] = attempts
+                                info["last_attempt"] = now_ts
+                                if attempts >= 30:
+                                    logger.warning(f"mhnotify: 订阅 {mh_uuid} 未在MH列表中找到，已重试{attempts}次，移除记录")
+                                    pending.pop(sid, None)
+                                    self.save_data(self._ASSIST_PENDING_KEY, pending)
+                                    continue
+                                else:
+                                    logger.warning(f"mhnotify: 未在MH列表中找到订阅 {mh_uuid}，第{attempts}次重试，1分钟后继续")
+                                    pending[str(sid)] = info
+                                    self.save_data(self._ASSIST_PENDING_KEY, pending)
+                                    continue
+                            mtype, saved, expected = self.__compute_progress(target)
+                            logger.info(f"mhnotify: 订阅 {mh_uuid} 进度 saved={saved}/{expected} type={mtype}")
                             with SessionFactory() as db:
-                                SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
-                            pending.pop(sid, None)
+                                subscribe = SubscribeOper(db=db).get(int(sid))
+                            if not subscribe:
+                                # MP订阅已不存在，清理并删除MH订阅
+                                if mh_uuid:
+                                    # 延迟获取token，仅在需要删除时登录
+                                    del_token = self.__mh_login()
+                                    if del_token:
+                                        self.__mh_delete_subscription(del_token, mh_uuid)
+                                pending.pop(sid, None)
+                                continue
+                            if mtype == 'movie':
+                                if expected <= 1 and saved >= 1:
+                                    # 完成：删除MH，完成MP订阅
+                                    if token:
+                                        self.__mh_delete_subscription(token, mh_uuid)
+                                    self.__finish_mp_subscribe(subscribe)
+                                    pending.pop(sid, None)
+                                else:
+                                    # 未完成：恢复MP订阅并监听MP完成后删除MH
+                                    with SessionFactory() as db:
+                                        SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                    watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+                                    watch[sid] = {"mh_uuid": mh_uuid}
+                                    self.save_data(self._ASSIST_WATCH_KEY, watch)
+                                    pending.pop(sid, None)
+                            else:
+                                # TV
+                                if expected > 0 and saved >= expected:
+                                    # 完成：删除MH，完成MP订阅
+                                    if token:
+                                        self.__mh_delete_subscription(token, mh_uuid)
+                                    self.__finish_mp_subscribe(subscribe)
+                                    pending.pop(sid, None)
+                                else:
+                                    # 未完成：删除MH并启用MP订阅
+                                    if token:
+                                        self.__mh_delete_subscription(token, mh_uuid)
+                                    with SessionFactory() as db:
+                                        SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                    pending.pop(sid, None)
             # 监听MP完成后删除MH
             watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
             if watch:
-                token = self.__mh_login()
                 for sid, info in list(watch.items()):
                     with SessionFactory() as db:
                         sub = SubscribeOper(db=db).get(int(sid))
                     if not sub:
                         # MP订阅已完成（被删除），删除MH并清理监听
                         mh_uuid = info.get("mh_uuid")
-                        if token and mh_uuid:
-                            self.__mh_delete_subscription(token, mh_uuid)
+                        if mh_uuid:
+                            del_token = self.__mh_login()
+                            if del_token:
+                                self.__mh_delete_subscription(del_token, mh_uuid)
                         watch.pop(sid, None)
                         self.save_data(self._ASSIST_WATCH_KEY, watch)
         except Exception as e:
@@ -1005,3 +1209,112 @@ class MHNotify(_PluginBase):
             )
         except Exception as e:
             logger.error(f"mhnotify: 完成MP订阅失败: {e}")
+
+    def __fetch_hdhive_links(self, tmdb_id: Optional[int], media_type: Optional[str]) -> List[str]:
+        """根据配置从 HDHive 查询免费115分享链接，返回 URL 列表"""
+        results: List[str] = []
+        try:
+            if not self._hdhive_enabled:
+                return results
+            if not tmdb_id:
+                logger.warning("mhnotify: 缺少 TMDB ID，无法使用 HDHive 查询")
+                return results
+            # 延迟导入 HDHive 库
+            import importlib
+            hdhive_mod = importlib.import_module('app.plugins.p115strgmsub.lib.hdhive')
+            HDHiveMediaType = getattr(hdhive_mod, 'MediaType')
+            h_type = HDHiveMediaType.MOVIE if (media_type or "movie").lower() == "movie" else HDHiveMediaType.TV
+
+            # API 模式
+            if (self._hdhive_query_mode or "playwright").lower() == "api":
+                cookie = self._hdhive_cookie or ""
+                # 自动刷新 Cookie（若开启）
+                try:
+                    if self._hdhive_auto_refresh:
+                        utils_mod = importlib.import_module('app.plugins.p115strgmsub.utils')
+                        check_valid = getattr(utils_mod, 'check_hdhive_cookie_valid', None)
+                        do_refresh = getattr(utils_mod, 'refresh_hdhive_cookie_with_playwright', None)
+                        if check_valid:
+                            is_valid, reason = check_valid(cookie, self._hdhive_refresh_before)
+                        else:
+                            is_valid, reason = (bool(cookie), 'no-check-func')
+                        if not cookie or not is_valid:
+                            logger.info(f"HDHive: Cookie 需要刷新 - {reason}")
+                            if self._hdhive_username and self._hdhive_password and do_refresh:
+                                new_cookie = do_refresh(self._hdhive_username, self._hdhive_password)
+                                if new_cookie:
+                                    cookie = new_cookie
+                                    self._hdhive_cookie = new_cookie
+                                    # 持久化更新
+                                    cfg = self.get_config()
+                                    if isinstance(cfg, dict):
+                                        cfg["hdhive_cookie"] = new_cookie
+                                        self.update_config(cfg)
+                                    logger.info("HDHive: Cookie 刷新成功并已保存到配置")
+                except Exception:
+                    logger.warning("HDHive: 自动刷新 Cookie 失败", exc_info=True)
+
+                if not cookie:
+                    logger.warning("HDHive API 模式需要有效的 Cookie")
+                    return results
+                try:
+                    proxy = getattr(settings, "PROXY", None)
+                    create_client = getattr(hdhive_mod, 'create_client')
+                    with create_client(cookie=cookie, proxy=proxy) as client:
+                        media = client.get_media_by_tmdb_id(tmdb_id, h_type)
+                        if not media:
+                            return results
+                        res = client.get_resources(media.slug, h_type, media_id=media.id)
+                        if not res or not res.success:
+                            return results
+                        for item in res.resources:
+                            if hasattr(item, 'website') and getattr(item.website, 'value', '') == '115' and getattr(item, 'is_free', False):
+                                share = client.get_share_url(item.slug)
+                                if share and share.url:
+                                    results.append(share.url)
+                except Exception:
+                    logger.error("HDHive (API) 查询失败", exc_info=True)
+                return results
+
+            # Playwright 模式
+            if not self._hdhive_username or not self._hdhive_password:
+                logger.warning("HDHive Playwright 模式需要配置用户名和密码")
+                return results
+            try:
+                import asyncio
+                proxy = getattr(settings, "PROXY", None)
+                async def async_search():
+                    create_async = getattr(hdhive_mod, 'create_async_client')
+                    async with create_async(
+                        username=self._hdhive_username,
+                        password=self._hdhive_password,
+                        cookie=self._hdhive_cookie,
+                        browser_type="chromium",
+                        headless=True,
+                        proxy=proxy
+                    ) as client:
+                        media = await client.get_media_by_tmdb_id(tmdb_id, h_type)
+                        if not media:
+                            return []
+                        res = await client.get_resources(media.slug, h_type, media_id=media.id)
+                        if not res or not res.success:
+                            return []
+                        links: List[str] = []
+                        for item in res.resources:
+                            if hasattr(item, 'website') and getattr(item.website, 'value', '') == '115' and getattr(item, 'is_free', False):
+                                share_result = await client.get_share_url_by_click(item.slug)
+                                if share_result and share_result.url:
+                                    links.append(share_result.url)
+                        return links
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    results = loop.run_until_complete(async_search())
+                finally:
+                    loop.close()
+            except Exception:
+                logger.error("HDHive (Playwright) 查询失败", exc_info=True)
+            return results
+        except Exception:
+            logger.error("mhnotify: __fetch_hdhive_links 异常", exc_info=True)
+            return []
