@@ -21,7 +21,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "0.7"
+    plugin_version = "0.8"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -755,7 +755,7 @@ class MHNotify(_PluginBase):
             headers = self.__auth_headers(access_token)
             headers.update({"Origin": self._mh_domain})
             logger.info(f"mhnotify: 删除MH订阅 DELETE {url}")
-            res = RequestUtils(headers=headers).delete(url)
+            res = RequestUtils(headers=headers).delete_res(url)
             ok = bool(res and res.status_code in (200, 204))
             if res is None:
                 logger.error("mhnotify: 删除MH订阅未返回响应")
@@ -788,7 +788,7 @@ class MHNotify(_PluginBase):
         return mtype, saved, expected_total
 
     def __assist_scheduler(self):
-        """每分钟执行：处理5分钟后的进度查询与MP完成监听"""
+        """每分钟执行：先等待2分钟进行首次查询；未查询到则每1分钟重试，直到查询到；并处理MP完成监听"""
         try:
             # 处理待检查
             pending: Dict[str, dict] = self.get_data(self._ASSIST_PENDING_KEY) or {}
@@ -796,7 +796,8 @@ class MHNotify(_PluginBase):
                 now_ts = int(time.time())
                 for sid, info in list(pending.items()):
                     created_at = int(info.get("created_at") or 0)
-                    if now_ts - created_at < 300:
+                    # 首次查询延迟 2 分钟
+                    if now_ts - created_at < 120:
                         continue
                     mh_uuid = info.get("mh_uuid")
                     # 查询进度
@@ -812,8 +813,11 @@ class MHNotify(_PluginBase):
                             target = rec
                             break
                     if not target:
-                        logger.warning(f"mhnotify: 未在MH列表中找到订阅 {mh_uuid}")
-                        pending.pop(sid, None)
+                        logger.warning(f"mhnotify: 未在MH列表中找到订阅 {mh_uuid}，1分钟后重试")
+                        # 保留待检查项，下一分钟继续重试
+                        info["last_attempt"] = now_ts
+                        pending[str(sid)] = info
+                        self.save_data(self._ASSIST_PENDING_KEY, pending)
                         continue
                     mtype, saved, expected = self.__compute_progress(target)
                     logger.info(f"mhnotify: 订阅 {mh_uuid} 进度 saved={saved}/{expected} type={mtype}")
@@ -875,6 +879,7 @@ class MHNotify(_PluginBase):
             from app.core.metainfo import MetaInfo
             from app.schemas.types import MediaType
             from app.chain.subscribe import SubscribeChain
+            from app.core.context import MediaInfo
             meta = MetaInfo(subscribe.name)
             meta.year = subscribe.year
             meta.begin_season = subscribe.season or None
@@ -882,8 +887,25 @@ class MHNotify(_PluginBase):
                 meta.type = MediaType(subscribe.type)
             except Exception:
                 pass
-            # 尝试恢复 mediainfo（若事件中有）
-            mediainfo = None
+            # 构造最小可用的 mediainfo（用于完成订阅日志与通知）
+            mediainfo = MediaInfo()
+            try:
+                # 类型映射
+                st = (subscribe.type or "").strip().lower()
+                if st in {"电影", "movie", "movies"}:
+                    mediainfo.type = MediaType.MOVIE
+                elif st in {"电视剧", "tv", "series"}:
+                    mediainfo.type = MediaType.TV
+                else:
+                    mediainfo.type = meta.type or MediaType.MOVIE
+                mediainfo.title = subscribe.name
+                mediainfo.year = subscribe.year
+                mediainfo.tmdb_id = getattr(subscribe, 'tmdbid', None)
+                mediainfo.poster_path = None
+                mediainfo.backdrop_path = None
+                mediainfo.overview = None
+            except Exception:
+                pass
             # 完成订阅
             SubscribeChain().finish_subscribe_or_not(
                 subscribe=subscribe,
