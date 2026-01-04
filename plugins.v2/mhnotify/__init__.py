@@ -4,11 +4,13 @@ from typing import List, Tuple, Dict, Any
 from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
-from app.core.event import eventmanager
+from app.core.event import eventmanager, Event
 from app.schemas.types import EventType
 from app.utils.http import RequestUtils
 from app.log import logger
 from app.plugins import _PluginBase
+from app.db import SessionFactory
+from app.db.subscribe_oper import SubscribeOper
 
 
 class MHNotify(_PluginBase):
@@ -19,7 +21,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "0.4"
+    plugin_version = "0.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -44,6 +46,10 @@ class MHNotify(_PluginBase):
     _wait_notify_count = 0
     # 延迟分钟数（存在运行中整理任务时的等待窗口）
     _wait_minutes = 5
+    # 屏蔽系统订阅开关
+    _block_system_subscribe: bool = False
+    # 记录被我们改为暂停前的原始状态
+    _ORIG_STATE_KEY = "mhnotify_block_orig_states"
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -56,6 +62,14 @@ class MHNotify(_PluginBase):
                 self._wait_minutes = int(config.get('wait_minutes') or 5)
             except Exception:
                 self._wait_minutes = 5
+            # 屏蔽系统订阅
+            new_block = bool(config.get("block_system_subscribe", False))
+            old_block = self._block_system_subscribe
+            self._block_system_subscribe = new_block
+            if new_block != old_block:
+                # 同步生效：更新所有订阅的站点与状态
+                self._update_subscribe_sites(new_block)
+                self._update_subscribe_states(new_block)
 
     def get_state(self) -> bool:
         return self._enabled
@@ -114,6 +128,28 @@ class MHNotify(_PluginBase):
                                         'props': {
                                             'model': 'enabled',
                                             'label': '启用插件',
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'block_system_subscribe',
+                                            'label': '屏蔽系统订阅（仅由插件处理）',
+                                            'hint': '开启后将把订阅状态置为暂停(S)并阻断系统搜索/刷新；关闭后恢复原状态'
                                         }
                                     }
                                 ]
@@ -263,7 +299,8 @@ class MHNotify(_PluginBase):
             "mh_password": "",
             "mh_job_names": "",
             "mh_domain": "",
-            "wait_minutes": 5
+            "wait_minutes": 5,
+            "block_system_subscribe": False
         }
 
     def get_page(self) -> List[dict]:
@@ -463,3 +500,95 @@ class MHNotify(_PluginBase):
         退出插件
         """
         pass
+
+    @eventmanager.register(EventType.SubscribeAdded)
+    def _on_subscribe_added(self, event: Event):
+        """
+        开启屏蔽系统订阅时：对新订阅立即设置 sites=[-1] 且 state='S'，并记录原状态用于关闭时恢复。
+        """
+        try:
+            if not event or not self._block_system_subscribe:
+                return
+            event_data = event.event_data or {}
+            sub_id = event_data.get("subscribe_id")
+            if not sub_id:
+                return
+            with SessionFactory() as db:
+                subscribe = SubscribeOper(db=db).get(sub_id)
+                if not subscribe:
+                    return
+                # 记录原状态
+                try:
+                    orig_states: Dict[str, str] = self.get_data(self._ORIG_STATE_KEY) or {}
+                except Exception:
+                    orig_states = {}
+                sid = str(sub_id)
+                if sid not in orig_states:
+                    orig_states[sid] = subscribe.state or "N"
+                    self.save_data(self._ORIG_STATE_KEY, orig_states)
+                # 更新站点与状态
+                payload = {"sites": [-1], "state": "S"}
+                SubscribeOper(db=db).update(sub_id, payload)
+                logger.info(f"mhnotify: 屏蔽系统订阅，已将新订阅(ID:{sub_id}) 置为 S 且 sites=[-1]")
+        except Exception as e:
+            logger.error(f"mhnotify: 处理新增订阅事件失败: {e}")
+
+    def _update_subscribe_states(self, block: bool):
+        """
+        批量调整订阅状态：开启屏蔽 => 全部置为 S 并记录原状态；关闭屏蔽 => 恢复仍为 S 的订阅到原状态。
+        """
+        try:
+            with SessionFactory() as db:
+                subscribes = SubscribeOper(db=db).list()
+                if not subscribes:
+                    return
+                try:
+                    orig_states: Dict[str, str] = self.get_data(self._ORIG_STATE_KEY) or {}
+                except Exception:
+                    orig_states = {}
+                if block:
+                    updated = 0
+                    for s in subscribes:
+                        sid = str(s.id)
+                        if sid not in orig_states:
+                            orig_states[sid] = s.state or "N"
+                        if s.state != "S":
+                            SubscribeOper(db=db).update(s.id, {"state": "S"})
+                            updated += 1
+                    if updated:
+                        logger.info(f"mhnotify: 已将 {updated} 个订阅置为暂停(S)")
+                    self.save_data(self._ORIG_STATE_KEY, orig_states)
+                else:
+                    restored = 0
+                    sub_map = {str(s.id): s for s in subscribes}
+                    for sid, prev in list((orig_states or {}).items()):
+                        sub = sub_map.get(sid)
+                        if sub and sub.state == "S":
+                            SubscribeOper(db=db).update(sub.id, {"state": prev or "R"})
+                            restored += 1
+                        # 清理映射
+                        orig_states.pop(sid, None)
+                    if restored:
+                        logger.info(f"mhnotify: 已恢复 {restored} 个订阅至原始状态")
+                    self.save_data(self._ORIG_STATE_KEY, orig_states)
+        except Exception as e:
+            logger.error(f"mhnotify: 更新订阅状态失败: {e}")
+
+    def _update_subscribe_sites(self, block: bool):
+        """
+        批量调整订阅站点字段：开启屏蔽 => sites=[-1]；关闭屏蔽 => sites=[]。
+        仅作为标记与约束，不创建站点记录。
+        """
+        try:
+            with SessionFactory() as db:
+                subscribes = SubscribeOper(db=db).list()
+                if not subscribes:
+                    return
+                sites_value = [-1] if block else []
+                updated = 0
+                for s in subscribes:
+                    SubscribeOper(db=db).update(s.id, {"sites": sites_value})
+                    updated += 1
+                logger.info(f"mhnotify: 已更新 {updated} 个订阅的 sites 字段为 {sites_value}")
+        except Exception as e:
+            logger.error(f"mhnotify: 更新订阅站点失败: {e}")
