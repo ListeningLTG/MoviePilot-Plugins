@@ -21,7 +21,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.1"
+    plugin_version = "1.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -766,11 +766,66 @@ class MHNotify(_PluginBase):
                 return
             # 读取默认配置
             defaults = self.__mh_get_defaults(access_token)
-            # 构建创建参数
-            create_payload = self.__build_mh_create_payload(subscribe, mediainfo_dict, defaults)
+            # 若为剧集，聚合同一 TMDB 的多季订阅
+            aggregate_seasons: Optional[List[int]] = None
+            try:
+                # 取 tmdb_id
+                tmdb_id = getattr(subscribe, 'tmdbid', None) or mediainfo_dict.get('tmdb_id') or mediainfo_dict.get('tmdbid')
+                # 查询 MP 内相同 tmdb 的订阅，聚合季
+                if tmdb_id:
+                    with SessionFactory() as db:
+                        all_subs = SubscribeOper(db=db).list_by_tmdbid(tmdb_id)
+                        seasons = []
+                        for s in all_subs or []:
+                            try:
+                                stype = (getattr(s, 'type', '') or '').strip()
+                                if stype in {'电视剧', 'tv', 'series'}:
+                                    seasons.append(getattr(s, 'season', None))
+                            except Exception:
+                                pass
+                        aggregate_seasons = [int(x) for x in seasons if isinstance(x, int)]
+                        if aggregate_seasons:
+                            logger.info(f"mhnotify: 检测到该剧存在多季订阅，聚合季：{aggregate_seasons}")
+            except Exception:
+                logger.warning("mhnotify: 聚合季信息失败", exc_info=True)
+            # 构建创建参数（若为TV将带入聚合季）
+            create_payload = self.__build_mh_create_payload(subscribe, mediainfo_dict, defaults, aggregate_seasons=aggregate_seasons)
             if not create_payload:
                 logger.error("mhnotify: 构建MH订阅创建参数失败")
                 return
+            # 若已存在相同 tmdb_id 的 MH 订阅，则复用或重建（以聚合季为准）
+            existing_uuid: Optional[str] = None
+            existing_selected: List[int] = []
+            try:
+                lst = self.__mh_list_subscriptions(access_token)
+                subs = (lst.get("data") or {}).get("subscriptions") or []
+                for rec in subs:
+                    params = rec.get("params") or {}
+                    if params.get("tmdb_id") == create_payload.get("tmdb_id") and (params.get("media_type") or '').lower() == (create_payload.get("media_type") or '').lower():
+                        existing_uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
+                        try:
+                            existing_selected = [int(x) for x in (params.get("selected_seasons") or [])]
+                        except Exception:
+                            existing_selected = []
+                        break
+                if existing_uuid:
+                    agg_set = set(create_payload.get("selected_seasons") or [])
+                    exist_set = set(existing_selected or [])
+                    if agg_set and agg_set != exist_set:
+                        # 需要包含更多季：优先尝试更新订阅季集合；失败则重建
+                        logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，季集合不一致，尝试更新为 {sorted(agg_set)}")
+                        upd = self.__mh_update_subscription(access_token, existing_uuid, create_payload)
+                        if upd:
+                            logger.info(f"mhnotify: 已更新现有订阅 {existing_uuid} 为聚合季 {sorted(agg_set)}")
+                        else:
+                            logger.info(f"mhnotify: 更新失败，改为重建订阅为聚合季 {sorted(agg_set)}")
+                            self.__mh_delete_subscription(access_token, existing_uuid)
+                            existing_uuid = None
+                    else:
+                        # 完全一致：直接复用
+                        logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，季集合一致，复用该订阅")
+            except Exception:
+                logger.warning("mhnotify: 检查现有MH订阅失败", exc_info=True)
             # HDHive 查询自定义链接
             try:
                 links = self.__fetch_hdhive_links(
@@ -782,15 +837,22 @@ class MHNotify(_PluginBase):
                     logger.info(f"mhnotify: HDHive 获取到 {len(links)} 个免费115链接，已加入自定义链接")
             except Exception:
                 logger.error("mhnotify: HDHive 查询链接失败", exc_info=True)
-            # 创建订阅
-            resp = self.__mh_create_subscription(access_token, create_payload)
-            mh_uuid = (resp or {}).get("data", {}).get("subscription_id") or (resp or {}).get("data", {}).get("task", {}).get("uuid")
+            # 创建订阅（或复用现有）
+            mh_uuid = None
+            if existing_uuid:
+                mh_uuid = existing_uuid
+            else:
+                resp = self.__mh_create_subscription(access_token, create_payload)
+                mh_uuid = (resp or {}).get("data", {}).get("subscription_id") or (resp or {}).get("data", {}).get("task", {}).get("uuid")
             if not mh_uuid:
                 logger.error(f"mhnotify: MH订阅创建失败：{resp}")
                 return
             # 与调度保持一致：首次查询延迟（默认2分钟）
             delay_mins = max(1, int(self._assist_initial_delay_seconds / 60))
-            logger.info(f"mhnotify: 已在MH创建订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
+            if existing_uuid:
+                logger.info(f"mhnotify: 复用现有MH订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
+            else:
+                logger.info(f"mhnotify: 已在MH创建订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
             # 记录待检查项
             pending: Dict[str, dict] = self.get_data(self._ASSIST_PENDING_KEY) or {}
             pending[str(sub_id)] = {
@@ -893,7 +955,7 @@ class MHNotify(_PluginBase):
         except Exception:
             return "movie"
 
-    def __build_mh_create_payload(self, subscribe, mediainfo_dict: Dict[str, Any], defaults: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def __build_mh_create_payload(self, subscribe, mediainfo_dict: Dict[str, Any], defaults: Dict[str, Any], aggregate_seasons: Optional[List[int]] = None) -> Optional[Dict[str, Any]]:
         try:
             data = (defaults or {}).get("data") or {}
             quality_pref = data.get("quality_preference") or "auto"
@@ -945,9 +1007,14 @@ class MHNotify(_PluginBase):
                 "user_custom_links": []
             }
             if payload["media_type"] == "tv":
-                season = _get('season') or 1
-                payload["selected_seasons"] = [season]
-                payload["episode_ranges"] = {str(season): {"min_episode": None, "max_episode": None, "exclude_episodes": [], "exclude_text": ""}}
+                # 聚合季信息：若提供 aggregate_seasons，则使用其作为订阅的季集合
+                if aggregate_seasons:
+                    # 去重并排序
+                    seasons = sorted({int(s) for s in aggregate_seasons if s is not None}) or [1]
+                else:
+                    seasons = [(mediainfo_dict.get('season') or _get('season') or 1)]
+                payload["selected_seasons"] = seasons
+                payload["episode_ranges"] = {str(s): {"min_episode": None, "max_episode": None, "exclude_episodes": [], "exclude_text": ""} for s in seasons}
             else:
                 payload["selected_seasons"] = []
             # 日志摘要
@@ -966,16 +1033,23 @@ class MHNotify(_PluginBase):
             headers = self.__auth_headers(access_token)
             headers.update({"Content-Type": "application/json;charset=UTF-8", "Origin": self._mh_domain})
             logger.info(f"mhnotify: 创建MH订阅 POST {url} media_type={payload.get('media_type')} tmdb_id={payload.get('tmdb_id')} title={str(payload.get('title'))[:50]}")
-            res = RequestUtils(headers=headers).post(url, json=payload)
-            if res is None:
-                logger.error("mhnotify: 创建MH订阅未返回响应")
-            elif res.status_code not in (200, 204):
-                logger.error(f"mhnotify: 创建MH订阅失败 status={res.status_code} body={getattr(res, 'text', '')[:200]}")
-            else:
-                data = res.json() or {}
-                uuid = (data.get("data") or {}).get("subscription_id") or (data.get("data") or {}).get("task", {}).get("uuid")
-                logger.info(f"mhnotify: 创建MH订阅成功 uuid={uuid}")
-                return data
+            # 增加显式超时与小次数重试，缓解瞬时网络抖动
+            timeout_seconds = 30
+            max_retries = 2  # 总共尝试 1+2 次
+            for attempt in range(1, max_retries + 2):
+                res = RequestUtils(headers=headers, timeout=timeout_seconds).post(url, json=payload)
+                if res is None:
+                    logger.error(f"mhnotify: 创建MH订阅未返回响应（第{attempt}次，可能超时{timeout_seconds}s）")
+                elif res.status_code not in (200, 204):
+                    logger.error(f"mhnotify: 创建MH订阅失败（第{attempt}次） status={res.status_code} body={getattr(res, 'text', '')[:200]}")
+                else:
+                    data = res.json() or {}
+                    uuid = (data.get("data") or {}).get("subscription_id") or (data.get("data") or {}).get("task", {}).get("uuid")
+                    logger.info(f"mhnotify: 创建MH订阅成功 uuid={uuid}")
+                    return data
+                # 还有重试次数时，进行指数级短暂停顿
+                if attempt <= max_retries:
+                    time.sleep(2 * attempt)
         except Exception:
             logger.error("mhnotify: 创建MH订阅异常", exc_info=True)
             pass
@@ -1016,6 +1090,35 @@ class MHNotify(_PluginBase):
         except Exception:
             logger.error("mhnotify: 删除MH订阅异常", exc_info=True)
             return False
+
+    def __mh_update_subscription(self, access_token: str, uuid: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """更新MH订阅（修改季集合等参数）
+        兼容示例：PUT /api/v1/subscription/{uuid}，body 包含 name/cron/params
+        params 中包含 selected_seasons 与 episode_ranges 以及其他字段
+        """
+        try:
+            url = f"{self._mh_domain}/api/v1/subscription/{uuid}"
+            headers = self.__auth_headers(access_token)
+            headers.update({"Content-Type": "application/json;charset=UTF-8", "Origin": self._mh_domain})
+            # 组装更新体：尽量复用创建参数作为 params，确保字段完整
+            update_body = {
+                "name": f"[订阅] {payload.get('title')}",
+                "cron": payload.get("cron") or "0 */6 * * *",
+                "params": payload
+            }
+            logger.info(f"mhnotify: 更新MH订阅 PUT {url} seasons={payload.get('selected_seasons')}")
+            res = RequestUtils(headers=headers, timeout=30).put_res(url, json=update_body)
+            if res is None:
+                logger.error("mhnotify: 更新MH订阅未返回响应")
+            elif res.status_code not in (200, 204):
+                logger.error(f"mhnotify: 更新MH订阅失败 status={res.status_code} body={getattr(res, 'text', '')[:200]}")
+            else:
+                data = res.json() or {}
+                logger.info("mhnotify: 更新MH订阅成功")
+                return data
+        except Exception:
+            logger.error("mhnotify: 更新MH订阅异常", exc_info=True)
+        return {}
 
     def __compute_progress(self, sub_rec: Dict[str, Any]) -> Tuple[str, int, int]:
         """返回 (media_type, saved, expected_total)"""
