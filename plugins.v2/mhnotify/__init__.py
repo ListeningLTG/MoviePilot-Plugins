@@ -21,7 +21,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.3"
+    plugin_version = "1.3.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -749,6 +749,13 @@ class MHNotify(_PluginBase):
             if not event or not self._mh_assist_enabled:
                 return
             event_data = event.event_data or {}
+            try:
+                mid = (event_data.get("mediainfo") or {}).get("tmdb_id") or (event_data.get("mediainfo") or {}).get("tmdbid")
+                mtitle = (event_data.get("mediainfo") or {}).get("title") or (event_data.get("mediainfo") or {}).get("name")
+                mseason = (event_data.get("mediainfo") or {}).get("season")
+                logger.info(f"mhnotify: SubscribeAdded 事件: sub_id={event_data.get('subscribe_id')} tmdb_id={mid} title={mtitle} event.season={mseason}")
+            except Exception:
+                pass
             sub_id = event_data.get("subscribe_id")
             mediainfo_dict = event_data.get("mediainfo") or {}
             if not sub_id:
@@ -1021,6 +1028,7 @@ class MHNotify(_PluginBase):
                 "user_custom_links": []
             }
             if payload["media_type"] == "tv":
+                logger.info(f"mhnotify: 解析季信息: event.season={mediainfo_dict.get('season')} subscribe.season={_get('season')}")
                 # 聚合季信息：若提供 aggregate_seasons，则使用其作为订阅的季集合
                 if aggregate_seasons:
                     # 去重并排序
@@ -1067,7 +1075,32 @@ class MHNotify(_PluginBase):
                 if res is None:
                     logger.error(f"mhnotify: 创建MH订阅未返回响应（第{attempt}次，可能超时{timeout_seconds}s）")
                 elif res.status_code not in (200, 204):
-                    logger.error(f"mhnotify: 创建MH订阅失败（第{attempt}次） status={res.status_code} body={getattr(res, 'text', '')[:200]}")
+                    body_text = getattr(res, 'text', '')
+                    logger.error(f"mhnotify: 创建MH订阅失败（第{attempt}次） status={res.status_code} body={body_text[:200]}")
+                    # 如果已存在相同配置的订阅，尝试查询并复用
+                    try:
+                        if res.status_code == 400 and ('已存在相同配置' in body_text or 'already exists' in body_text.lower()):
+                            lst = self.__mh_list_subscriptions(access_token)
+                            subs = (lst.get("data") or {}).get("subscriptions") or []
+                            cand_uuid = None
+                            want_tmdb = payload.get('tmdb_id')
+                            want_type = (payload.get('media_type') or '').lower()
+                            want_seasons = set(payload.get('selected_seasons') or [])
+                            for rec in subs:
+                                params = rec.get('params') or {}
+                                if params.get('tmdb_id') == want_tmdb and (params.get('media_type') or '').lower() == want_type:
+                                    try:
+                                        cur_seasons = set(int(x) for x in (params.get('selected_seasons') or []))
+                                    except Exception:
+                                        cur_seasons = set()
+                                    if not want_seasons or cur_seasons == want_seasons:
+                                        cand_uuid = rec.get('uuid') or rec.get('task', {}).get('uuid')
+                                        break
+                            if cand_uuid:
+                                logger.info(f"mhnotify: 复用已存在的MH订阅 uuid={cand_uuid}")
+                                return {"data": {"subscription_id": cand_uuid, "task": {"uuid": cand_uuid}}}
+                    except Exception:
+                        logger.warning("mhnotify: 检索已存在的MH订阅失败", exc_info=True)
                 else:
                     data = res.json() or {}
                     uuid = (data.get("data") or {}).get("subscription_id") or (data.get("data") or {}).get("task", {}).get("uuid")
