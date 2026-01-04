@@ -1,6 +1,6 @@
 import time
 
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
@@ -15,13 +15,13 @@ from app.db.subscribe_oper import SubscribeOper
 
 class MHNotify(_PluginBase):
     # 插件名称
-    plugin_name = "MediaHelper通知"
+    plugin_name = "MediaHelper增强"
     # 插件描述
-    plugin_desc = "整理完媒体后，通知MediaHelper执行strm生成任务"
+    plugin_desc = "整理完媒体后，通知MediaHelper执行strm生成任务；并提供mh订阅辅助"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "0.5"
+    plugin_version = "0.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -46,10 +46,12 @@ class MHNotify(_PluginBase):
     _wait_notify_count = 0
     # 延迟分钟数（存在运行中整理任务时的等待窗口）
     _wait_minutes = 5
-    # 屏蔽系统订阅开关
-    _block_system_subscribe: bool = False
-    # 记录被我们改为暂停前的原始状态
-    _ORIG_STATE_KEY = "mhnotify_block_orig_states"
+    # mh订阅辅助开关
+    _mh_assist_enabled: bool = False
+    # 助手：待检查的mh订阅映射（mp_sub_id -> {mh_uuid, created_at, type}）
+    _ASSIST_PENDING_KEY = "mhnotify_assist_pending"
+    # 助手：等待MP完成后删除mh订阅的监听映射（mp_sub_id -> {mh_uuid}）
+    _ASSIST_WATCH_KEY = "mhnotify_assist_watch"
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -62,14 +64,8 @@ class MHNotify(_PluginBase):
                 self._wait_minutes = int(config.get('wait_minutes') or 5)
             except Exception:
                 self._wait_minutes = 5
-            # 屏蔽系统订阅
-            new_block = bool(config.get("block_system_subscribe", False))
-            old_block = self._block_system_subscribe
-            self._block_system_subscribe = new_block
-            if new_block != old_block:
-                # 同步生效：更新所有订阅的站点与状态
-                self._update_subscribe_sites(new_block)
-                self._update_subscribe_states(new_block)
+            # mh订阅辅助开关
+            self._mh_assist_enabled = bool(config.get("mh_assist", False))
 
     def get_state(self) -> bool:
         return self._enabled
@@ -85,15 +81,25 @@ class MHNotify(_PluginBase):
             "kwargs": {} # 定时器参数
         }]
         """
+        services = []
         if self._enabled:
-            return [{
+            services.append({
                 "id": "MHNotify",
                 "name": "MediaHelper通知",
                 "trigger": CronTrigger.from_crontab("* * * * *"),
                 "func": self.__notify_mh,
                 "kwargs": {}
-            }]
-        return []
+            })
+        # mh订阅辅助调度
+        if self._mh_assist_enabled:
+            services.append({
+                "id": "MHAssist",
+                "name": "mh订阅辅助",
+                "trigger": CronTrigger.from_crontab("* * * * *"),
+                "func": self.__assist_scheduler,
+                "kwargs": {}
+            })
+        return services
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
@@ -147,9 +153,9 @@ class MHNotify(_PluginBase):
                                     {
                                         'component': 'VSwitch',
                                         'props': {
-                                            'model': 'block_system_subscribe',
-                                            'label': '屏蔽系统订阅（仅由插件处理）',
-                                            'hint': '开启后将把订阅状态置为暂停(S)并阻断系统搜索/刷新；关闭后恢复原状态'
+                                            'model': 'mh_assist',
+                                            'label': 'mh订阅辅助（仅新订阅生效）',
+                                            'hint': '开启后，新添加的订阅将默认在MP中暂停，并由插件在MH创建订阅、延时查询进度、按规则删除或恢复MP订阅；不影响已有订阅'
                                         }
                                     }
                                 ]
@@ -300,7 +306,7 @@ class MHNotify(_PluginBase):
             "mh_job_names": "",
             "mh_domain": "",
             "wait_minutes": 5,
-            "block_system_subscribe": False
+            "mh_assist": False
         }
 
     def get_page(self) -> List[dict]:
@@ -504,91 +510,305 @@ class MHNotify(_PluginBase):
     @eventmanager.register(EventType.SubscribeAdded)
     def _on_subscribe_added(self, event: Event):
         """
-        开启屏蔽系统订阅时：对新订阅立即设置 sites=[-1] 且 state='S'，并记录原状态用于关闭时恢复。
+        mh订阅辅助：仅对新订阅生效
+        - 暂停该订阅（state='S'，不改动已有订阅）
+        - 登录MH并读取默认配置
+        - 按媒体类型在MH创建订阅
+        - 记录mh_uuid并在5分钟后查询进度，按规则处理（删除或恢复MP订阅）
         """
         try:
-            if not event or not self._block_system_subscribe:
+            if not event or not self._mh_assist_enabled:
                 return
             event_data = event.event_data or {}
             sub_id = event_data.get("subscribe_id")
+            mediainfo_dict = event_data.get("mediainfo") or {}
             if not sub_id:
                 return
+            # 暂停该订阅，仅针对新订阅
             with SessionFactory() as db:
                 subscribe = SubscribeOper(db=db).get(sub_id)
                 if not subscribe:
                     return
-                # 记录原状态
-                try:
-                    orig_states: Dict[str, str] = self.get_data(self._ORIG_STATE_KEY) or {}
-                except Exception:
-                    orig_states = {}
-                sid = str(sub_id)
-                if sid not in orig_states:
-                    orig_states[sid] = subscribe.state or "N"
-                    self.save_data(self._ORIG_STATE_KEY, orig_states)
-                # 更新站点与状态
-                payload = {"sites": [-1], "state": "S"}
-                SubscribeOper(db=db).update(sub_id, payload)
-                logger.info(f"mhnotify: 屏蔽系统订阅，已将新订阅(ID:{sub_id}) 置为 S 且 sites=[-1]")
+                SubscribeOper(db=db).update(sub_id, {"state": "S", "sites": [-1]})
+            # 登录 MH 拿 token
+            access_token = self.__mh_login()
+            if not access_token:
+                logger.error("mhnotify: 登录MediaHelper失败，无法创建订阅")
+                return
+            # 读取默认配置
+            defaults = self.__mh_get_defaults(access_token)
+            # 构建创建参数
+            create_payload = self.__build_mh_create_payload(subscribe, mediainfo_dict, defaults)
+            if not create_payload:
+                logger.error("mhnotify: 构建MH订阅创建参数失败")
+                return
+            # 创建订阅
+            resp = self.__mh_create_subscription(access_token, create_payload)
+            mh_uuid = (resp or {}).get("data", {}).get("subscription_id") or (resp or {}).get("data", {}).get("task", {}).get("uuid")
+            if not mh_uuid:
+                logger.error(f"mhnotify: MH订阅创建失败：{resp}")
+                return
+            logger.info(f"mhnotify: 已在MH创建订阅，uuid={mh_uuid}；5分钟后查询进度")
+            # 记录待检查项
+            pending: Dict[str, dict] = self.get_data(self._ASSIST_PENDING_KEY) or {}
+            pending[str(sub_id)] = {
+                "mh_uuid": mh_uuid,
+                "created_at": int(time.time()),
+                "type": (create_payload.get("media_type") or mediainfo_dict.get("type") or "movie")
+            }
+            self.save_data(self._ASSIST_PENDING_KEY, pending)
         except Exception as e:
             logger.error(f"mhnotify: 处理新增订阅事件失败: {e}")
 
-    def _update_subscribe_states(self, block: bool):
-        """
-        批量调整订阅状态：开启屏蔽 => 全部置为 S 并记录原状态；关闭屏蔽 => 恢复仍为 S 的订阅到原状态。
-        """
-        try:
-            with SessionFactory() as db:
-                subscribes = SubscribeOper(db=db).list()
-                if not subscribes:
-                    return
-                try:
-                    orig_states: Dict[str, str] = self.get_data(self._ORIG_STATE_KEY) or {}
-                except Exception:
-                    orig_states = {}
-                if block:
-                    updated = 0
-                    for s in subscribes:
-                        sid = str(s.id)
-                        if sid not in orig_states:
-                            orig_states[sid] = s.state or "N"
-                        if s.state != "S":
-                            SubscribeOper(db=db).update(s.id, {"state": "S"})
-                            updated += 1
-                    if updated:
-                        logger.info(f"mhnotify: 已将 {updated} 个订阅置为暂停(S)")
-                    self.save_data(self._ORIG_STATE_KEY, orig_states)
-                else:
-                    restored = 0
-                    sub_map = {str(s.id): s for s in subscribes}
-                    for sid, prev in list((orig_states or {}).items()):
-                        sub = sub_map.get(sid)
-                        if sub and sub.state == "S":
-                            SubscribeOper(db=db).update(sub.id, {"state": prev or "R"})
-                            restored += 1
-                        # 清理映射
-                        orig_states.pop(sid, None)
-                    if restored:
-                        logger.info(f"mhnotify: 已恢复 {restored} 个订阅至原始状态")
-                    self.save_data(self._ORIG_STATE_KEY, orig_states)
-        except Exception as e:
-            logger.error(f"mhnotify: 更新订阅状态失败: {e}")
+    # 旧屏蔽逻辑移除
 
-    def _update_subscribe_sites(self, block: bool):
-        """
-        批量调整订阅站点字段：开启屏蔽 => sites=[-1]；关闭屏蔽 => sites=[]。
-        仅作为标记与约束，不创建站点记录。
-        """
+    # 旧屏蔽逻辑移除
+
+    def __mh_login(self) -> Optional[str]:
+        """登录 MH 获取 access_token"""
         try:
-            with SessionFactory() as db:
-                subscribes = SubscribeOper(db=db).list()
-                if not subscribes:
-                    return
-                sites_value = [-1] if block else []
-                updated = 0
-                for s in subscribes:
-                    SubscribeOper(db=db).update(s.id, {"sites": sites_value})
-                    updated += 1
-                logger.info(f"mhnotify: 已更新 {updated} 个订阅的 sites 字段为 {sites_value}")
+            if not self._mh_domain or not self._mh_username or not self._mh_password:
+                return None
+            login_url = f"{self._mh_domain}/api/v1/auth/login"
+            payload = {"username": self._mh_username, "password": self._mh_password}
+            headers = {
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json;charset=UTF-8",
+                "Origin": self._mh_domain,
+                "Accept-Language": "zh-CN",
+                "User-Agent": "MoviePilot/Plugin MHNotify"
+            }
+            res = RequestUtils(headers=headers).post(login_url, json=payload)
+            if not res or res.status_code != 200:
+                return None
+            data = res.json() or {}
+            return (data.get("data") or {}).get("access_token")
+        except Exception:
+            return None
+
+    def __auth_headers(self, access_token: str) -> Dict[str, str]:
+        return {
+            "Accept": "application/json, text/plain, */*",
+            "Authorization": f"Bearer {access_token}",
+            "User-Agent": "MoviePilot/Plugin MHNotify",
+            "Accept-Language": "zh-CN"
+        }
+
+    def __mh_get_defaults(self, access_token: str) -> Dict[str, Any]:
+        try:
+            url = f"{self._mh_domain}/api/v1/subscription/config/defaults"
+            res = RequestUtils(headers=self.__auth_headers(access_token)).get_res(url)
+            if res and res.status_code == 200:
+                return res.json() or {}
+        except Exception:
+            pass
+        return {}
+
+    def __build_mh_create_payload(self, subscribe, mediainfo_dict: Dict[str, Any], defaults: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            data = (defaults or {}).get("data") or {}
+            quality_pref = data.get("quality_preference") or "auto"
+            target_dir = data.get("target_directory") or "/影视"
+            cron = data.get("cron") or "0 */6 * * *"
+            cloud_type = data.get("cloud_type") or "drive115"
+            account_identifier = data.get("account_identifier") or ""
+            # 媒体信息
+            tmdb_id = getattr(subscribe, 'tmdbid', None) or mediainfo_dict.get('tmdb_id') or mediainfo_dict.get('tmdbid')
+            title = getattr(subscribe, 'name', None) or mediainfo_dict.get('title')
+            mtype = (getattr(subscribe, 'type', None) or mediainfo_dict.get('type') or 'movie').lower()
+            release_date = mediainfo_dict.get('release_date')
+            overview = mediainfo_dict.get('overview')
+            poster_path = mediainfo_dict.get('poster_path')
+            vote_average = mediainfo_dict.get('vote_average')
+            search_keywords = getattr(subscribe, 'keyword', None) or title
+            payload: Dict[str, Any] = {
+                "tmdb_id": tmdb_id,
+                "title": title,
+                "original_title": mediainfo_dict.get('original_title'),
+                "media_type": "movie" if mtype == 'movie' else "tv",
+                "release_date": release_date,
+                "overview": overview,
+                "poster_path": poster_path,
+                "vote_average": vote_average,
+                "search_keywords": search_keywords,
+                "quality_preference": quality_pref,
+                "target_directory": target_dir,
+                "target_dir_id": "",
+                "target_path": "",
+                "cron": cron,
+                "cloud_type": cloud_type,
+                "account_identifier": account_identifier,
+                "custom_name": title,
+                "user_custom_links": []
+            }
+            if payload["media_type"] == "tv":
+                season = getattr(subscribe, 'season', None) or 1
+                payload["selected_seasons"] = [season]
+                payload["episode_ranges"] = {str(season): {"min_episode": None, "max_episode": None, "exclude_episodes": [], "exclude_text": ""}}
+            else:
+                payload["selected_seasons"] = []
+            return payload
+        except Exception:
+            return None
+
+    def __mh_create_subscription(self, access_token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            url = f"{self._mh_domain}/api/v1/subscription/create"
+            headers = self.__auth_headers(access_token)
+            headers.update({"Content-Type": "application/json;charset=UTF-8", "Origin": self._mh_domain})
+            res = RequestUtils(headers=headers).post(url, json=payload)
+            if res and res.status_code in (200, 204):
+                return res.json() or {}
+        except Exception:
+            pass
+        return {}
+
+    def __mh_list_subscriptions(self, access_token: str) -> Dict[str, Any]:
+        try:
+            url = f"{self._mh_domain}/api/v1/subscription/list?page=1&page_size=2000"
+            res = RequestUtils(headers=self.__auth_headers(access_token)).get_res(url)
+            if res and res.status_code == 200:
+                return res.json() or {}
+        except Exception:
+            pass
+        return {}
+
+    def __mh_delete_subscription(self, access_token: str, uuid: str) -> bool:
+        try:
+            url = f"{self._mh_domain}/api/v1/subscription/{uuid}"
+            headers = self.__auth_headers(access_token)
+            headers.update({"Origin": self._mh_domain})
+            res = RequestUtils(headers=headers).delete(url)
+            return bool(res and res.status_code in (200, 204))
+        except Exception:
+            return False
+
+    def __compute_progress(self, sub_rec: Dict[str, Any]) -> Tuple[str, int, int]:
+        """返回 (media_type, saved, expected_total)"""
+        params = (sub_rec or {}).get("params") or {}
+        mtype = (params.get("media_type") or (sub_rec.get("subscription_info") or {}).get("media_type") or "movie").lower()
+        saved = int(params.get("saved_resources") or (sub_rec.get("params") or {}).get("saved_resources") or (sub_rec.get("saved_resources") if isinstance(sub_rec.get("saved_resources"), int) else 0))
+        # episodes_count 在 episodes[0].episodes_count
+        expected_total = 1 if mtype == 'movie' else 0
+        try:
+            episodes = (sub_rec.get("episodes") or [])
+            if episodes:
+                counts = (episodes[0] or {}).get("episodes_count") or {}
+                if mtype == 'tv':
+                    for s in counts.values():
+                        expected_total += int(s.get("count") or 0)
+                else:
+                    # movie: 如果存在也按1处理
+                    expected_total = 1
+        except Exception:
+            pass
+        return mtype, saved, expected_total
+
+    def __assist_scheduler(self):
+        """每分钟执行：处理5分钟后的进度查询与MP完成监听"""
+        try:
+            # 处理待检查
+            pending: Dict[str, dict] = self.get_data(self._ASSIST_PENDING_KEY) or {}
+            if pending:
+                now_ts = int(time.time())
+                for sid, info in list(pending.items()):
+                    created_at = int(info.get("created_at") or 0)
+                    if now_ts - created_at < 300:
+                        continue
+                    mh_uuid = info.get("mh_uuid")
+                    # 查询进度
+                    token = self.__mh_login()
+                    if not token:
+                        logger.error("mhnotify: 登录MH失败，无法查询订阅进度")
+                        continue
+                    lst = self.__mh_list_subscriptions(token)
+                    subs = (lst.get("data") or {}).get("subscriptions") or []
+                    target = None
+                    for rec in subs:
+                        if (rec.get("uuid") or rec.get("task", {}).get("uuid")) == mh_uuid:
+                            target = rec
+                            break
+                    if not target:
+                        logger.warning(f"mhnotify: 未在MH列表中找到订阅 {mh_uuid}")
+                        pending.pop(sid, None)
+                        continue
+                    mtype, saved, expected = self.__compute_progress(target)
+                    logger.info(f"mhnotify: 订阅 {mh_uuid} 进度 saved={saved}/{expected} type={mtype}")
+                    with SessionFactory() as db:
+                        subscribe = SubscribeOper(db=db).get(int(sid))
+                    if not subscribe:
+                        # MP订阅已不存在，清理并删除MH订阅
+                        if token and mh_uuid:
+                            self.__mh_delete_subscription(token, mh_uuid)
+                        pending.pop(sid, None)
+                        continue
+                    if mtype == 'movie':
+                        if expected <= 1 and saved >= 1:
+                            # 完成：删除MH，完成MP订阅
+                            self.__mh_delete_subscription(token, mh_uuid)
+                            self.__finish_mp_subscribe(subscribe)
+                            pending.pop(sid, None)
+                        else:
+                            # 未完成：恢复MP订阅并监听MP完成后删除MH
+                            with SessionFactory() as db:
+                                SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                            watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+                            watch[sid] = {"mh_uuid": mh_uuid}
+                            self.save_data(self._ASSIST_WATCH_KEY, watch)
+                            pending.pop(sid, None)
+                    else:
+                        # TV
+                        if expected > 0 and saved >= expected:
+                            # 完成：删除MH，完成MP订阅
+                            self.__mh_delete_subscription(token, mh_uuid)
+                            self.__finish_mp_subscribe(subscribe)
+                            pending.pop(sid, None)
+                        else:
+                            # 未完成：删除MH并启用MP订阅
+                            self.__mh_delete_subscription(token, mh_uuid)
+                            with SessionFactory() as db:
+                                SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                            pending.pop(sid, None)
+            # 监听MP完成后删除MH
+            watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+            if watch:
+                token = self.__mh_login()
+                for sid, info in list(watch.items()):
+                    with SessionFactory() as db:
+                        sub = SubscribeOper(db=db).get(int(sid))
+                    if not sub:
+                        # MP订阅已完成（被删除），删除MH并清理监听
+                        mh_uuid = info.get("mh_uuid")
+                        if token and mh_uuid:
+                            self.__mh_delete_subscription(token, mh_uuid)
+                        watch.pop(sid, None)
+                        self.save_data(self._ASSIST_WATCH_KEY, watch)
         except Exception as e:
-            logger.error(f"mhnotify: 更新订阅站点失败: {e}")
+            logger.error(f"mhnotify: 助手调度异常: {e}")
+
+    def __finish_mp_subscribe(self, subscribe):
+        try:
+            # 生成元数据
+            from app.core.metainfo import MetaInfo
+            from app.schemas.types import MediaType
+            from app.chain.subscribe import SubscribeChain
+            meta = MetaInfo(subscribe.name)
+            meta.year = subscribe.year
+            meta.begin_season = subscribe.season or None
+            try:
+                meta.type = MediaType(subscribe.type)
+            except Exception:
+                pass
+            # 尝试恢复 mediainfo（若事件中有）
+            mediainfo = None
+            # 完成订阅
+            SubscribeChain().finish_subscribe_or_not(
+                subscribe=subscribe,
+                meta=meta,
+                mediainfo=mediainfo,
+                downloads=None,
+                lefts={},
+                force=True
+            )
+        except Exception as e:
+            logger.error(f"mhnotify: 完成MP订阅失败: {e}")
