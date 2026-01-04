@@ -21,7 +21,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.2"
+    plugin_version = "1.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -773,19 +773,32 @@ class MHNotify(_PluginBase):
                 tmdb_id = getattr(subscribe, 'tmdbid', None) or mediainfo_dict.get('tmdb_id') or mediainfo_dict.get('tmdbid')
                 # 查询 MP 内相同 tmdb 的订阅，聚合季
                 if tmdb_id:
+                    logger.info(f"mhnotify: 聚合季开始，tmdb_id={tmdb_id}")
                     with SessionFactory() as db:
                         all_subs = SubscribeOper(db=db).list_by_tmdbid(tmdb_id)
+                        logger.info(f"mhnotify: MP内同tmdb订阅数={len(all_subs or [])}")
                         seasons = []
                         for s in all_subs or []:
                             try:
                                 stype = (getattr(s, 'type', '') or '').strip()
-                                if stype in {'电视剧', 'tv', 'series'}:
+                                stype_lower = (stype or '').lower()
+                                if stype_lower == 'tv' or stype in {'电视剧'}:
                                     seasons.append(getattr(s, 'season', None))
+                                    logger.info(f"mhnotify: 订阅聚合候选 id={getattr(s,'id',None)} type={stype} season={getattr(s,'season',None)}")
                             except Exception:
                                 pass
-                        aggregate_seasons = [int(x) for x in seasons if isinstance(x, int)]
+                        # 转换季为整数（支持字符串数字）
+                        aggregate_seasons = []
+                        for x in seasons:
+                            if isinstance(x, int):
+                                aggregate_seasons.append(x)
+                            elif isinstance(x, str) and x.isdigit():
+                                aggregate_seasons.append(int(x))
+                        logger.info(f"mhnotify: 聚合季（转换后）={aggregate_seasons}")
                         if aggregate_seasons:
                             logger.info(f"mhnotify: 检测到该剧存在多季订阅，聚合季：{aggregate_seasons}")
+                        else:
+                            logger.info("mhnotify: 未聚合到季信息，将回退使用事件或订阅中的季")
             except Exception:
                 logger.warning("mhnotify: 聚合季信息失败", exc_info=True)
             # 构建创建参数（若为TV将带入聚合季）
@@ -807,6 +820,7 @@ class MHNotify(_PluginBase):
                             existing_selected = [int(x) for x in (params.get("selected_seasons") or [])]
                         except Exception:
                             existing_selected = []
+                        logger.info(f"mhnotify: 现有MH订阅命中 tmdb_id={params.get('tmdb_id')} uuid={existing_uuid} seasons={existing_selected}")
                         break
                 if existing_uuid:
                     agg_set = set(create_payload.get("selected_seasons") or [])
@@ -1011,10 +1025,22 @@ class MHNotify(_PluginBase):
                 if aggregate_seasons:
                     # 去重并排序
                     seasons = sorted({int(s) for s in aggregate_seasons if s is not None}) or [1]
+                    src = "聚合"
                 else:
-                    seasons = [(mediainfo_dict.get('season') or _get('season') or 1)]
+                    # 从事件或订阅中解析季号（支持字符串数字）
+                    raw_season = mediainfo_dict.get('season') or _get('season')
+                    def _to_int(v):
+                        if isinstance(v, int):
+                            return v
+                        if isinstance(v, str) and v.isdigit():
+                            return int(v)
+                        return None
+                    season_num = _to_int(raw_season) or 1
+                    seasons = [season_num]
+                    src = "事件/订阅或默认1"
                 payload["selected_seasons"] = seasons
                 payload["episode_ranges"] = {str(s): {"min_episode": None, "max_episode": None, "exclude_episodes": [], "exclude_text": ""} for s in seasons}
+                logger.info(f"mhnotify: TV订阅季选定: {seasons}; 来源={src}")
             else:
                 payload["selected_seasons"] = []
             # 日志摘要
