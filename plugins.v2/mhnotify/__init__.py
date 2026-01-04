@@ -21,7 +21,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "0.8"
+    plugin_version = "0.9"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -67,6 +67,18 @@ class MHNotify(_PluginBase):
             # mh订阅辅助开关
             self._mh_assist_enabled = bool(config.get("mh_assist", False))
 
+            # 清除助手记录（运行一次）
+            try:
+                if bool(config.get("clear_once", False)):
+                    logger.info("mhnotify: 检测到清除助手记录（运行一次）开关已开启，开始清理...")
+                    self._clear_all_records()
+                    # 复位为关闭，并更新配置
+                    config["clear_once"] = False
+                    self.update_config(config)
+                    logger.info("mhnotify: 助手记录清理完成，已自动复位为关闭")
+            except Exception:
+                logger.error("mhnotify: 执行清理助手记录失败", exc_info=True)
+
     def get_state(self) -> bool:
         return self._enabled
 
@@ -103,7 +115,16 @@ class MHNotify(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        pass
+        """定义远程控制命令"""
+        return [{
+            "cmd": "/mhnotify_clear",
+            "event": EventType.PluginAction,
+            "desc": "清除订阅记录（移除脏数据）",
+            "category": "维护",
+            "data": {
+                "action": "mhnotify_clear"
+            }
+        }]
 
     def get_api(self) -> List[Dict[str, Any]]:
         # 不需要前端即时API
@@ -156,6 +177,28 @@ class MHNotify(_PluginBase):
                                             'model': 'mh_assist',
                                             'label': 'mh订阅辅助（仅新订阅生效）',
                                             'hint': '开启后，新添加的订阅将默认在MP中暂停，并由插件在MH创建订阅、延时查询进度、按规则删除或恢复MP订阅；不影响已有订阅'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'clear_once',
+                                            'label': '清除助手记录（运行一次）',
+                                            'hint': '开启后点保存立即清除所有助手记录（pending/watch），随后自动复位为关闭，移除脏数据'
                                         }
                                     }
                                 ]
@@ -306,7 +349,8 @@ class MHNotify(_PluginBase):
             "mh_job_names": "",
             "mh_domain": "",
             "wait_minutes": 5,
-            "mh_assist": False
+            "mh_assist": False,
+            "clear_once": False
         }
 
     def get_page(self) -> List[dict]:
@@ -813,12 +857,20 @@ class MHNotify(_PluginBase):
                             target = rec
                             break
                     if not target:
-                        logger.warning(f"mhnotify: 未在MH列表中找到订阅 {mh_uuid}，1分钟后重试")
-                        # 保留待检查项，下一分钟继续重试
+                        # 未找到，记录重试次数，超过30次则移除记录
+                        attempts = int(info.get("attempts") or 0) + 1
+                        info["attempts"] = attempts
                         info["last_attempt"] = now_ts
-                        pending[str(sid)] = info
-                        self.save_data(self._ASSIST_PENDING_KEY, pending)
-                        continue
+                        if attempts >= 30:
+                            logger.warning(f"mhnotify: 订阅 {mh_uuid} 未在MH列表中找到，已重试{attempts}次，移除记录")
+                            pending.pop(sid, None)
+                            self.save_data(self._ASSIST_PENDING_KEY, pending)
+                            continue
+                        else:
+                            logger.warning(f"mhnotify: 未在MH列表中找到订阅 {mh_uuid}，第{attempts}次重试，1分钟后继续")
+                            pending[str(sid)] = info
+                            self.save_data(self._ASSIST_PENDING_KEY, pending)
+                            continue
                     mtype, saved, expected = self.__compute_progress(target)
                     logger.info(f"mhnotify: 订阅 {mh_uuid} 进度 saved={saved}/{expected} type={mtype}")
                     with SessionFactory() as db:
@@ -872,6 +924,42 @@ class MHNotify(_PluginBase):
                         self.save_data(self._ASSIST_WATCH_KEY, watch)
         except Exception as e:
             logger.error(f"mhnotify: 助手调度异常: {e}")
+
+    def _clear_all_records(self) -> Dict[str, Any]:
+        """清除助手记录（pending/watch），移除脏数据"""
+        try:
+            self.save_data(self._ASSIST_PENDING_KEY, {})
+            self.save_data(self._ASSIST_WATCH_KEY, {})
+            logger.info("mhnotify: 已清除助手记录（pending/watch）")
+            return {"success": True}
+        except Exception as e:
+            logger.error(f"mhnotify: 清除助手记录失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    @eventmanager.register(EventType.PluginAction)
+    def remote_clear_records(self, event: Event):
+        """远程命令触发：清除订阅记录"""
+        if not event:
+            return
+        event_data = event.event_data
+        if not event_data or event_data.get("action") != "mhnotify_clear":
+            return
+
+        logger.info("收到命令，开始清除 mhnotify 助手记录...")
+        self.post_message(
+            channel=event_data.get("channel"),
+            title="开始清除 mhnotify 助手记录...",
+            userid=event_data.get("user")
+        )
+
+        result = self._clear_all_records()
+
+        title = "mhnotify 助手记录清除完成" if result.get("success") else f"mhnotify 助手记录清除失败：{result.get('error')}"
+        self.post_message(
+            channel=event_data.get("channel"),
+            title=title,
+            userid=event_data.get("user")
+        )
 
     def __finish_mp_subscribe(self, subscribe):
         try:
