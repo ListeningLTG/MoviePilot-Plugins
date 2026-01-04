@@ -1,4 +1,5 @@
 import time
+import re
 
 from typing import List, Tuple, Dict, Any, Optional
 from apscheduler.triggers.cron import CronTrigger
@@ -21,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -766,6 +767,12 @@ class MHNotify(_PluginBase):
                 if not subscribe:
                     return
                 SubscribeOper(db=db).update(sub_id, {"state": "S", "sites": [-1]})
+                # 重新获取，确保季号等字段已正确加载
+                subscribe = SubscribeOper(db=db).get(sub_id)
+                try:
+                    logger.info(f"mhnotify: 订阅暂停完成 id={sub_id} type={getattr(subscribe,'type',None)} season={getattr(subscribe,'season',None)}")
+                except Exception:
+                    pass
             # 登录 MH 拿 token
             access_token = self.__mh_login()
             if not access_token:
@@ -790,8 +797,12 @@ class MHNotify(_PluginBase):
                                 stype = (getattr(s, 'type', '') or '').strip()
                                 stype_lower = (stype or '').lower()
                                 if stype_lower == 'tv' or stype in {'电视剧'}:
-                                    seasons.append(getattr(s, 'season', None))
-                                    logger.info(f"mhnotify: 订阅聚合候选 id={getattr(s,'id',None)} type={stype} season={getattr(s,'season',None)}")
+                                    # 优先使用订阅中的 season，其次从标题解析
+                                    s_season = getattr(s, 'season', None)
+                                    if s_season is None:
+                                        s_season = self.__extract_season_from_text(getattr(s, 'name', '') or '')
+                                    seasons.append(s_season)
+                                    logger.info(f"mhnotify: 订阅聚合候选 id={getattr(s,'id',None)} type={stype} season={getattr(s,'season',None)} parsed={s_season}")
                             except Exception:
                                 pass
                         # 转换季为整数（支持字符串数字）
@@ -801,6 +812,8 @@ class MHNotify(_PluginBase):
                                 aggregate_seasons.append(x)
                             elif isinstance(x, str) and x.isdigit():
                                 aggregate_seasons.append(int(x))
+                        # 过滤无效季号（None/0/负数）并去重排序
+                        aggregate_seasons = sorted({s for s in aggregate_seasons if isinstance(s, int) and s > 0})
                         logger.info(f"mhnotify: 聚合季（转换后）={aggregate_seasons}")
                         if aggregate_seasons:
                             logger.info(f"mhnotify: 检测到该剧存在多季订阅，聚合季：{aggregate_seasons}")
@@ -1035,7 +1048,7 @@ class MHNotify(_PluginBase):
                     seasons = sorted({int(s) for s in aggregate_seasons if s is not None}) or [1]
                     src = "聚合"
                 else:
-                    # 从事件或订阅中解析季号（支持字符串数字）
+                    # 从事件或订阅中解析季号（支持字符串数字）；失败则从标题解析；仍失败则默认1
                     raw_season = mediainfo_dict.get('season') or _get('season')
                     def _to_int(v):
                         if isinstance(v, int):
@@ -1043,9 +1056,13 @@ class MHNotify(_PluginBase):
                         if isinstance(v, str) and v.isdigit():
                             return int(v)
                         return None
-                    season_num = _to_int(raw_season) or 1
+                    season_num = _to_int(raw_season)
+                    src = "事件/订阅"
+                    if not season_num:
+                        season_num = self.__extract_season_from_text(title or '')
+                        src = "标题解析" if season_num else "默认1"
+                    season_num = season_num or 1
                     seasons = [season_num]
-                    src = "事件/订阅或默认1"
                 payload["selected_seasons"] = seasons
                 payload["episode_ranges"] = {str(s): {"min_episode": None, "max_episode": None, "exclude_episodes": [], "exclude_text": ""} for s in seasons}
                 logger.info(f"mhnotify: TV订阅季选定: {seasons}; 来源={src}")
@@ -1059,6 +1076,70 @@ class MHNotify(_PluginBase):
             return payload
         except Exception:
             logger.error("mhnotify: __build_mh_create_payload 异常，subscribe或mediainfo缺失关键字段")
+            return None
+
+    def __extract_season_from_text(self, text: str) -> Optional[int]:
+        """从标题/文本中解析季号，支持中文与英文常见格式
+        例："第二季"、"第2季"、"Season 2"、"S02"、"2季"、"第十季"、"第十一季"
+        返回正整数；无法解析返回 None
+        """
+        if not text:
+            return None
+        try:
+            t = text.strip()
+            # 英文格式 Season X / SXX
+            m = re.search(r"(?:Season\s*)(\d{1,2})", t, re.IGNORECASE)
+            if m:
+                return int(m.group(1))
+            m = re.search(r"\bS(\d{1,2})\b", t, re.IGNORECASE)
+            if m:
+                return int(m.group(1))
+            # 中文格式 第X季 / X季
+            m = re.search(r"第([一二三四五六七八九十百零〇两\d]{1,3})季", t)
+            if m:
+                num = m.group(1)
+                return self.__parse_chinese_numeral(num)
+            m = re.search(r"([一二三四五六七八九十百零〇两\d]{1,3})季", t)
+            if m:
+                num = m.group(1)
+                return self.__parse_chinese_numeral(num)
+            # 其它：第X期/部 有时也指季（尽量解析但不强制使用）
+            m = re.search(r"第([一二三四五六七八九十百零〇两\d]{1,3})(?:期|部)", t)
+            if m:
+                num = m.group(1)
+                val = self.__parse_chinese_numeral(num)
+                return val if val and val > 0 else None
+        except Exception:
+            pass
+        return None
+
+    def __parse_chinese_numeral(self, s: str) -> Optional[int]:
+        """解析中文数字到整数，支持到 99 左右；也支持纯数字字符串"""
+        if not s:
+            return None
+        try:
+            if s.isdigit():
+                return int(s)
+            mapping = {
+                '零': 0, '〇': 0,
+                '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
+                '六': 6, '七': 7, '八': 8, '九': 9,
+                '十': 10
+            }
+            total = 0
+            # 处理像 "十一"、"二十"、"二十一"
+            if '十' in s:
+                parts = s.split('十')
+                if parts[0] == '':
+                    total += 10
+                else:
+                    total += mapping.get(parts[0], 0) * 10
+                if len(parts) > 1 and parts[1] != '':
+                    total += mapping.get(parts[1], 0)
+                return total if total > 0 else None
+            # 单字数字
+            return mapping.get(s, None)
+        except Exception:
             return None
 
     def __mh_create_subscription(self, access_token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
