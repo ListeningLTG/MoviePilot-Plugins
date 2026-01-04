@@ -84,7 +84,7 @@ class MHNotify(_PluginBase):
 
             # HDHive 设置
             self._hdhive_enabled = bool(config.get("hdhive_enabled", False))
-            self._hdhive_query_mode = config.get("hdhive_query_mode", "playwright") or "playwright"
+            self._hdhive_query_mode = config.get("hdhive_query_mode", "api") or "api"
             self._hdhive_username = config.get("hdhive_username", "") or ""
             self._hdhive_password = config.get("hdhive_password", "") or ""
             self._hdhive_cookie = config.get("hdhive_cookie", "") or ""
@@ -258,11 +258,15 @@ class MHNotify(_PluginBase):
                                 },
                                 'content': [
                                     {
-                                        'component': 'VTextField',
+                                        'component': 'VSelect',
                                         'props': {
                                             'model': 'hdhive_query_mode',
                                             'label': 'HDHive 查询模式',
-                                            'placeholder': 'playwright 或 api'
+                                            'items': [
+                                                { 'title': 'Playwright', 'value': 'playwright' },
+                                                { 'title': 'API', 'value': 'api' }
+                                            ],
+                                            'clearable': False
                                         }
                                     }
                                 ]
@@ -526,7 +530,7 @@ class MHNotify(_PluginBase):
             "mh_assist": False,
             "clear_once": False,
             "hdhive_enabled": False,
-            "hdhive_query_mode": "playwright",
+            "hdhive_query_mode": "api",
             "hdhive_username": "",
             "hdhive_password": "",
             "hdhive_cookie": "",
@@ -1238,7 +1242,7 @@ class MHNotify(_PluginBase):
             h_type = HDHiveMediaType.MOVIE if (media_type or "movie").lower() == "movie" else HDHiveMediaType.TV
 
             # API 模式
-            if (self._hdhive_query_mode or "playwright").lower() == "api":
+            if (self._hdhive_query_mode or "api").lower() == "api":
                 cookie = self._hdhive_cookie or ""
                 # 自动刷新 Cookie（若开启）
                 try:
