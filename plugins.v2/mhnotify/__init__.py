@@ -21,7 +21,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "0.6"
+    plugin_version = "0.7"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -85,7 +85,7 @@ class MHNotify(_PluginBase):
         if self._enabled:
             services.append({
                 "id": "MHNotify",
-                "name": "MediaHelper通知",
+                "name": "MediaHelper增强",
                 "trigger": CronTrigger.from_crontab("* * * * *"),
                 "func": self.__notify_mh,
                 "kwargs": {}
@@ -567,7 +567,9 @@ class MHNotify(_PluginBase):
     def __mh_login(self) -> Optional[str]:
         """登录 MH 获取 access_token"""
         try:
+            logger.info(f"mhnotify: 准备登录MH，domain={self._mh_domain}, username={self._mh_username}")
             if not self._mh_domain or not self._mh_username or not self._mh_password:
+                logger.error("mhnotify: 登录MH失败，缺少域名或用户名或密码配置")
                 return None
             login_url = f"{self._mh_domain}/api/v1/auth/login"
             payload = {"username": self._mh_username, "password": self._mh_password}
@@ -579,11 +581,18 @@ class MHNotify(_PluginBase):
                 "User-Agent": "MoviePilot/Plugin MHNotify"
             }
             res = RequestUtils(headers=headers).post(login_url, json=payload)
+            if res is None:
+                logger.error("mhnotify: 登录MH未获取到任何响应")
+            else:
+                logger.info(f"mhnotify: 登录MH响应 status={res.status_code}")
             if not res or res.status_code != 200:
                 return None
             data = res.json() or {}
-            return (data.get("data") or {}).get("access_token")
+            token = (data.get("data") or {}).get("access_token")
+            logger.info(f"mhnotify: 登录MH成功，access_token获取={'yes' if token else 'no'}")
+            return token
         except Exception:
+            logger.error("mhnotify: 登录MH出现异常", exc_info=True)
             return None
 
     def __auth_headers(self, access_token: str) -> Dict[str, str]:
@@ -597,12 +606,41 @@ class MHNotify(_PluginBase):
     def __mh_get_defaults(self, access_token: str) -> Dict[str, Any]:
         try:
             url = f"{self._mh_domain}/api/v1/subscription/config/defaults"
+            logger.info(f"mhnotify: 获取MH默认配置 GET {url}")
             res = RequestUtils(headers=self.__auth_headers(access_token)).get_res(url)
-            if res and res.status_code == 200:
-                return res.json() or {}
+            if res is None:
+                logger.error("mhnotify: 获取MH默认配置未返回响应")
+            elif res.status_code != 200:
+                logger.error(f"mhnotify: 获取MH默认配置失败 status={res.status_code} body={getattr(res, 'text', '')[:200]}")
+            else:
+                data = res.json() or {}
+                core = (data or {}).get("data") or {}
+                logger.info(
+                    "mhnotify: 默认配置摘要 cloud_type=%s account=%s target_directory=%s quality_preference=%s",
+                    core.get("cloud_type"), core.get("account_identifier"), core.get("target_directory"), core.get("quality_preference")
+                )
+                return data
         except Exception:
+            logger.error("mhnotify: 获取MH默认配置异常", exc_info=True)
             pass
         return {}
+
+    def __normalize_media_type(self, sub_type: Optional[str], info_type: Optional[str]) -> str:
+        try:
+            st = (sub_type or "").strip().lower()
+            it = (info_type or "").strip().lower() if isinstance(info_type, str) else ""
+            movie_alias = {"movie", "mov", "影片", "电影"}
+            tv_alias = {"tv", "television", "电视剧", "剧集", "series"}
+            if st in movie_alias or it in movie_alias:
+                return "movie"
+            if st in tv_alias or it in tv_alias:
+                return "tv"
+            # 兜底：优先按 info_type，其次按 sub_type
+            if it in {"movie", "tv"}:
+                return it
+            return "movie"
+        except Exception:
+            return "movie"
 
     def __build_mh_create_payload(self, subscribe, mediainfo_dict: Dict[str, Any], defaults: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
@@ -612,20 +650,34 @@ class MHNotify(_PluginBase):
             cron = data.get("cron") or "0 */6 * * *"
             cloud_type = data.get("cloud_type") or "drive115"
             account_identifier = data.get("account_identifier") or ""
+            # 取订阅字段（兼容对象或字典）
+            def _get(field: str):
+                try:
+                    if hasattr(subscribe, field):
+                        return getattr(subscribe, field)
+                    if isinstance(subscribe, dict):
+                        return subscribe.get(field)
+                except Exception:
+                    return None
+                return None
             # 媒体信息
-            tmdb_id = getattr(subscribe, 'tmdbid', None) or mediainfo_dict.get('tmdb_id') or mediainfo_dict.get('tmdbid')
-            title = getattr(subscribe, 'name', None) or mediainfo_dict.get('title')
-            mtype = (getattr(subscribe, 'type', None) or mediainfo_dict.get('type') or 'movie').lower()
+            tmdb_id = _get('tmdbid') or mediainfo_dict.get('tmdb_id') or mediainfo_dict.get('tmdbid')
+            title = _get('name') or mediainfo_dict.get('title')
+            sub_type = _get('type')
+            info_type = mediainfo_dict.get('type')
+            mtype_norm = self.__normalize_media_type(sub_type, info_type)
             release_date = mediainfo_dict.get('release_date')
             overview = mediainfo_dict.get('overview')
             poster_path = mediainfo_dict.get('poster_path')
             vote_average = mediainfo_dict.get('vote_average')
-            search_keywords = getattr(subscribe, 'keyword', None) or title
+            search_keywords = _get('keyword') or mediainfo_dict.get('search_keywords') or title
+            if not title:
+                title = mediainfo_dict.get('original_title') or mediainfo_dict.get('name') or "未知标题"
             payload: Dict[str, Any] = {
                 "tmdb_id": tmdb_id,
                 "title": title,
                 "original_title": mediainfo_dict.get('original_title'),
-                "media_type": "movie" if mtype == 'movie' else "tv",
+                "media_type": mtype_norm,
                 "release_date": release_date,
                 "overview": overview,
                 "poster_path": poster_path,
@@ -642,13 +694,19 @@ class MHNotify(_PluginBase):
                 "user_custom_links": []
             }
             if payload["media_type"] == "tv":
-                season = getattr(subscribe, 'season', None) or 1
+                season = _get('season') or 1
                 payload["selected_seasons"] = [season]
                 payload["episode_ranges"] = {str(season): {"min_episode": None, "max_episode": None, "exclude_episodes": [], "exclude_text": ""}}
             else:
                 payload["selected_seasons"] = []
+            # 日志摘要
+            logger.info(
+                "mhnotify: 构建MH订阅创建参数 tmdb_id=%s title=%s media_type=%s target_dir=%s cloud_type=%s account=%s",
+                payload.get("tmdb_id"), payload.get("title"), payload.get("media_type"), target_dir, cloud_type, account_identifier
+            )
             return payload
         except Exception:
+            logger.error("mhnotify: __build_mh_create_payload 异常，subscribe或mediainfo缺失关键字段")
             return None
 
     def __mh_create_subscription(self, access_token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -656,20 +714,38 @@ class MHNotify(_PluginBase):
             url = f"{self._mh_domain}/api/v1/subscription/create"
             headers = self.__auth_headers(access_token)
             headers.update({"Content-Type": "application/json;charset=UTF-8", "Origin": self._mh_domain})
+            logger.info(f"mhnotify: 创建MH订阅 POST {url} media_type={payload.get('media_type')} tmdb_id={payload.get('tmdb_id')} title={str(payload.get('title'))[:50]}")
             res = RequestUtils(headers=headers).post(url, json=payload)
-            if res and res.status_code in (200, 204):
-                return res.json() or {}
+            if res is None:
+                logger.error("mhnotify: 创建MH订阅未返回响应")
+            elif res.status_code not in (200, 204):
+                logger.error(f"mhnotify: 创建MH订阅失败 status={res.status_code} body={getattr(res, 'text', '')[:200]}")
+            else:
+                data = res.json() or {}
+                uuid = (data.get("data") or {}).get("subscription_id") or (data.get("data") or {}).get("task", {}).get("uuid")
+                logger.info(f"mhnotify: 创建MH订阅成功 uuid={uuid}")
+                return data
         except Exception:
+            logger.error("mhnotify: 创建MH订阅异常", exc_info=True)
             pass
         return {}
 
     def __mh_list_subscriptions(self, access_token: str) -> Dict[str, Any]:
         try:
             url = f"{self._mh_domain}/api/v1/subscription/list?page=1&page_size=2000"
+            logger.info(f"mhnotify: 查询MH订阅列表 GET {url}")
             res = RequestUtils(headers=self.__auth_headers(access_token)).get_res(url)
-            if res and res.status_code == 200:
-                return res.json() or {}
+            if res is None:
+                logger.error("mhnotify: 查询MH订阅列表未返回响应")
+            elif res.status_code != 200:
+                logger.error(f"mhnotify: 查询MH订阅列表失败 status={res.status_code} body={getattr(res, 'text', '')[:200]}")
+            else:
+                data = res.json() or {}
+                subs = (data.get("data") or {}).get("subscriptions") or []
+                logger.info(f"mhnotify: 查询MH订阅列表成功 count={len(subs)}")
+                return data
         except Exception:
+            logger.error("mhnotify: 查询MH订阅列表异常", exc_info=True)
             pass
         return {}
 
@@ -678,9 +754,16 @@ class MHNotify(_PluginBase):
             url = f"{self._mh_domain}/api/v1/subscription/{uuid}"
             headers = self.__auth_headers(access_token)
             headers.update({"Origin": self._mh_domain})
+            logger.info(f"mhnotify: 删除MH订阅 DELETE {url}")
             res = RequestUtils(headers=headers).delete(url)
-            return bool(res and res.status_code in (200, 204))
+            ok = bool(res and res.status_code in (200, 204))
+            if res is None:
+                logger.error("mhnotify: 删除MH订阅未返回响应")
+            else:
+                logger.info(f"mhnotify: 删除MH订阅响应 status={res.status_code} ok={ok}")
+            return ok
         except Exception:
+            logger.error("mhnotify: 删除MH订阅异常", exc_info=True)
             return False
 
     def __compute_progress(self, sub_rec: Dict[str, Any]) -> Tuple[str, int, int]:
