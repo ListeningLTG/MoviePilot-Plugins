@@ -21,7 +21,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.0"
+    plugin_version = "1.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -64,6 +64,9 @@ class MHNotify(_PluginBase):
     _mh_token: Optional[str] = None
     _mh_token_expire_ts: int = 0
     _mh_token_ttl_seconds: int = 600  # 默认缓存10分钟
+    # 助手调度延迟/重试常量（首次查询2分钟，之后每1分钟重试）
+    _assist_initial_delay_seconds: int = 120
+    _assist_retry_interval_seconds: int = 60
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -781,7 +784,9 @@ class MHNotify(_PluginBase):
             if not mh_uuid:
                 logger.error(f"mhnotify: MH订阅创建失败：{resp}")
                 return
-            logger.info(f"mhnotify: 已在MH创建订阅，uuid={mh_uuid}；5分钟后查询进度")
+            # 与调度保持一致：首次查询延迟（默认2分钟）
+            delay_mins = max(1, int(self._assist_initial_delay_seconds / 60))
+            logger.info(f"mhnotify: 已在MH创建订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
             # 记录待检查项
             pending: Dict[str, dict] = self.get_data(self._ASSIST_PENDING_KEY) or {}
             pending[str(sub_id)] = {
@@ -1036,8 +1041,8 @@ class MHNotify(_PluginBase):
             pending: Dict[str, dict] = self.get_data(self._ASSIST_PENDING_KEY) or {}
             if pending:
                 now_ts = int(time.time())
-                # 收集已到查询时间的条目
-                matured_items = {sid: info for sid, info in pending.items() if now_ts - int(info.get("created_at") or 0) >= 120}
+                # 收集已到查询时间的条目（首次查询延迟）
+                matured_items = {sid: info for sid, info in pending.items() if now_ts - int(info.get("created_at") or 0) >= self._assist_initial_delay_seconds}
                 if matured_items:
                     token = self.__mh_login()
                     if not token:
@@ -1064,7 +1069,8 @@ class MHNotify(_PluginBase):
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
                                     continue
                                 else:
-                                    logger.warning(f"mhnotify: 未在MH列表中找到订阅 {mh_uuid}，第{attempts}次重试，1分钟后继续")
+                                    retry_mins = max(1, int(self._assist_retry_interval_seconds / 60))
+                                    logger.warning(f"mhnotify: 未在MH列表中找到订阅 {mh_uuid}，第{attempts}次重试，{retry_mins}分钟后继续")
                                     pending[str(sid)] = info
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
                                     continue
@@ -1080,6 +1086,7 @@ class MHNotify(_PluginBase):
                                     if del_token:
                                         self.__mh_delete_subscription(del_token, mh_uuid)
                                 pending.pop(sid, None)
+                                self.save_data(self._ASSIST_PENDING_KEY, pending)
                                 continue
                             if mtype == 'movie':
                                 if expected <= 1 and saved >= 1:
@@ -1088,6 +1095,7 @@ class MHNotify(_PluginBase):
                                         self.__mh_delete_subscription(token, mh_uuid)
                                     self.__finish_mp_subscribe(subscribe)
                                     pending.pop(sid, None)
+                                    self.save_data(self._ASSIST_PENDING_KEY, pending)
                                 else:
                                     # 未完成：恢复MP订阅并监听MP完成后删除MH
                                     with SessionFactory() as db:
@@ -1096,6 +1104,7 @@ class MHNotify(_PluginBase):
                                     watch[sid] = {"mh_uuid": mh_uuid}
                                     self.save_data(self._ASSIST_WATCH_KEY, watch)
                                     pending.pop(sid, None)
+                                    self.save_data(self._ASSIST_PENDING_KEY, pending)
                             else:
                                 # TV
                                 if expected > 0 and saved >= expected:
@@ -1104,6 +1113,7 @@ class MHNotify(_PluginBase):
                                         self.__mh_delete_subscription(token, mh_uuid)
                                     self.__finish_mp_subscribe(subscribe)
                                     pending.pop(sid, None)
+                                    self.save_data(self._ASSIST_PENDING_KEY, pending)
                                 else:
                                     # 未完成：删除MH并启用MP订阅
                                     if token:
@@ -1111,6 +1121,7 @@ class MHNotify(_PluginBase):
                                     with SessionFactory() as db:
                                         SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
                                     pending.pop(sid, None)
+                                    self.save_data(self._ASSIST_PENDING_KEY, pending)
             # 监听MP完成后删除MH
             watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
             if watch:
@@ -1193,9 +1204,10 @@ class MHNotify(_PluginBase):
                 mediainfo.title = subscribe.name
                 mediainfo.year = subscribe.year
                 mediainfo.tmdb_id = getattr(subscribe, 'tmdbid', None)
-                mediainfo.poster_path = None
-                mediainfo.backdrop_path = None
-                mediainfo.overview = None
+                mediainfo.poster_path = getattr(subscribe, 'poster', None)
+                mediainfo.backdrop_path = getattr(subscribe, 'backdrop', None)
+                mediainfo.overview = getattr(subscribe, 'description', None)
+                mediainfo.vote_average = getattr(subscribe, 'vote', None)
             except Exception:
                 pass
             # 完成订阅

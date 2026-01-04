@@ -3,11 +3,12 @@
     "name": "MediaHelper通知",
     "description": "整理完媒体后，通知MediaHelper执行strm生成任务",
     "labels": "开发",
-    "version": "v1.0",
+    "version": "v1.1",
     "icon": "mh.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.1": "修复一些问题",
       "v1.0": "HDHive资源查询",
       "v0.9": "查询优化；添加清理功能",
       "v0.8": "修复订阅删除和完成",
