@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.3.2"
+    plugin_version = "1.3.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -1326,12 +1326,66 @@ class MHNotify(_PluginBase):
                             with SessionFactory() as db:
                                 subscribe = SubscribeOper(db=db).get(int(sid))
                             if not subscribe:
-                                # MP订阅已不存在，清理并删除MH订阅
-                                if mh_uuid:
-                                    # 延迟获取token，仅在需要删除时登录
+                                # MP订阅已不存在（可能为取消单季）
+                                # 优先尝试：按同 TMDB 的剩余季更新 MH 订阅；若无剩余季则删除 MH
+                                try:
                                     del_token = self.__mh_login()
-                                    if del_token:
-                                        self.__mh_delete_subscription(del_token, mh_uuid)
+                                except Exception:
+                                    del_token = None
+                                if del_token and mh_uuid:
+                                    try:
+                                        lst2 = self.__mh_list_subscriptions(del_token)
+                                        subs2 = (lst2.get("data") or {}).get("subscriptions") or []
+                                        rec2 = None
+                                        for r in subs2:
+                                            uid2 = r.get("uuid") or (r.get("task") or {}).get("uuid")
+                                            if uid2 == mh_uuid:
+                                                rec2 = r
+                                                break
+                                        tmdb_id = None
+                                        if rec2:
+                                            params2 = rec2.get("params") or {}
+                                            tmdb_id = params2.get("tmdb_id")
+                                        remaining_seasons: List[int] = []
+                                        if tmdb_id:
+                                            try:
+                                                with SessionFactory() as db2:
+                                                    all_subs = SubscribeOper(db=db2).list_by_tmdbid(tmdb_id)
+                                                seasons = []
+                                                for s in all_subs or []:
+                                                    try:
+                                                        stype = (getattr(s, 'type', '') or '').strip()
+                                                        stype_lower = (stype or '').lower()
+                                                        if stype_lower == 'tv' or stype in {'电视剧'}:
+                                                            s_season = getattr(s, 'season', None)
+                                                            if s_season is None:
+                                                                s_season = self.__extract_season_from_text(getattr(s, 'name', '') or '')
+                                                            seasons.append(s_season)
+                                                    except Exception:
+                                                        pass
+                                                tmp: List[int] = []
+                                                for x in seasons:
+                                                    if isinstance(x, int):
+                                                        tmp.append(x)
+                                                    elif isinstance(x, str) and x.isdigit():
+                                                        tmp.append(int(x))
+                                                remaining_seasons = sorted({s for s in tmp if isinstance(s, int) and s > 0})
+                                            except Exception:
+                                                remaining_seasons = []
+                                        if remaining_seasons:
+                                            # 更新 MH 订阅季集合为剩余季
+                                            try:
+                                                base_params = (rec2 or {}).get("params") or {}
+                                                base_params["selected_seasons"] = remaining_seasons
+                                                base_params["episode_ranges"] = {str(s): {"min_episode": None, "max_episode": None, "exclude_episodes": [], "exclude_text": ""} for s in remaining_seasons}
+                                                self.__mh_update_subscription(del_token, mh_uuid, base_params)
+                                                logger.info(f"mhnotify: 取消单季后更新MH订阅 seasons={remaining_seasons}")
+                                            except Exception:
+                                                logger.warning("mhnotify: 更新MH订阅季集合失败，降级为删除", exc_info=True)
+                                                self.__mh_delete_subscription(del_token, mh_uuid)
+                                        else:
+                                            # 无剩余季，删除 MH 订阅
+                                            self.__mh_delete_subscription(del_token, mh_uuid)
                                 pending.pop(sid, None)
                                 self.save_data(self._ASSIST_PENDING_KEY, pending)
                                 continue
@@ -1362,11 +1416,12 @@ class MHNotify(_PluginBase):
                                     pending.pop(sid, None)
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
                                 else:
-                                    # 未完成：删除MH并启用MP订阅
-                                    if token:
-                                        self.__mh_delete_subscription(token, mh_uuid)
+                                    # 未完成：不删除MH，启用MP订阅，并加入watch等待MP完成/取消后删除MH
                                     with SessionFactory() as db:
                                         SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                    watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+                                    watch[sid] = {"mh_uuid": mh_uuid}
+                                    self.save_data(self._ASSIST_WATCH_KEY, watch)
                                     pending.pop(sid, None)
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
             # 监听MP完成后删除MH
@@ -1376,12 +1431,65 @@ class MHNotify(_PluginBase):
                     with SessionFactory() as db:
                         sub = SubscribeOper(db=db).get(int(sid))
                     if not sub:
-                        # MP订阅已完成（被删除），删除MH并清理监听
+                        # MP订阅不存在（取消/完成），处理对应MH：优先更新剩余季，否则删除
                         mh_uuid = info.get("mh_uuid")
-                        if mh_uuid:
+                        try:
                             del_token = self.__mh_login()
-                            if del_token:
-                                self.__mh_delete_subscription(del_token, mh_uuid)
+                        except Exception:
+                            del_token = None
+                        if mh_uuid and del_token:
+                            try:
+                                lst2 = self.__mh_list_subscriptions(del_token)
+                                subs2 = (lst2.get("data") or {}).get("subscriptions") or []
+                                rec2 = None
+                                for r in subs2:
+                                    uid2 = r.get("uuid") or (r.get("task") or {}).get("uuid")
+                                    if uid2 == mh_uuid:
+                                        rec2 = r
+                                        break
+                                tmdb_id = None
+                                if rec2:
+                                    params2 = rec2.get("params") or {}
+                                    tmdb_id = params2.get("tmdb_id")
+                                remaining_seasons: List[int] = []
+                                if tmdb_id:
+                                    try:
+                                        with SessionFactory() as db2:
+                                            all_subs = SubscribeOper(db=db2).list_by_tmdbid(tmdb_id)
+                                        seasons = []
+                                        for s in all_subs or []:
+                                            try:
+                                                stype = (getattr(s, 'type', '') or '').strip()
+                                                stype_lower = (stype or '').lower()
+                                                if stype_lower == 'tv' or stype in {'电视剧'}:
+                                                    s_season = getattr(s, 'season', None)
+                                                    if s_season is None:
+                                                        s_season = self.__extract_season_from_text(getattr(s, 'name', '') or '')
+                                                    seasons.append(s_season)
+                                            except Exception:
+                                                pass
+                                        tmp: List[int] = []
+                                        for x in seasons:
+                                            if isinstance(x, int):
+                                                tmp.append(x)
+                                            elif isinstance(x, str) and x.isdigit():
+                                                tmp.append(int(x))
+                                        remaining_seasons = sorted({s for s in tmp if isinstance(s, int) and s > 0})
+                                    except Exception:
+                                        remaining_seasons = []
+                                if remaining_seasons:
+                                    try:
+                                        base_params = (rec2 or {}).get("params") or {}
+                                        base_params["selected_seasons"] = remaining_seasons
+                                        base_params["episode_ranges"] = {str(s): {"min_episode": None, "max_episode": None, "exclude_episodes": [], "exclude_text": ""} for s in remaining_seasons}
+                                        self.__mh_update_subscription(del_token, mh_uuid, base_params)
+                                        logger.info(f"mhnotify: 取消单季后更新MH订阅 seasons={remaining_seasons}")
+                                    except Exception:
+                                        logger.warning("mhnotify: 更新MH订阅季集合失败，降级为删除", exc_info=True)
+                                        self.__mh_delete_subscription(del_token, mh_uuid)
+                                else:
+                                    self.__mh_delete_subscription(del_token, mh_uuid)
+                        # 清理当前监听项
                         watch.pop(sid, None)
                         self.save_data(self._ASSIST_WATCH_KEY, watch)
         except Exception as e:
