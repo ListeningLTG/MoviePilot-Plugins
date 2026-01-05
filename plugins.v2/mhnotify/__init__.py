@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.3.4"
+    plugin_version = "1.3.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -1386,6 +1386,12 @@ class MHNotify(_PluginBase):
                                         else:
                                             # 无剩余季，删除 MH 订阅
                                             self.__mh_delete_subscription(del_token, mh_uuid)
+                                    except Exception:
+                                        # 降级策略：出现异常则尽量删除对应 MH 订阅，避免遗留无主订阅
+                                        try:
+                                            self.__mh_delete_subscription(del_token, mh_uuid)
+                                        except Exception:
+                                            logger.warning("mhnotify: 处理剩余季时异常且删除失败", exc_info=True)
                                 pending.pop(sid, None)
                                 self.save_data(self._ASSIST_PENDING_KEY, pending)
                                 continue
@@ -1489,6 +1495,12 @@ class MHNotify(_PluginBase):
                                         self.__mh_delete_subscription(del_token, mh_uuid)
                                 else:
                                     self.__mh_delete_subscription(del_token, mh_uuid)
+                            except Exception:
+                                # 降级策略：出现异常则尽量删除对应 MH 订阅，避免遗留无主订阅
+                                try:
+                                    self.__mh_delete_subscription(del_token, mh_uuid)
+                                except Exception:
+                                    logger.warning("mhnotify: watch 分支处理剩余季时异常且删除失败", exc_info=True)
                         # 清理当前监听项
                         watch.pop(sid, None)
                         self.save_data(self._ASSIST_WATCH_KEY, watch)
