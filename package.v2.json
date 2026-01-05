@@ -3,7 +3,7 @@
     "name": "MediaHelper增强",
     "description": "整理完媒体后，通知MediaHelper执行strm生成任务；并提供mh订阅辅助",
     "labels": "开发",
-    "version": "v1.3.4",
+    "version": "1.3.4",
     "icon": "mh.png",
     "author": "ListeningLTG",
     "level": 1,
