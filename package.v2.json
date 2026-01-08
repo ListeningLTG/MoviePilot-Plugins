@@ -1,7 +1,7 @@
 {
   "MHNotify": {
     "name": "MediaHelper增强",
-    "description": "整理完媒体后，通知MediaHelper执行strm生成任务；并提供mh订阅辅助",
+    "description": "监听115生活事件和MP整理/刮削事件后，通知MediaHelper执行strm生成任务；提供mh订阅辅助；支持115云下载（/mhol命令）。",
     "labels": "开发",
     "version": "1.3.7",
     "icon": "mh.png",
