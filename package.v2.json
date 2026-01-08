@@ -3,11 +3,12 @@
     "name": "MediaHelper增强",
     "description": "监听115生活事件和MP整理/刮削事件后，通知MediaHelper执行strm生成任务；提供mh订阅辅助；支持115云下载（/mhol命令）。",
     "labels": "开发",
-    "version": "1.3.8",
+    "version": "1.3.9",
     "icon": "mh.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.3.9": "修复，调试2",
       "v1.3.8": "修复，调试",
       "v1.3.7": "修复115云下载功能",
       "v1.3.6": "添加115云下载功能（/mhol命令）",

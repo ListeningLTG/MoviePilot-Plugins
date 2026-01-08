@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.3.8"
+    plugin_version = "1.3.9"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2651,7 +2651,7 @@ class MHNotify(_PluginBase):
     def _add_offline_download(self, url: str) -> Tuple[bool, str]:
         """
         添加115离线下载任务
-        参考 p115strmhelper 插件的实现方式
+        参考 p115client 官方库的 P115Offline.add 方法实现
         :param url: 下载链接（磁力链接、种子URL等）
         :return: (是否成功, 消息文本)
         """
@@ -2679,17 +2679,19 @@ class MHNotify(_PluginBase):
             
             try:
                 if target_path != "/":
-                    # 使用 fs_dir_getid 获取目录ID（参考p115strmhelper的get_pid_by_path）
+                    # 使用 fs_dir_getid 获取目录ID
                     resp = client.fs_dir_getid(target_path)
+                    logger.debug(f"mhnotify: fs_dir_getid 响应: {resp}")
                     if resp and resp.get("id"):
-                        target_cid = resp.get("id")
+                        target_cid = int(resp.get("id"))
                         logger.info(f"mhnotify: 目标目录 {target_path} ID: {target_cid}")
                     elif resp and resp.get("id") == 0:
                         # 目录不存在，需要创建
                         logger.info(f"mhnotify: 目录 {target_path} 不存在，尝试创建...")
                         mkdir_resp = client.fs_makedirs_app(target_path, pid=0)
+                        logger.debug(f"mhnotify: fs_makedirs_app 响应: {mkdir_resp}")
                         if mkdir_resp and mkdir_resp.get("cid"):
-                            target_cid = mkdir_resp.get("cid")
+                            target_cid = int(mkdir_resp.get("cid"))
                             logger.info(f"mhnotify: 创建目录成功，ID: {target_cid}")
                         else:
                             logger.warning(f"mhnotify: 创建目录失败: {mkdir_resp}")
@@ -2698,52 +2700,58 @@ class MHNotify(_PluginBase):
                         logger.warning(f"mhnotify: 获取目录ID失败: {resp}")
                         target_cid = 0
             except Exception as e:
-                logger.warning(f"mhnotify: 获取目录ID异常: {e}")
+                logger.warning(f"mhnotify: 获取目录ID异常: {e}", exc_info=True)
                 target_cid = 0
 
-            # 构建离线下载payload（参考p115strmhelper的build_offline_urls_payload）
-            payload = {
-                'url[0]': url.strip()
-            }
+            # 构建离线下载payload
+            # 参考 p115client 源码：单个URL使用 "url" 键，调用 offline_add_url
+            download_url = url.strip()
+            payload = {"url": download_url}
             if target_cid:
-                payload['wp_path_id'] = target_cid
+                payload["wp_path_id"] = target_cid
             
-            logger.info(f"mhnotify: 添加离线下载任务，目标目录ID: {target_cid}, URL: {url[:50]}...")
+            logger.info(f"mhnotify: 添加离线下载任务，目标目录ID: {target_cid}, URL: {download_url[:80]}...")
             
-            # 调用115离线下载API
-            resp = client.offline_add_urls(payload)
+            # 调用115离线下载API（单个URL用 offline_add_url）
+            resp = client.offline_add_url(payload)
+            logger.debug(f"mhnotify: offline_add_url 响应: {resp}")
             
             # 检查响应
             if not resp:
                 return False, "115 API 响应为空"
             
-            state = resp.get('state', False)
-            if not state:
-                error_msg = resp.get('error', '未知错误')
-                error_code = resp.get('errcode', '')
-                return False, f"添加失败: {error_msg} (错误码: {error_code})"
-            
-            # 解析返回的任务信息
-            data = resp.get('data', {})
-            result = data.get('result', [])
-            
-            if not result:
-                # 有些情况下任务添加成功但result为空（如任务已存在）
+            # 响应可能是dict或其他类型
+            if isinstance(resp, dict):
+                state = resp.get('state', False)
+                if not state:
+                    error_msg = resp.get('error', '未知错误')
+                    error_code = resp.get('errcode', '')
+                    logger.error(f"mhnotify: 离线下载失败，响应: {resp}")
+                    return False, f"添加失败: {error_msg} (错误码: {error_code})"
+                
+                # 解析返回的任务信息
+                data = resp.get('data', {})
+                # 单个URL返回的结构可能不同
+                info_hash = data.get('info_hash', '')
+                task_name = data.get('name', '')
+                
+                if not task_name:
+                    # 尝试从其他字段获取
+                    task_name = data.get('file_name', '') or data.get('title', '') or '任务已添加'
+                
+                success_msg = f"任务已添加到115云下载\n"
+                if task_name:
+                    success_msg += f"任务名称: {task_name}\n"
+                success_msg += f"保存路径: {target_path}"
+                if info_hash:
+                    success_msg += f"\nHash: {info_hash[:16]}..."
+                
+                logger.info(f"mhnotify: 115离线下载任务添加成功: {task_name or info_hash or '未知'}")
+                return True, success_msg
+            else:
+                # 可能返回的是其他类型
+                logger.info(f"mhnotify: 离线下载响应类型: {type(resp)}, 内容: {resp}")
                 return True, f"任务已提交到115云下载\n保存路径: {target_path}"
-            
-            # 获取第一个任务信息
-            task = result[0] if isinstance(result, list) else result
-            task_name = task.get('name', '未知任务')
-            info_hash = task.get('info_hash', '')
-            
-            success_msg = f"任务已添加到115云下载\n"
-            success_msg += f"任务名称: {task_name}\n"
-            success_msg += f"保存路径: {target_path}"
-            if info_hash:
-                success_msg += f"\nHash: {info_hash[:16]}..."
-            
-            logger.info(f"mhnotify: 115离线下载任务添加成功: {task_name}")
-            return True, success_msg
             
         except ImportError as e:
             logger.error(f"mhnotify: 导入p115client失败: {e}")
