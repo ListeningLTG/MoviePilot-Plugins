@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.3.7"
+    plugin_version = "1.3.8"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2651,6 +2651,7 @@ class MHNotify(_PluginBase):
     def _add_offline_download(self, url: str) -> Tuple[bool, str]:
         """
         添加115离线下载任务
+        参考 p115strmhelper 插件的实现方式
         :param url: 下载链接（磁力链接、种子URL等）
         :return: (是否成功, 消息文本)
         """
@@ -2666,71 +2667,48 @@ class MHNotify(_PluginBase):
             
             # 获取或创建目标目录ID
             target_path = self._cloud_download_path or "/云下载"
+            # 标准化路径
+            target_path = target_path.strip()
+            if not target_path.startswith('/'):
+                target_path = '/' + target_path
+            target_path = target_path.rstrip('/')
+            if not target_path:
+                target_path = "/"
+            
             target_cid = 0
             
             try:
-                # 使用p115client的工具函数获取目录ID
-                # 参考p115strmhelper的实现
-                def get_cid_by_path(client, path):
-                    """根据路径获取目录ID"""
-                    if not path or path == '/':
-                        return 0
-                    
-                    # 标准化路径
-                    path = path.strip()
-                    if not path.startswith('/'):
-                        path = '/' + path
-                    path = path.rstrip('/')
-                    
-                    # 分割路径
-                    parts = [p for p in path.split('/') if p]
-                    if not parts:
-                        return 0
-                    
-                    # 从根目录开始逐级查找
-                    current_cid = 0
-                    for part in parts:
-                        # 获取当前目录下的文件列表
-                        resp = client.fs_files(cid=current_cid, limit=1150)
-                        if not resp or not resp.get('state'):
-                            return None
-                        
-                        # 查找匹配的子目录
-                        found = False
-                        for item in resp.get('data', []):
-                            if item.get('name') == part and item.get('is_directory'):
-                                current_cid = item.get('cid')
-                                found = True
-                                break
-                        
-                        if not found:
-                            # 目录不存在，创建它
-                            mkdir_resp = client.fs_mkdir(part, pid=current_cid)
-                            if mkdir_resp and mkdir_resp.get('state'):
-                                current_cid = mkdir_resp.get('cid')
-                            else:
-                                logger.warning(f"mhnotify: 创建目录 {part} 失败")
-                                return None
-                    
-                    return current_cid
-                
-                target_cid = get_cid_by_path(client, target_path)
-                if target_cid is None:
-                    logger.warning(f"mhnotify: 获取目录ID失败，使用根目录")
-                    target_cid = 0
-                else:
-                    logger.info(f"mhnotify: 目标目录ID: {target_cid}")
-                    
+                if target_path != "/":
+                    # 使用 fs_dir_getid 获取目录ID（参考p115strmhelper的get_pid_by_path）
+                    resp = client.fs_dir_getid(target_path)
+                    if resp and resp.get("id"):
+                        target_cid = resp.get("id")
+                        logger.info(f"mhnotify: 目标目录 {target_path} ID: {target_cid}")
+                    elif resp and resp.get("id") == 0:
+                        # 目录不存在，需要创建
+                        logger.info(f"mhnotify: 目录 {target_path} 不存在，尝试创建...")
+                        mkdir_resp = client.fs_makedirs_app(target_path, pid=0)
+                        if mkdir_resp and mkdir_resp.get("cid"):
+                            target_cid = mkdir_resp.get("cid")
+                            logger.info(f"mhnotify: 创建目录成功，ID: {target_cid}")
+                        else:
+                            logger.warning(f"mhnotify: 创建目录失败: {mkdir_resp}")
+                            target_cid = 0
+                    else:
+                        logger.warning(f"mhnotify: 获取目录ID失败: {resp}")
+                        target_cid = 0
             except Exception as e:
-                logger.warning(f"mhnotify: 获取目录ID异常，使用根目录: {e}")
+                logger.warning(f"mhnotify: 获取目录ID异常: {e}")
                 target_cid = 0
 
-            # 添加离线下载任务
-            # 构建请求payload
+            # 构建离线下载payload（参考p115strmhelper的build_offline_urls_payload）
             payload = {
-                'url[0]': url,
-                'wp_path_id': target_cid
+                'url[0]': url.strip()
             }
+            if target_cid:
+                payload['wp_path_id'] = target_cid
+            
+            logger.info(f"mhnotify: 添加离线下载任务，目标目录ID: {target_cid}, URL: {url[:50]}...")
             
             # 调用115离线下载API
             resp = client.offline_add_urls(payload)
@@ -2750,7 +2728,8 @@ class MHNotify(_PluginBase):
             result = data.get('result', [])
             
             if not result:
-                return False, "任务添加成功但未返回任务信息"
+                # 有些情况下任务添加成功但result为空（如任务已存在）
+                return True, f"任务已提交到115云下载\n保存路径: {target_path}"
             
             # 获取第一个任务信息
             task = result[0] if isinstance(result, list) else result
