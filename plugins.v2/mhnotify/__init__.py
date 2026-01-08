@@ -18,11 +18,11 @@ class MHNotify(_PluginBase):
     # 插件名称
     plugin_name = "MediaHelper增强"
     # 插件描述
-    plugin_desc = "监听115生活事件和MP整理/刮削事件后，通知MediaHelper执行strm生成任务；提供mh订阅辅助；支持115云下载（/mhol命令）"
+    plugin_desc = "监听115生活事件和MP整理/刮削事件后，通知MediaHelper执行strm生成任务；提供mh订阅辅助；支持115云下载（/mhol命令）、自动删除小文件及移动整理"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.4.0"
+    plugin_version = "1.4.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -62,7 +62,7 @@ class MHNotify(_PluginBase):
     _hdhive_password: str = ""
     _hdhive_cookie: str = ""
     _hdhive_auto_refresh: bool = False
-    _hdhive_refresh_before: int = 86400
+    _hdhive_refresh_before: int = 3600
     # MH登录缓存
     _mh_token: Optional[str] = None
     _mh_token_expire_ts: int = 0
@@ -97,6 +97,10 @@ class MHNotify(_PluginBase):
     _cloud_download_enabled: bool = False
     # 云下载保存路径
     _cloud_download_path: str = "/云下载"
+    # 云下载剔除小文件开关
+    _cloud_download_remove_small_files: bool = False
+    # 云下载移动整理开关
+    _cloud_download_organize: bool = False
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -123,9 +127,9 @@ class MHNotify(_PluginBase):
             self._hdhive_cookie = config.get("hdhive_cookie", "") or ""
             self._hdhive_auto_refresh = bool(config.get("hdhive_auto_refresh", False))
             try:
-                self._hdhive_refresh_before = int(config.get("hdhive_refresh_before", 86400) or 86400)
+                self._hdhive_refresh_before = int(config.get("hdhive_refresh_before", 3600) or 3600)
             except Exception:
-                self._hdhive_refresh_before = 86400
+                self._hdhive_refresh_before = 3600
 
             # 清除助手记录（运行一次）
             try:
@@ -246,6 +250,8 @@ class MHNotify(_PluginBase):
             # 云下载配置
             self._cloud_download_enabled = bool(config.get("cloud_download_enabled", False))
             self._cloud_download_path = config.get("cloud_download_path", "/云下载") or "/云下载"
+            self._cloud_download_remove_small_files = bool(config.get("cloud_download_remove_small_files", False))
+            self._cloud_download_organize = bool(config.get("cloud_download_organize", False))
 
     def get_state(self) -> bool:
         return self._enabled
@@ -557,7 +563,7 @@ class MHNotify(_PluginBase):
             "hdhive_password": "",
             "hdhive_cookie": "",
             "hdhive_auto_refresh": False,
-            "hdhive_refresh_before": 86400,
+            "hdhive_refresh_before": 3600,
             "p115_life_enabled": False,
             "p115_cookie": "",
             "p115_life_events": [],
@@ -755,6 +761,36 @@ class MHNotify(_PluginBase):
                                             'label': '115云下载保存路径',
                                             'placeholder': '/云下载',
                                             'hint': '115网盘中保存离线下载文件的目录路径'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'cloud_download_remove_small_files',
+                                            'label': '剔除小文件',
+                                            'hint': '云下载完成后自动删除小于10MB的文件',
+                                            'persistent-hint': True
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'cloud_download_organize',
+                                            'label': '移动整理',
+                                            'hint': '云下载完成后自动移动到MH默认目录并整理',
+                                            'persistent-hint': True
                                         }
                                     }
                                 ]
@@ -1053,7 +1089,8 @@ class MHNotify(_PluginBase):
                                         'component': 'VTextField',
                                         'props': {
                                             'model': 'hdhive_cookie',
-                                            'label': 'HDHive Cookie（API 模式）'
+                                            'label': 'HDHive Cookie（API 模式）',
+                                            'type': 'password'
                                         }
                                     }
                                 ]
@@ -1087,7 +1124,7 @@ class MHNotify(_PluginBase):
                                             'model': 'hdhive_refresh_before',
                                             'label': 'Cookie提前刷新秒数',
                                             'type': 'number',
-                                            'placeholder': '默认 86400'
+                                            'placeholder': '默认 3600'
                                         }
                                     }
                                 ]
@@ -1920,33 +1957,39 @@ class MHNotify(_PluginBase):
                 return
             # 读取默认配置
             defaults = self.__mh_get_defaults(access_token)
-            # 若为剧集，聚合同一 TMDB 的多季订阅
+            # 若为剧集，聚合同一 TMDB 的多季订阅（电影不需要聚合季）
             aggregate_seasons: Optional[List[int]] = None
-            try:
-                # 取 tmdb_id
-                tmdb_id = getattr(subscribe, 'tmdbid', None) or mediainfo_dict.get('tmdb_id') or mediainfo_dict.get('tmdbid')
-                # 查询 MP 内相同 tmdb 的订阅，聚合季
-                if tmdb_id:
-                    logger.info(f"mhnotify: 聚合季开始，tmdb_id={tmdb_id}")
-                    with SessionFactory() as db:
-                        all_subs = SubscribeOper(db=db).list_by_tmdbid(tmdb_id)
-                        logger.info(f"mhnotify: MP内同tmdb订阅数={len(all_subs or [])}")
-                        seasons = []
-                        for s in all_subs or []:
-                            try:
-                                stype = (getattr(s, 'type', '') or '').strip()
-                                stype_lower = (stype or '').lower()
-                                if stype_lower == 'tv' or stype in {'电视剧'}:
-                                    # 优先使用订阅中的 season，其次从标题解析
-                                    s_season = getattr(s, 'season', None)
-                                    if s_season is None:
-                                        s_season = self.__extract_season_from_text(getattr(s, 'name', '') or '')
-                                    seasons.append(s_season)
-                                    logger.info(f"mhnotify: 订阅聚合候选 id={getattr(s,'id',None)} type={stype} season={getattr(s,'season',None)} parsed={s_season}")
-                            except Exception:
-                                pass
+            # 判断媒体类型
+            sub_type = (getattr(subscribe, 'type', '') or '').strip().lower()
+            is_tv = sub_type in ('tv', '电视剧')
+            aggregate_seasons = []  # 初始化，电影时为空
+            
+            # 只有电视剧才进行聚合季逻辑
+            if is_tv:
+                try:
+                    # 取 tmdb_id
+                    tmdb_id = getattr(subscribe, 'tmdbid', None) or mediainfo_dict.get('tmdb_id') or mediainfo_dict.get('tmdbid')
+                    # 查询 MP 内相同 tmdb 的订阅，聚合季
+                    if tmdb_id:
+                        logger.info(f"mhnotify: 聚合季开始，tmdb_id={tmdb_id}")
+                        with SessionFactory() as db:
+                            all_subs = SubscribeOper(db=db).list_by_tmdbid(tmdb_id)
+                            logger.info(f"mhnotify: MP内同tmdb订阅数={len(all_subs or [])}")
+                            seasons = []
+                            for s in all_subs or []:
+                                try:
+                                    stype = (getattr(s, 'type', '') or '').strip()
+                                    stype_lower = (stype or '').lower()
+                                    if stype_lower == 'tv' or stype in {'电视剧'}:
+                                        # 优先使用订阅中的 season，其次从标题解析
+                                        s_season = getattr(s, 'season', None)
+                                        if s_season is None:
+                                            s_season = self.__extract_season_from_text(getattr(s, 'name', '') or '')
+                                        seasons.append(s_season)
+                                        logger.info(f"mhnotify: 订阅聚合候选 id={getattr(s,'id',None)} type={stype} season={getattr(s,'season',None)} parsed={s_season}")
+                                except Exception:
+                                    pass
                         # 转换季为整数（支持字符串数字）
-                        aggregate_seasons = []
                         for x in seasons:
                             if isinstance(x, int):
                                 aggregate_seasons.append(x)
@@ -1959,8 +2002,11 @@ class MHNotify(_PluginBase):
                             logger.info(f"mhnotify: 检测到该剧存在多季订阅，聚合季：{aggregate_seasons}")
                         else:
                             logger.info("mhnotify: 未聚合到季信息，将回退使用事件或订阅中的季")
-            except Exception:
-                logger.warning("mhnotify: 聚合季信息失败", exc_info=True)
+                except Exception:
+                    logger.warning("mhnotify: 聚合季信息失败", exc_info=True)
+            else:
+                # 电影类型不需要聚合季
+                logger.debug(f"mhnotify: 媒体类型为电影，跳过聚合季逻辑")
             # 构建创建参数（若为TV将带入聚合季）
             create_payload = self.__build_mh_create_payload(subscribe, mediainfo_dict, defaults, aggregate_seasons=aggregate_seasons)
             if not create_payload:
@@ -2757,6 +2803,25 @@ class MHNotify(_PluginBase):
                     success_msg += f"\nHash: {info_hash[:16]}..."
                 
                 logger.info(f"mhnotify: 115离线下载任务添加成功: {task_name or info_hash or '未知'}")
+                
+                # 如果开启了剔除小文件或移动整理功能，等待下载完成后处理
+                if (self._cloud_download_remove_small_files or self._cloud_download_organize) and info_hash:
+                    try:
+                        if self._cloud_download_remove_small_files:
+                            logger.info(f"mhnotify: 云下载剔除小文件已启用，将等待任务完成后处理...")
+                        if self._cloud_download_organize:
+                            logger.info(f"mhnotify: 云下载移动整理已启用，将等待任务完成后处理...")
+                        
+                        # 启动异步任务监控下载完成并处理
+                        import threading
+                        threading.Thread(
+                            target=self._monitor_and_remove_small_files,
+                            args=(client, info_hash, target_cid, task_name, target_path),
+                            daemon=True
+                        ).start()
+                    except Exception as e:
+                        logger.warning(f"mhnotify: 启动后处理任务失败: {e}")
+                
                 return True, success_msg
             else:
                 # 可能返回的是其他类型
@@ -2769,6 +2834,351 @@ class MHNotify(_PluginBase):
         except Exception as e:
             logger.error(f"mhnotify: 添加115离线下载任务失败: {e}", exc_info=True)
             return False, f"添加失败: {str(e)}"
+
+    def _monitor_and_remove_small_files(self, client, info_hash: str, target_cid: int, task_name: str, target_path: str = ""):
+        """
+        监控离线下载任务完成后删除小文件
+        :param client: P115Client实例
+        :param info_hash: 任务hash
+        :param target_cid: 目标目录ID
+        :param task_name: 任务名称
+        :param target_path: 云下载目标路径
+        """
+        try:
+            import time
+            logger.info(f"mhnotify: 开始监控离线下载任务: {task_name}")
+            
+            # 最多等待24小时（每分钟检查一次）
+            max_checks = 1440
+            check_interval = 60  # 秒
+            
+            for i in range(max_checks):
+                try:
+                    # 查询离线下载任务状态
+                    tasks = client.offline_list()
+                    if not tasks:
+                        logger.debug(f"mhnotify: 无法获取离线任务列表，继续等待...")
+                        time.sleep(check_interval)
+                        continue
+                    
+                    # 查找当前任务
+                    current_task = None
+                    for task in tasks:
+                        if task.get('info_hash') == info_hash:
+                            current_task = task
+                            break
+                    
+                    if not current_task:
+                        logger.warning(f"mhnotify: 未找到任务 {info_hash}，可能已完成或被删除")
+                        break
+                    
+                    # 检查任务状态：2=已完成
+                    status = current_task.get('status', 0)
+                    if status == 2:
+                        logger.info(f"mhnotify: 离线下载任务已完成: {task_name}")
+                        
+                        # 如果开启了剔除小文件，先删除小文件
+                        if self._cloud_download_remove_small_files:
+                            logger.info(f"mhnotify: 开始清理小文件...")
+                            time.sleep(5)  # 等待5秒确保文件列表同步
+                            self._remove_small_files_in_directory(client, target_cid)
+                        
+                        # 如果开启了移动整理，执行移动整理
+                        if self._cloud_download_organize and target_path:
+                            logger.info(f"mhnotify: 开始移动整理...")
+                            # 获取MH access token
+                            access_token = self._get_mh_access_token()
+                            if access_token:
+                                self._organize_cloud_download(access_token, target_path)
+                            else:
+                                logger.error(f"mhnotify: 无法获取MH access token，跳过移动整理")
+                        
+                        break
+                    elif status == 1:
+                        logger.warning(f"mhnotify: 离线下载任务失败: {task_name}")
+                        break
+                    else:
+                        # 继续等待
+                        percent = current_task.get('percentDone', 0)
+                        if i % 10 == 0:  # 每10分钟记录一次进度
+                            logger.debug(f"mhnotify: 离线下载进度: {task_name} - {percent*100:.1f}%")
+                        time.sleep(check_interval)
+                        
+                except Exception as e:
+                    logger.warning(f"mhnotify: 检查离线下载状态异常: {e}")
+                    time.sleep(check_interval)
+            
+            logger.info(f"mhnotify: 离线下载监控任务结束: {task_name}")
+            
+        except Exception as e:
+            logger.error(f"mhnotify: 监控离线下载任务异常: {e}", exc_info=True)
+
+    def _remove_small_files_in_directory(self, client, cid: int):
+        """
+        删除目录中小于10MB的文件
+        :param client: P115Client实例
+        :param cid: 目录ID
+        """
+        try:
+            from pathlib import Path
+            
+            # 查询目录下的文件列表
+            logger.info(f"mhnotify: 开始查询目录文件列表，cid={cid}")
+            
+            offset = 0
+            limit = 1000
+            removed_count = 0
+            removed_size = 0
+            min_size = 10 * 1024 * 1024  # 10MB
+            
+            while True:
+                # 调用115 API获取文件列表
+                resp = client.fs_files({
+                    "cid": cid,
+                    "limit": limit,
+                    "offset": offset,
+                    "show_dir": 1
+                })
+                
+                if not resp or not resp.get('data'):
+                    break
+                
+                files = resp['data']
+                if not files:
+                    break
+                
+                # 遍历文件，找出小于10MB的
+                for item in files:
+                    file_category = item.get('fc', '')
+                    # fc="1"表示文件，fc="0"表示目录
+                    if file_category != '1':
+                        continue
+                    
+                    file_size = item.get('fs', 0)
+                    file_name = item.get('fn', '')
+                    file_id = item.get('fid', '')
+                    
+                    # 如果文件小于10MB，删除
+                    if file_size < min_size and file_id:
+                        try:
+                            logger.info(f"mhnotify: 删除小文件: {file_name} ({file_size/1024/1024:.2f}MB)")
+                            # 调用115删除API
+                            client.fs_delete(file_id)
+                            removed_count += 1
+                            removed_size += file_size
+                        except Exception as e:
+                            logger.warning(f"mhnotify: 删除文件失败 {file_name}: {e}")
+                
+                # 检查是否还有更多文件
+                if len(files) < limit:
+                    break
+                offset += limit
+            
+            if removed_count > 0:
+                logger.info(f"mhnotify: 云下载小文件清理完成，共删除 {removed_count} 个文件，释放空间 {removed_size/1024/1024:.2f}MB")
+            else:
+                logger.info(f"mhnotify: 云下载目录中没有需要删除的小文件")
+                
+        except Exception as e:
+            logger.error(f"mhnotify: 删除小文件异常: {e}", exc_info=True)
+
+    def _get_mh_access_token(self) -> Optional[str]:
+        """
+        获取MH access token
+        :return: access token或None
+        """
+        try:
+            login_url = f"{self._mh_domain}/api/v1/auth/login"
+            login_payload = {
+                "username": self._mh_username,
+                "password": self._mh_password
+            }
+            headers = {
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json;charset=UTF-8",
+                "Origin": self._mh_domain,
+                "Accept-Language": "zh-CN",
+                "User-Agent": "MoviePilot/Plugin MHNotify"
+            }
+            login_res = RequestUtils(headers=headers).post(login_url, json=login_payload)
+            if not login_res or login_res.status_code != 200:
+                logger.error(f"mhnotify: MH登录失败")
+                return None
+            
+            try:
+                login_data = login_res.json()
+                access_token = login_data.get("data", {}).get("access_token")
+                return access_token
+            except Exception:
+                logger.error(f"mhnotify: 解析MH登录响应失败")
+                return None
+        except Exception as e:
+            logger.error(f"mhnotify: 获取MH access token异常: {e}")
+            return None
+
+    def _organize_cloud_download(self, access_token: str, target_path: str):
+        """
+        云下载完成后移动到MH默认目录并整理
+        :param access_token: MH access token
+        :param target_path: 云下载目标路径
+        """
+        try:
+            logger.info(f"mhnotify: 开始云下载移动整理流程，目标路径: {target_path}")
+            
+            # 1. 获取115网盘账户信息
+            cloud_url = f"{self._mh_domain}/api/v1/cloud-accounts?active_only=true"
+            headers = {
+                "Accept": "application/json, text/plain, */*",
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": "MoviePilot/Plugin MHNotify",
+                "Accept-Language": "zh-CN"
+            }
+            
+            cloud_res = RequestUtils(headers=headers).get_res(cloud_url)
+            if not cloud_res or cloud_res.status_code != 200:
+                logger.error(f"mhnotify: 获取云账户列表失败")
+                return
+            
+            try:
+                cloud_data = cloud_res.json()
+            except Exception:
+                logger.error(f"mhnotify: 解析云账户响应失败")
+                return
+            
+            # 查找第一个115网盘账户
+            accounts = cloud_data.get("data", {}).get("accounts", [])
+            drive115_account = None
+            for account in accounts:
+                if account.get("cloud_type") == "drive115":
+                    drive115_account = account
+                    break
+            
+            if not drive115_account:
+                logger.error(f"mhnotify: 未找到115网盘账户")
+                return
+            
+            account_identifier = drive115_account.get("external_id")
+            logger.info(f"mhnotify: 找到115网盘账户: {drive115_account.get('name')}, ID: {account_identifier}")
+            
+            # 2. 提交网盘目录分析任务
+            analyze_url = f"{self._mh_domain}/api/v1/library-tool/analyze-cloud-directory-async"
+            analyze_payload = {
+                "cloud_type": "drive115",
+                "account_identifier": account_identifier,
+                "cloud_path": target_path
+            }
+            
+            analyze_res = RequestUtils(headers=headers).post_res(analyze_url, json=analyze_payload)
+            if not analyze_res or analyze_res.status_code != 200:
+                logger.error(f"mhnotify: 提交网盘分析任务失败")
+                return
+            
+            try:
+                analyze_data = analyze_res.json()
+            except Exception:
+                logger.error(f"mhnotify: 解析分析任务响应失败")
+                return
+            
+            task_id = analyze_data.get("data", {}).get("task_id")
+            if not task_id:
+                logger.error(f"mhnotify: 未获取到分析任务ID")
+                return
+            
+            logger.info(f"mhnotify: 网盘分析任务已提交，task_id: {task_id}")
+            
+            # 3. 循环查询进度直到完成
+            import time
+            max_wait = 300  # 最多等待5分钟
+            elapsed = 0
+            
+            while elapsed < max_wait:
+                time.sleep(2)
+                elapsed += 2
+                
+                progress_url = f"{self._mh_domain}/api/v1/library-tool/analysis-task/{task_id}/progress"
+                progress_res = RequestUtils(headers=headers).get_res(progress_url)
+                
+                if not progress_res or progress_res.status_code != 200:
+                    logger.warning(f"mhnotify: 查询分析进度失败，继续等待...")
+                    continue
+                
+                try:
+                    progress_data = progress_res.json()
+                except Exception:
+                    logger.warning(f"mhnotify: 解析进度响应失败，继续等待...")
+                    continue
+                
+                task_info = progress_data.get("data", {})
+                progress = task_info.get("progress", 0)
+                status = task_info.get("status", "")
+                current_step = task_info.get("current_step", "")
+                
+                logger.debug(f"mhnotify: 分析进度 {progress}% - {current_step}")
+                
+                if progress >= 100 and status == "completed":
+                    logger.info(f"mhnotify: 网盘分析任务完成")
+                    break
+                elif status == "failed":
+                    error = task_info.get("error", "未知错误")
+                    logger.error(f"mhnotify: 网盘分析任务失败: {error}")
+                    return
+            
+            if elapsed >= max_wait:
+                logger.warning(f"mhnotify: 网盘分析任务超时，跳过移动整理")
+                return
+            
+            # 4. 获取默认目录配置
+            defaults_url = f"{self._mh_domain}/api/v1/subscription/config/cloud-defaults"
+            defaults_res = RequestUtils(headers=headers).get_res(defaults_url)
+            
+            if not defaults_res or defaults_res.status_code != 200:
+                logger.error(f"mhnotify: 获取默认目录配置失败")
+                return
+            
+            try:
+                defaults_data = defaults_res.json()
+            except Exception:
+                logger.error(f"mhnotify: 解析默认目录配置失败")
+                return
+            
+            account_configs = defaults_data.get("data", {}).get("account_configs", {})
+            account_config = account_configs.get(account_identifier, {})
+            default_directory = account_config.get("default_directory", "/影视")
+            
+            logger.info(f"mhnotify: 获取到默认目录: {default_directory}")
+            
+            # 5. 提交文件整理任务
+            organize_url = f"{self._mh_domain}/api/v1/library-tool/organize-files-async"
+            organize_payload = {
+                "cloud_type": "drive115",
+                "source_path": target_path,
+                "account_identifier": account_identifier,
+                "target_folder_path": default_directory,
+                "is_share_link": False,
+                "operation_mode": "move",
+                "include_series": True,
+                "include_movies": True
+            }
+            
+            organize_res = RequestUtils(headers=headers).post_res(organize_url, json=organize_payload)
+            
+            if not organize_res or organize_res.status_code != 200:
+                logger.error(f"mhnotify: 提交文件整理任务失败")
+                return
+            
+            try:
+                organize_data = organize_res.json()
+            except Exception:
+                logger.error(f"mhnotify: 解析整理任务响应失败")
+                return
+            
+            organize_task_id = organize_data.get("data", {}).get("task_id")
+            message = organize_data.get("message", "")
+            
+            logger.info(f"mhnotify: 文件整理任务已提交，task_id: {organize_task_id}, {message}")
+            
+        except Exception as e:
+            logger.error(f"mhnotify: 云下载移动整理异常: {e}", exc_info=True)
 
 
     @eventmanager.register(EventType.PluginAction)
