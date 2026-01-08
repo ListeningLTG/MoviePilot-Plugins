@@ -18,11 +18,11 @@ class MHNotify(_PluginBase):
     # 插件名称
     plugin_name = "MediaHelper增强"
     # 插件描述
-    plugin_desc = "整理完媒体后，通知MediaHelper执行strm生成任务；并提供mh订阅辅助"
+    plugin_desc = "监听115生活事件和MP整理/刮削事件后，通知MediaHelper执行strm生成任务；提供mh订阅辅助；支持115云下载（/mhol命令）"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.3.5"
+    plugin_version = "1.3.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -45,10 +45,12 @@ class MHNotify(_PluginBase):
     _next_notify_time = 0
     # 等待通知数量
     _wait_notify_count = 0
-    # 延迟分钟数（存在运行中整理任务时的等待窗口）
+    #（已废弃）
     _wait_minutes = 5
     # mh订阅辅助开关
     _mh_assist_enabled: bool = False
+    # mh订阅辅助：MP订阅完成后自动删除MH订阅
+    _mh_assist_auto_delete: bool = False
     # 助手：待检查的mh订阅映射（mp_sub_id -> {mh_uuid, created_at, type}）
     _ASSIST_PENDING_KEY = "mhnotify_assist_pending"
     # 助手：等待MP完成后删除mh订阅的监听映射（mp_sub_id -> {mh_uuid}）
@@ -68,6 +70,33 @@ class MHNotify(_PluginBase):
     # 助手调度延迟/重试常量（首次查询2分钟，之后每1分钟重试）
     _assist_initial_delay_seconds: int = 120
     _assist_retry_interval_seconds: int = 60
+    # 115 生活事件监听
+    _p115_life_enabled: bool = False
+    _p115_cookie: str = ""
+    _p115_events: List[str] = []  # 可选：upload/move/receive/create/copy/delete
+    _p115_poll_cron: str = "* * * * *"  # 每分钟
+    _P115_LAST_TS_KEY = "mhnotify_p115_life_last_ts"
+    _P115_LAST_ID_KEY = "mhnotify_p115_life_last_id"
+    _p115_watch_dirs: List[str] = []  # 仅当文件路径命中这些目录前缀时触发
+    _p115_watch_rules: List[Dict[str, Any]] = []  # [{path: '/目录', events: ['upload', ...]}]
+    _p115_wait_minutes: int = 5  # 生活事件静默窗口（分钟）
+    _p115_next_notify_time: int = 0  # 生活事件下一次允许触发的时间戳
+    _p115_dir_cache: Dict[int, str] = {}  # parent_id -> dir path 缓存
+    _rule_count: int = 3  # 规则行数（表单动态显示）
+    #（已废弃）是否检测 MP 整理运行
+    _check_mp_transfer_enabled: bool = False
+    # MP 整理/刮削事件触发开关
+    _mp_event_enabled: bool = False
+    # MP 事件等待时间（分钟）
+    _mp_event_wait_minutes: int = 5
+    # MP 事件监听的存储类型（多选）
+    _mp_event_storages: List[str] = []
+    # 可用存储列表缓存
+    _available_storages: List[Dict[str, str]] = []
+    # 云下载开关
+    _cloud_download_enabled: bool = False
+    # 云下载保存路径
+    _cloud_download_path: str = "/云下载"
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -76,12 +105,15 @@ class MHNotify(_PluginBase):
             self._mh_username = config.get('mh_username')
             self._mh_password = config.get('mh_password')
             self._mh_job_names = config.get('mh_job_names') or ""
+            # 移除 MP 整理延迟窗口配置（保留占位不生效）
             try:
-                self._wait_minutes = int(config.get('wait_minutes') or 5)
+                _ = int(config.get('wait_minutes') or 5)
             except Exception:
-                self._wait_minutes = 5
+                pass
             # mh订阅辅助开关
             self._mh_assist_enabled = bool(config.get("mh_assist", False))
+            # mh订阅辅助：MP订阅完成后自动删除MH订阅（默认关闭）
+            self._mh_assist_auto_delete = bool(config.get("mh_assist_auto_delete", False))
 
             # HDHive 设置
             self._hdhive_enabled = bool(config.get("hdhive_enabled", False))
@@ -106,6 +138,114 @@ class MHNotify(_PluginBase):
                     logger.info("mhnotify: 助手记录清理完成，已自动复位为关闭")
             except Exception:
                 logger.error("mhnotify: 执行清理助手记录失败", exc_info=True)
+
+            # 115 生活事件
+            self._p115_life_enabled = bool(config.get("p115_life_enabled", False))
+            self._p115_cookie = config.get("p115_cookie", "") or ""
+            self._p115_events = config.get("p115_life_events", []) or []
+            # 兼容字符串逗号分隔
+            if isinstance(self._p115_events, str):
+                self._p115_events = [x.strip() for x in self._p115_events.split(',') if x.strip()]
+            # 轮询频率（保留为 cron，暂仅支持每分钟）
+            self._p115_poll_cron = config.get("p115_life_cron", "* * * * *") or "* * * * *"
+            # 目录前缀过滤（兼容旧配置）
+            watch_dirs = config.get("p115_watch_dirs", []) or []
+            if isinstance(watch_dirs, str):
+                watch_dirs = [x.strip() for x in watch_dirs.split(',') if x.strip()]
+            # 规范化为以 '/' 开头的 Posix 路径
+            norm_dirs: List[str] = []
+            for d in watch_dirs:
+                d = d.replace('\\', '/').strip()
+                if not d:
+                    continue
+                if not d.startswith('/'):
+                    d = '/' + d
+                # 去除尾随 '/'
+                d = d.rstrip('/')
+                norm_dirs.append(d)
+            self._p115_watch_dirs = norm_dirs
+            
+            # 目录事件规则：优先从 rule_path_X / rule_events_X 字段解析（新表单格式）
+            norm_rules: List[Dict[str, Any]] = []
+            max_rules = 10
+            
+            # 从新格式解析：rule_path_0, rule_events_0, ...
+            for i in range(max_rules):
+                path_key = f'rule_path_{i}'
+                events_key = f'rule_events_{i}'
+                p = (config.get(path_key) or '').replace('\\', '/').strip()
+                if not p:
+                    continue
+                if not p.startswith('/'):
+                    p = '/' + p
+                p = p.rstrip('/')
+                evs = config.get(events_key) or []
+                if isinstance(evs, str):
+                    evs = [x.strip().lower() for x in evs.split(',') if x.strip()]
+                elif isinstance(evs, list):
+                    evs = [str(x).strip().lower() for x in evs if str(x).strip()]
+                norm_rules.append({'path': p, 'events': evs})
+            
+            # 若新格式为空，尝试从旧的 JSON 列表解析（兼容旧配置）
+            if not norm_rules:
+                rules = config.get("p115_watch_rules", []) or []
+                if isinstance(rules, list):
+                    for r in rules:
+                        try:
+                            p = (r.get('path') or '').replace('\\', '/').strip()
+                            if not p:
+                                continue
+                            if not p.startswith('/'):
+                                p = '/' + p
+                            p = p.rstrip('/')
+                            evs = r.get('events') or []
+                            if isinstance(evs, str):
+                                evs = [x.strip().lower() for x in evs.split(',') if x.strip()]
+                            elif isinstance(evs, list):
+                                evs = [str(x).strip().lower() for x in evs if str(x).strip()]
+                            norm_rules.append({'path': p, 'events': evs})
+                        except Exception:
+                            continue
+            
+            self._p115_watch_rules = norm_rules
+            # 同步更新 p115_watch_rules 配置（供 API 使用）
+            config['p115_watch_rules'] = norm_rules
+            
+            # 规则行数（用于表单动态显示）
+            try:
+                self._rule_count = int(config.get('rule_count', 3) or 3)
+                if self._rule_count < 1:
+                    self._rule_count = 1
+                if self._rule_count > 10:
+                    self._rule_count = 10
+            except Exception:
+                self._rule_count = 3
+            
+            try:
+                self._p115_wait_minutes = int(config.get('p115_wait_minutes', 5) or 5)
+            except Exception:
+                self._p115_wait_minutes = 5
+            # 移除 MP 整理检测开关（不再生效）
+            self._check_mp_transfer_enabled = False
+            
+            # MP 整理/刮削事件触发开关
+            self._mp_event_enabled = bool(config.get("mp_event_enabled", False))
+            try:
+                self._mp_event_wait_minutes = int(config.get('mp_event_wait_minutes', 5) or 5)
+            except Exception:
+                self._mp_event_wait_minutes = 5
+            
+            # MP 事件监听的存储类型
+            self._mp_event_storages = config.get("mp_event_storages", []) or []
+            if isinstance(self._mp_event_storages, str):
+                self._mp_event_storages = [x.strip() for x in self._mp_event_storages.split(',') if x.strip()]
+            
+            # 初始化时获取可用存储列表
+            self._available_storages = self.__get_available_storages()
+            
+            # 云下载配置
+            self._cloud_download_enabled = bool(config.get("cloud_download_enabled", False))
+            self._cloud_download_path = config.get("cloud_download_path", "/云下载") or "/云下载"
 
     def get_state(self) -> bool:
         return self._enabled
@@ -139,35 +279,316 @@ class MHNotify(_PluginBase):
                 "func": self.__assist_scheduler,
                 "kwargs": {}
             })
+        # 115 生活事件监听
+        if self._p115_life_enabled and (self._p115_cookie or "").strip():
+            try:
+                services.append({
+                    "id": "P115LifeWatch",
+                    "name": "115生活事件监听",
+                    "trigger": CronTrigger.from_crontab(self._p115_poll_cron),
+                    "func": self.__watch_115_life,
+                    "kwargs": {}
+                })
+            except Exception:
+                # 若 cron 非法，回退每分钟
+                services.append({
+                    "id": "P115LifeWatch",
+                    "name": "115生活事件监听",
+                    "trigger": CronTrigger.from_crontab("* * * * *"),
+                    "func": self.__watch_115_life,
+                    "kwargs": {}
+                })
         return services
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
         """定义远程控制命令"""
-        return [{
-            "cmd": "/mhnotify_clear",
-            "event": EventType.PluginAction,
-            "desc": "清除订阅记录（移除脏数据）",
-            "category": "维护",
-            "data": {
-                "action": "mhnotify_clear"
+        return [
+            {
+                "cmd": "/mhnotify_clear",
+                "event": EventType.PluginAction,
+                "desc": "清除订阅记录（移除脏数据）",
+                "category": "维护",
+                "data": {
+                    "action": "mhnotify_clear"
+                }
+            },
+            {
+                "cmd": "/mhol",
+                "event": EventType.PluginAction,
+                "desc": "添加115云下载任务",
+                "category": "下载",
+                "data": {
+                    "action": "mh_add_offline"
+                }
             }
-        }]
+        ]
 
     def get_api(self) -> List[Dict[str, Any]]:
-        # 不需要前端即时API
-        return []
+        # 提供 115 目录浏览 API，便于做目录选择器
+        return [
+            {
+                "path": "/p115/list_directories",
+                "endpoint": self.api_p115_list_directories,
+                "methods": ["GET"],
+                "summary": "列出115网盘指定路径下的目录"
+            },
+            {
+                "path": "/p115/watch_rules",
+                "endpoint": self.api_p115_watch_rules,
+                "methods": ["GET"],
+                "summary": "获取当前目录事件规则"
+            },
+            {
+                "path": "/p115/add_watch_rule",
+                "endpoint": self.api_p115_add_watch_rule,
+                "methods": ["POST"],
+                "summary": "添加目录事件规则（path, events）"
+            },
+            {
+                "path": "/p115/remove_watch_rule",
+                "endpoint": self.api_p115_remove_watch_rule,
+                "methods": ["POST"],
+                "summary": "移除目录事件规则（path）"
+            }
+        ]
+
+    def api_p115_list_directories(self, path: str = "/", apikey: str = "") -> dict:
+        try:
+            if apikey != settings.API_TOKEN:
+                return {"success": False, "error": "API密钥错误"}
+            if not self._p115_cookie:
+                return {"success": False, "error": "未配置 115 Cookie"}
+            # 复用现有的 P115 客户端封装
+            try:
+                from app.plugins.p115strgmsub.clients.p115 import P115ClientManager  # type: ignore
+            except Exception:
+                P115ClientManager = None
+            if not P115ClientManager:
+                return {"success": False, "error": "缺少 P115 客户端依赖（p115strgmsub）"}
+            mgr = P115ClientManager(cookies=self._p115_cookie)
+            if not mgr.check_login():
+                return {"success": False, "error": "115 登录失败，Cookie 可能已过期"}
+            # 规范化路径
+            path = (path or "/").replace("\\", "/")
+            if not path.startswith("/"):
+                path = "/" + path
+            directories = mgr.list_directories(path)
+            # 构建面包屑
+            breadcrumbs = []
+            if path and path != "/":
+                parts = [p for p in path.split("/") if p]
+                current_path = ""
+                breadcrumbs.append({"name": "根目录", "path": "/"})
+                for part in parts:
+                    current_path = f"{current_path}/{part}"
+                    breadcrumbs.append({"name": part, "path": current_path})
+            else:
+                breadcrumbs.append({"name": "根目录", "path": "/"})
+            return {
+                "success": True,
+                "path": path,
+                "breadcrumbs": breadcrumbs,
+                "directories": directories
+            }
+        except Exception as e:
+            logger.error(f"mhnotify: 列出115目录失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _rules_to_text(self, rules: List[Dict[str, Any]]) -> str:
+        """将规则列表转换为文本格式"""
+        lines = []
+        for rule in rules:
+            path = rule.get('path', '')
+            events = rule.get('events', [])
+            if path:
+                if events:
+                    lines.append(f"{path}:{','.join(events)}")
+                else:
+                    lines.append(path)
+        return '\n'.join(lines)
+
+    def api_p115_watch_rules(self, apikey: str = "") -> dict:
+        try:
+            if apikey != settings.API_TOKEN:
+                return {"success": False, "error": "API密钥错误"}
+            return {"success": True, "rules": self._p115_watch_rules}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def api_p115_add_watch_rule(self, path: str = "/", events: Any = None, apikey: str = "") -> dict:
+        try:
+            if apikey != settings.API_TOKEN:
+                return {"success": False, "error": "API密钥错误"}
+            if not path or path == "":
+                return {"success": False, "error": "缺少目录路径"}
+            p = path.replace('\\', '/').strip()
+            if not p.startswith('/'):
+                p = '/' + p
+            p = p.rstrip('/')
+            evs: List[str] = []
+            if events:
+                if isinstance(events, str):
+                    evs = [x.strip().lower() for x in events.split(',') if x.strip()]
+                elif isinstance(events, list):
+                    evs = [str(x).strip().lower() for x in events if str(x).strip()]
+            # 更新内存与配置
+            rules = [r for r in (self._p115_watch_rules or []) if r.get('path') != p]
+            rules.append({'path': p, 'events': evs})
+            self._p115_watch_rules = rules
+            cfg = self.get_config()
+            if isinstance(cfg, dict):
+                cfg['p115_watch_rules'] = rules
+                cfg['p115_watch_rules_text'] = self._rules_to_text(rules)
+                self.update_config(cfg)
+            return {"success": True, "rules": rules}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def api_p115_remove_watch_rule(self, path: str = "/", apikey: str = "") -> dict:
+        try:
+            if apikey != settings.API_TOKEN:
+                return {"success": False, "error": "API密钥错误"}
+            p = path.replace('\\', '/').strip()
+            if not p.startswith('/'):
+                p = '/' + p
+            p = p.rstrip('/')
+            rules = [r for r in (self._p115_watch_rules or []) if r.get('path') != p]
+            self._p115_watch_rules = rules
+            cfg = self.get_config()
+            if isinstance(cfg, dict):
+                cfg['p115_watch_rules'] = rules
+                cfg['p115_watch_rules_text'] = self._rules_to_text(rules)
+                self.update_config(cfg)
+            return {"success": True, "rules": rules}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _build_rule_row(self, index: int) -> dict:
+        """构建单条目录规则的表单行"""
+        return {
+            'component': 'VRow',
+            'props': {'class': 'align-center'},
+            'content': [
+                {
+                    'component': 'VCol',
+                    'props': {'cols': 12, 'md': 6},
+                    'content': [
+                        {
+                            'component': 'VTextField',
+                            'props': {
+                                'model': f'rule_path_{index}',
+                                'label': f'目录 {index + 1}',
+                                'placeholder': '/我的接收/电影',
+                                'density': 'compact',
+                                'hide-details': True
+                            }
+                        }
+                    ]
+                },
+                {
+                    'component': 'VCol',
+                    'props': {'cols': 12, 'md': 6},
+                    'content': [
+                        {
+                            'component': 'VSelect',
+                            'props': {
+                                'model': f'rule_events_{index}',
+                                'label': '监听事件',
+                                'items': [
+                                    {'title': '上传', 'value': 'upload'},
+                                    {'title': '移动', 'value': 'move'},
+                                    {'title': '接收', 'value': 'receive'},
+                                    {'title': '新建', 'value': 'create'},
+                                    {'title': '复制', 'value': 'copy'},
+                                    {'title': '删除', 'value': 'delete'}
+                                ],
+                                'multiple': True,
+                                'chips': True,
+                                'closable-chips': True,
+                                'clearable': True,
+                                'density': 'compact',
+                                'hide-details': True,
+                                'hint': '留空监听全部事件'
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
         拼装插件配置页面，需要返回两块数据：1、页面配置；2、数据结构
         """
-        # 不在渲染阶段请求后端，改为名称输入方案
+        # 如果存储列表为空，尝试获取一次
+        if not self._available_storages:
+            self._available_storages = self.__get_available_storages()
+        
+        # 预设最多10条规则
+        max_rules = 10
+        
+        # 获取当前配置的规则行数（默认3行）
+        current_rule_count = getattr(self, '_rule_count', 3)
+        if current_rule_count < 1:
+            current_rule_count = 1
+        if current_rule_count > max_rules:
+            current_rule_count = max_rules
+        
+        # 构建规则行（只显示 current_rule_count 行）
+        rule_rows = []
+        for i in range(current_rule_count):
+            rule_rows.append(self._build_rule_row(i))
+        
+        # 构建默认值字典，包含现有规则
+        defaults = {
+            "enabled": False,
+            "mh_username": "",
+            "mh_password": "",
+            "mh_job_names": "",
+            "mh_domain": "",
+            "wait_minutes": 5,
+            "mh_assist": False,
+            "mh_assist_auto_delete": False,
+            "clear_once": False,
+            "hdhive_enabled": False,
+            "hdhive_query_mode": "api",
+            "hdhive_username": "",
+            "hdhive_password": "",
+            "hdhive_cookie": "",
+            "hdhive_auto_refresh": False,
+            "hdhive_refresh_before": 86400,
+            "p115_life_enabled": False,
+            "p115_cookie": "",
+            "p115_life_events": [],
+            "p115_life_cron": "* * * * *",
+            "p115_watch_dirs": [],
+            "p115_watch_rules": [],
+            "p115_wait_minutes": 5,
+            "check_mp_transfer": False,
+            "rule_count": current_rule_count,
+            "mp_event_enabled": False,
+            "mp_event_wait_minutes": 5,
+            "mp_event_storages": [],
+            "cloud_download_enabled": False,
+            "cloud_download_path": "/云下载"
+        }
+        
+        # 将现有规则填充到对应的 rule_path_X 和 rule_events_X
+        for i in range(max_rules):
+            defaults[f'rule_path_{i}'] = ""
+            defaults[f'rule_events_{i}'] = []
+        
+        if self._p115_watch_rules:
+            for i, rule in enumerate(self._p115_watch_rules[:max_rules]):
+                defaults[f'rule_path_{i}'] = rule.get('path', '')
+                defaults[f'rule_events_{i}'] = rule.get('events', [])
 
         return [
             {
                 'component': 'VForm',
                 'content': [
+                    # 启用插件
                     {
                         'component': 'VRow',
                         'content': [
@@ -186,12 +607,7 @@ class MHNotify(_PluginBase):
                                         }
                                     }
                                 ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
+                            },
                             {
                                 'component': 'VCol',
                                 'props': {
@@ -209,6 +625,322 @@ class MHNotify(_PluginBase):
                                     }
                                 ]
                             }
+                        ]
+                    },
+                    # MP完成后删除MH订阅
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'mh_assist_auto_delete',
+                                            'label': 'MP订阅完成后自动删除MH订阅',
+                                            'hint': '开启后，当MP订阅完成或取消时，自动删除或更新对应的MH订阅。关闭则保留MH订阅'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'mp_event_enabled',
+                                            'label': 'MP事件触发（整理/刮削完成）',
+                                            'hint': '开启后，当MP整理或刮削媒体完成时，自动通知MH执行strm生成任务（无运行任务则立即触发）'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'mp_event_wait_minutes',
+                                            'label': 'MP事件等待分钟数',
+                                            'type': 'number',
+                                            'placeholder': '默认 5',
+                                            'hint': 'MP整理完成后，等待该分钟数以确保所有整理任务完成后再触发MH任务'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSelect',
+                                        'props': {
+                                            'model': 'mp_event_storages',
+                                            'label': '监听的存储类型',
+                                            'items': self._available_storages or [
+                                                {'title': '本地', 'value': 'local'},
+                                                {'title': '115网盘', 'value': 'u115'},
+                                                {'title': '阿里云盘', 'value': 'alipan'},
+                                                {'title': 'RClone', 'value': 'rclone'},
+                                                {'title': 'OpenList', 'value': 'alist'}
+                                            ],
+                                            'multiple': True,
+                                            'chips': True,
+                                            'closable-chips': True,
+                                            'clearable': True,
+                                            'density': 'compact',
+                                            'hint': '留空则监听所有存储类型的整理/刮削事件'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # 云下载配置
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'cloud_download_enabled',
+                                            'label': '启用115云下载功能',
+                                            'hint': '开启后，可使用 /mhol 命令添加115离线下载任务'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'cloud_download_path',
+                                            'label': '115云下载保存路径',
+                                            'placeholder': '/云下载',
+                                            'hint': '115网盘中保存离线下载文件的目录路径'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # 115 Cookie
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'p115_cookie',
+                                            'label': '115 Cookie',
+                                            'type': 'password',
+                                            'placeholder': 'UID=...; CID=...; SEID=...（粘贴完整 Cookie）',
+                                            'hint': '从 115 网页版复制完整 Cookie；仅本地使用，不会对外发送'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # 分隔线
+                    {
+                        'component': 'VRow',
+                        'props': {'class': 'mt-4'},
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12},
+                                'content': [
+                                    {
+                                        'component': 'VDivider'
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'text': '可选：监听 115 生活事件（上传/移动/接收/新建/复制/删除）以触发 MH 的 strm 任务。'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 3
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'p115_life_enabled',
+                                            'label': '监听 115 生活事件'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 9
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'warning',
+                                            'variant': 'tonal',
+                                            'density': 'compact',
+                                            'text': '下方可配置最多10条目录规则，每条规则包含目录路径和要监听的事件类型。事件留空表示监听该目录的所有事件。'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # 目录规则标题
+                    {
+                        'component': 'VRow',
+                        'props': {'class': 'mt-4'},
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12},
+                                'content': [
+                                    {
+                                        'component': 'VDivider'
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'span',
+                                        'props': {'class': 'text-subtitle-1 font-weight-bold'},
+                                        'text': '📁 目录监听规则'
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'rule_count',
+                                            'label': '规则行数',
+                                            'type': 'number',
+                                            'min': 1,
+                                            'max': 10,
+                                            'density': 'compact',
+                                            'hint': '修改后保存即可增减规则行（1-10）'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # 规则行
+                    *rule_rows,
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 6
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'p115_wait_minutes',
+                                            'label': '115 事件等待分钟数',
+                                            'type': 'number',
+                                            'placeholder': '默认 5',
+                                            'hint': '检测到 115 生活事件后，等待该分钟数；等待期间如有新生活事件将滚动延长，静默后才触发生成任务'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            
                         ]
                     },
                     {
@@ -477,21 +1209,11 @@ class MHNotify(_PluginBase):
                                 },
                                 'content': [
                                     {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'wait_minutes',
-                                            'label': '延迟分钟数',
-                                            'type': 'number',
-                                            'placeholder': '默认 5',
-                                            'hint': '检测到仍有整理运行时，延迟等待该分钟数；等待期间如有新整理完成将滚动延长'
-                                        }
-                                    },
-                                    {
                                         'component': 'VAlert',
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '当MP整理或刮削媒体后，将通知MediaHelper执行strm生成任务（无运行任务则立即触发）'
+                                            'text': '当检测到匹配的 115 生活事件后，将在静默期结束时触发 MediaHelper 的 strm 任务'
                                         }
                                     }
                                 ]
@@ -512,7 +1234,7 @@ class MHNotify(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '为避免频繁触发：若检测到仍有整理运行，将延迟等待（可配置，默认5分钟）；等待期间如有新整理完成将滚动延长，直到无运行任务再触发'
+                                            'text': '为避免频繁触发：启用生活事件静默窗口（默认5分钟）；窗口期间如有新事件将滚动延长，静默结束后再触发'
                                         }
                                     }
                                 ]
@@ -521,50 +1243,33 @@ class MHNotify(_PluginBase):
                     }
                 ]
             }
-        ], {
-            "enabled": False,
-            "mh_username": "",
-            "mh_password": "",
-            "mh_job_names": "",
-            "mh_domain": "",
-            "wait_minutes": 5,
-            "mh_assist": False,
-            "clear_once": False,
-            "hdhive_enabled": False,
-            "hdhive_query_mode": "api",
-            "hdhive_username": "",
-            "hdhive_password": "",
-            "hdhive_cookie": "",
-            "hdhive_auto_refresh": False,
-            "hdhive_refresh_before": 86400
-        }
+        ], defaults
 
     def get_page(self) -> List[dict]:
         pass
 
-    @eventmanager.register(EventType)
+    @eventmanager.register(EventType.TransferComplete)
+    @eventmanager.register(EventType.DownloadAdded)
     def send(self, event):
         """
-        向第三方Webhook发送请求
+        监听 MP 整理完成和刮削完成事件，触发 MH 生成 strm 任务
+        需要在配置中开启 'MP事件触发' 开关
+        支持按存储类型过滤
         """
-        if not self._enabled or not self._mh_domain or not self._mh_username or not self._mh_password:
+        if not self._enabled or not self._mp_event_enabled:
             return
-
+        
         if not event or not event.event_type:
             return
-
+        
+        # 辅助函数：将事件对象递归转换为字典
         def __to_dict(_event):
-            """
-            递归将对象转换为字典
-            """
-            if isinstance(_event, dict):
-                for k, v in _event.items():
-                    _event[k] = __to_dict(v)
-                return _event
+            if _event is None:
+                return None
+            elif isinstance(_event, dict):
+                return {k: __to_dict(v) for k, v in _event.items()}
             elif isinstance(_event, list):
-                for i in range(len(_event)):
-                    _event[i] = __to_dict(_event[i])
-                return _event
+                return [__to_dict(item) for item in _event]
             elif isinstance(_event, tuple):
                 return tuple(__to_dict(list(_event)))
             elif isinstance(_event, set):
@@ -577,30 +1282,105 @@ class MHNotify(_PluginBase):
                 return _event
             else:
                 return str(_event)
-
+        
+        # 获取事件类型
         version = getattr(settings, "VERSION_FLAG", "v1")
         event_type = event.event_type if version == "v1" else event.event_type.value
-        if event_type not in ["transfer.complete", "metadata.scrape"]:
+        
+        # 只处理整理完成和刮削完成事件
+        if event_type not in ["transfer.complete", "metadata.scrape", EventType.TransferComplete, EventType.DownloadAdded]:
             return
+        
+        # 解析事件数据
         event_data = __to_dict(event.event_data)
-
-        # logger.info(f"event_data: {event_data}")
-        if event_type == "transfer.complete":
-            transferinfo = event_data["transferinfo"]
-            success = transferinfo["success"]
-            if success:
-                name = transferinfo["target_item"]["name"]
-                logger.info(f"整理完成：{name}")
-                self._wait_notify_count += 1
-                self._last_event_time = self.__get_time()
-        elif event_type == "metadata.scrape":
-            name = event_data.get("name")
-            logger.info(f"刮削完成：{name}")
-            self._wait_notify_count += 1
-            self._last_event_time = self.__get_time()
+        storage = None
+        name = None
+        
+        try:
+            # 整理完成事件
+            if event_type in ["transfer.complete", EventType.TransferComplete]:
+                transferinfo = event_data.get("transferinfo", {})
+                success = transferinfo.get("success", False)
+                if not success:
+                    return
+                
+                target_diritem = transferinfo.get("target_diritem", {})
+                target_item = transferinfo.get("target_item", {})
+                storage = target_diritem.get("storage")
+                name = target_item.get("name")
+            
+            # 刮削完成事件
+            elif event_type in ["metadata.scrape", EventType.DownloadAdded]:
+                fileitem = event_data.get("fileitem", {})
+                storage = fileitem.get("storage") if isinstance(fileitem, dict) else None
+                name = event_data.get("name")
+        
+        except Exception as e:
+            logger.error(f"mhnotify: 解析事件数据失败: {e}")
+            return
+        
+        # 检查存储类型过滤
+        if self._mp_event_storages:
+            if not storage or storage not in self._mp_event_storages:
+                logger.debug(f"mhnotify: 存储类型 [{storage}] 不在监听列表中，忽略事件")
+                return
+        
+        logger.info(f"mhnotify: 收到 MP 事件 [{event_type}]，存储: [{storage}]，文件: [{name}]")
+        
+        # 增加待通知计数
+        self._wait_notify_count += 1
+        self._last_event_time = self.__get_time()
+        
+        # 检查是否有正在运行的整理任务
+        if self.__has_running_transfers():
+            logger.info("mhnotify: 检测到正在运行的整理任务，延迟触发")
+            # 设置等待窗口
+            now_ts = self.__get_time()
+            wait_seconds = self._mp_event_wait_minutes * 60
+            self._next_notify_time = now_ts + wait_seconds
+        else:
+            logger.info("mhnotify: 无运行中的整理任务，将在下次调度时立即触发")
+            # 清零等待时间，下次调度立即触发
+            self._next_notify_time = 0
 
     def __get_time(self):
         return int(time.time())
+    
+    def __get_available_storages(self) -> List[Dict[str, str]]:
+        """
+        从MP系统获取可用的存储列表
+        """
+        try:
+            from app.helper.storage import StorageHelper
+            from app.db.systemconfig_oper import SystemConfigOper
+            from app.schemas.types import SystemConfigKey
+            
+            # 直接从数据库读取存储配置
+            storage_confs = SystemConfigOper().get(SystemConfigKey.Storages)
+            if storage_confs:
+                storage_list = []
+                for storage in storage_confs:
+                    storage_type = storage.get("type", "")
+                    storage_name = storage.get("name", storage_type)
+                    if storage_type:
+                        storage_list.append({
+                            "title": storage_name,
+                            "value": storage_type
+                        })
+                logger.info(f"mhnotify: 成功获取存储列表，共 {len(storage_list)} 个")
+                return storage_list
+            logger.debug("mhnotify: 未配置存储，使用默认列表")
+        except Exception as e:
+            logger.error(f"mhnotify: 获取存储列表异常: {e}")
+        
+        # 返回默认存储列表
+        return [
+            {"title": "本地", "value": "local"},
+            {"title": "115网盘", "value": "u115"},
+            {"title": "阿里云盘", "value": "alipan"},
+            {"title": "RClone", "value": "rclone"},
+            {"title": "OpenList", "value": "alist"}
+        ]
 
     def __has_running_transfers(self) -> bool:
         """
@@ -630,21 +1410,29 @@ class MHNotify(_PluginBase):
             # 当有待通知时，根据是否存在运行中整理任务决定立即触发或进入等待窗口
             now_ts = self.__get_time()
             if self._wait_notify_count > 0:
-                if self.__has_running_transfers():
-                    # 若存在运行中任务：设置或延长等待窗口（单位：分钟）
-                    delay_seconds = max(int(self._wait_minutes) * 60, 0)
-                    if self._next_notify_time == 0 or now_ts >= self._next_notify_time:
-                        self._next_notify_time = now_ts + delay_seconds
-                    # 在等待窗口期间不触发通知
-                    logger.info(f"检测到正在运行的整理任务，延迟 {self._next_notify_time - now_ts}s 后再触发")
-                    return
-                else:
-                    # 无运行中任务：若设置了等待窗口但未到期，继续等待；否则立即触发
-                    if self._next_notify_time and now_ts < self._next_notify_time:
-                        logger.info(f"等待窗口未到期（{self._next_notify_time - now_ts}s），暂不触发通知")
+                # 若启用 115 生活事件监听，则先检查生活事件静默窗口
+                if self._p115_life_enabled and self._p115_next_notify_time:
+                    if now_ts < self._p115_next_notify_time:
+                        logger.info(f"115 生活事件静默窗口未到期（{self._p115_next_notify_time - now_ts}s），暂不触发通知")
                         return
-                    # 立即触发通知，重置等待窗口
-                    self._next_notify_time = 0
+                    else:
+                        # 到期后清零窗口
+                        self._p115_next_notify_time = 0
+                
+                # 若启用 MP 事件触发，检查 MP 事件等待窗口
+                if self._mp_event_enabled and self._next_notify_time:
+                    if now_ts < self._next_notify_time:
+                        # 如果仍有运行中的整理任务，延长等待时间
+                        if self.__has_running_transfers():
+                            wait_seconds = self._mp_event_wait_minutes * 60
+                            self._next_notify_time = now_ts + wait_seconds
+                            logger.info(f"MP整理任务仍在运行，延长等待窗口 {self._mp_event_wait_minutes} 分钟")
+                        else:
+                            logger.info(f"MP事件等待窗口未到期（{self._next_notify_time - now_ts}s），暂不触发通知")
+                        return
+                    else:
+                        # 到期后清零窗口
+                        self._next_notify_time = 0
                 # 登录获取 access_token
                 login_url = f"{self._mh_domain}/api/v1/auth/login"
                 login_payload = {
@@ -681,7 +1469,6 @@ class MHNotify(_PluginBase):
                 list_res = RequestUtils(headers=list_headers).get_res(tasks_url)
                 if not list_res or list_res.status_code != 200:
                     logger.error(f"获取 MediaHelper 任务列表失败：{getattr(list_res, 'status_code', 'N/A')} - {getattr(list_res, 'text', '')}")
-                    return
                 try:
                     list_data = list_res.json() or {}
                     tasks = list_data.get("data", [])
@@ -689,7 +1476,6 @@ class MHNotify(_PluginBase):
                     tasks = []
                 # 过滤 cloud_strm_sync 任务
                 strm_tasks = [t for t in tasks if t.get('task') == 'cloud_strm_sync' and t.get('enabled')]
-                # 根据名称匹配（英文逗号分隔），否则默认名称包含“115网盘”
                 selected_uuids = []
                 name_filters = []
                 if self._mh_job_names:
@@ -710,7 +1496,6 @@ class MHNotify(_PluginBase):
                     "Accept-Language": "zh-CN",
                     "User-Agent": "MoviePilot/Plugin MHNotify"
                 }
-                success_any = False
                 for uuid in selected_uuids:
                     exec_url = f"{self._mh_domain}/api/v1/scheduled/execute/{uuid}"
                     exec_res = RequestUtils(headers=exec_headers).post(exec_url, json={})
@@ -736,6 +1521,351 @@ class MHNotify(_PluginBase):
         退出插件
         """
         pass
+
+    def __watch_115_life(self):
+        """监听 115 生活事件，满足筛选时触发待通知计数"""
+        try:
+            if not self._p115_life_enabled:
+                return
+            cookie = (self._p115_cookie or "").strip()
+            if not cookie:
+                return
+            # 读取上次指针
+            last_ts = int(self.get_data(self._P115_LAST_TS_KEY) or 0)
+            last_id_raw = self.get_data(self._P115_LAST_ID_KEY)
+            try:
+                last_id = int(last_id_raw) if last_id_raw is not None else 0
+            except Exception:
+                last_id = 0
+
+            # 优先使用 p115client 的 life API（与 p115strmhelper 保持一致）
+            try:
+                from p115client import P115Client  # type: ignore
+                from p115client.tool.life import iter_life_behavior_once, life_show  # type: ignore
+                client = P115Client(cookie, app="web")
+                # 确认生活事件已开启
+                try:
+                    resp = life_show(client)
+                    if not (isinstance(resp, dict) and resp.get("state")):
+                        logger.warning("mhnotify: 115 生活事件未开启或获取失败，跳过本轮")
+                        return
+                except Exception:
+                    # life_show 失败不致命，继续尝试拉取
+                    pass
+
+                # 拉取一次（从上次指针开始）
+                events_iter = iter_life_behavior_once(
+                    client=client,
+                    from_time=last_ts,
+                    from_id=last_id,
+                    app="web",
+                    cooldown=1,
+                )
+                # 收集到内存（限制一定数量避免过大）
+                events: List[Dict[str, Any]] = []
+                max_collect = 200
+                for idx, ev in enumerate(events_iter):
+                    if idx >= max_collect:
+                        break
+                    events.append(ev)
+
+                if not events:
+                    return
+
+                # 将事件类型映射到简化类别，供 UI 选择匹配
+                def map_type_to_simple(t: int) -> str:
+                    """
+                    115生活事件类型映射（参考 p115strmhelper）
+                    已知类型：
+                    - type 1,2 → upload (上传)
+                    - type 5,6 → move (移动)
+                    - type 14 → receive (接收)
+                    - type 17 → create (新建)
+                    - type 18 → copy (复制)
+                    - type 22 → delete (删除)
+                    如遇未映射类型，将在日志中记录警告
+                    """
+                    if t in (1, 2):
+                        return "upload"
+                    if t in (5, 6):
+                        return "move"
+                    if t == 14:
+                        return "receive"
+                    if t == 17:
+                        return "create"
+                    if t == 18:
+                        return "copy"
+                    if t == 22:
+                        return "delete"
+                    return ""
+
+                selected = set([x.lower() for x in (self._p115_events or [])])
+                def _match_rules(full_path: str, ev_simple: str) -> bool:
+                    rules = self._p115_watch_rules or []
+                    if not rules:
+                        return False
+                    try:
+                        for r in rules:
+                            rp = (r.get('path') or '').strip()
+                            evs = [str(x).strip().lower() for x in (r.get('events') or [])]
+                            if not rp:
+                                continue
+                            if full_path.startswith(rp + '/') or full_path == rp:
+                                if not evs:
+                                    return True
+                                return bool(ev_simple) and (ev_simple in evs)
+                        return False
+                    except Exception:
+                        return False
+                has_new = False
+                new_last_ts = last_ts
+                new_last_id = last_id
+                triggered_events = []  # 收集触发的事件信息
+                # p115strmhelper 在 once_pull 中最终以最新事件更新指针；这里按时间/ID取最大
+                for it in events:
+                    try:
+                        t = int(it.get("type", 0))
+                        ut = int(it.get("update_time", 0))
+                        eid = int(it.get("id", 0))
+                        pid = int(it.get("parent_id", 0))
+                        fname = str(it.get("file_name", "") or "")
+                    except Exception:
+                        continue
+                    # 跳过旧事件
+                    if ut < last_ts or (ut == last_ts and eid <= last_id):
+                        continue
+                    
+                    # 输出原始事件数据用于调试（仅记录新事件）
+                    logger.debug(f"mhnotify: 115生活事件原始数据 type={t}, id={eid}, file={fname}, parent_id={pid}, update_time={ut}, 完整数据={it}")
+                    
+                    simple = map_type_to_simple(t)
+                    # 如果事件类型未能映射，记录警告
+                    if not simple:
+                        logger.warning(f"mhnotify: 115生活事件未映射类型 type={t}, file={fname}, 原始数据={it}")
+                    
+                    # 类型匹配
+                    type_ok = (not selected) or (simple and simple in selected)
+                    dir_ok = True
+                    full_path = ""
+                    # 目录事件规则优先（若配置了）
+                    if type_ok and (self._p115_watch_rules or self._p115_watch_dirs):
+                        try:
+                            full_dir = self._p115_dir_cache.get(pid)
+                            if not full_dir:
+                                from p115client.tool.attr import get_path  # type: ignore
+                                full_dir = get_path(client=client, attr=pid, root_id=None) or ''
+                                if full_dir.startswith('根目录'):
+                                    full_dir = full_dir[3:]
+                                full_dir = full_dir.replace('\\', '/').strip()
+                                if not full_dir.startswith('/'):
+                                    full_dir = '/' + full_dir
+                                full_dir = full_dir.rstrip('/')
+                                self._p115_dir_cache[pid] = full_dir
+                            full_path = (full_dir + '/' + fname).replace('\\', '/')
+                            if self._p115_watch_rules:
+                                dir_ok = _match_rules(full_path=full_path, ev_simple=simple)
+                            elif self._p115_watch_dirs:
+                                dir_ok = any(full_path.startswith(d + '/') or full_path == d for d in self._p115_watch_dirs)
+                        except Exception:
+                            dir_ok = False
+                    if type_ok and dir_ok:
+                        has_new = True
+                        # 记录触发的事件详情
+                        event_name_map = {
+                            "upload": "上传",
+                            "move": "移动",
+                            "receive": "接收",
+                            "create": "新建",
+                            "copy": "复制",
+                            "delete": "删除"
+                        }
+                        event_name = event_name_map.get(simple, simple or f"type_{t}")
+                        triggered_events.append({"path": full_path or fname, "event": event_name, "type": t})
+                    if ut > new_last_ts or (ut == new_last_ts and eid > new_last_id):
+                        new_last_ts = ut
+                        new_last_id = eid
+
+                if has_new:
+                    self._wait_notify_count += 1
+                    self._last_event_time = int(time.time())
+                    # 输出详细的触发信息
+                    for evt in triggered_events:
+                        logger.info(f"mhnotify: 115生活事件触发 - 目录: {evt['path']} | 事件: {evt['event']} (type={evt['type']})")
+                    logger.info(f"mhnotify: 115生活事件触发（p115client.life），共 {len(triggered_events)} 个事件，计入一次strm触发信号")
+                    # 设置/延长生活事件静默窗口
+                    try:
+                        delay_seconds = max(int(self._p115_wait_minutes) * 60, 0)
+                    except Exception:
+                        delay_seconds = 300
+                    self._p115_next_notify_time = int(time.time()) + delay_seconds
+
+                # 保存指针
+                if new_last_ts:
+                    self.save_data(self._P115_LAST_TS_KEY, int(new_last_ts))
+                if new_last_id:
+                    self.save_data(self._P115_LAST_ID_KEY, int(new_last_id))
+                return
+            except Exception:
+                # 若 p115client 不可用或异常，退回到简易 HTTP 方案
+                pass
+
+            # 回退：HTTP 方案（兼容性较差，仅作为兜底）
+            headers = {
+                "Accept": "application/json, text/plain, */*",
+                "Cookie": cookie,
+                "User-Agent": "MoviePilot/Plugin MHNotify",
+                "Referer": "https://115.com/"
+            }
+            candidate_urls = [
+                "https://webapi.115.com/life/events?limit=50",
+                "https://webapi.115.com/files/new?aid=1&cid=0&show_dir=1&offset=0&limit=50",
+            ]
+            hit_url = None
+            items: List[Dict[str, Any]] = []
+            for url in candidate_urls:
+                try:
+                    res = RequestUtils(headers=headers, timeout=20).get_res(url)
+                    if not res or res.status_code != 200:
+                        continue
+                    data = res.json()
+                    if "events" in data:
+                        items = data.get("events") or []
+                    elif "data" in data and isinstance(data.get("data"), dict) and ("list" in data["data"]):
+                        items = data.get("data", {}).get("list", [])
+                    elif "list" in data:
+                        items = data.get("list") or []
+                    else:
+                        items = []
+                    hit_url = url
+                    if items:
+                        break
+                except Exception:
+                    continue
+            if not items:
+                return
+
+            def normalize_event_name(item: Dict[str, Any]) -> str:
+                name = (item.get("action") or item.get("event") or item.get("type") or "").lower()
+                text = (item.get("action_text") or item.get("event_text") or item.get("name") or "").lower()
+                m = {
+                    "上传": "upload", "upload": "upload",
+                    "移动": "move", "move": "move",
+                    "接收": "receive", "receive": "receive",
+                    "新建": "create", "创建": "create", "create": "create",
+                    "复制": "copy", "copy": "copy",
+                    "删除": "delete", "移到回收站": "delete", "delete": "delete",
+                }
+                for k, v in m.items():
+                    if k in name or k in text:
+                        return v
+                return name or text or ""
+
+            def extract_ts(item: Dict[str, Any]) -> int:
+                for key in ("update_time", "utime", "time", "ctime", "created_time"):
+                    val = item.get(key)
+                    if isinstance(val, (int, float)):
+                        return int(val)
+                    if isinstance(val, str) and val.isdigit():
+                        return int(val)
+                return 0
+
+            def extract_id(item: Dict[str, Any]) -> int:
+                for key in ("id", "eid", "event_id"):
+                    val = item.get(key)
+                    if val is not None and str(val).isdigit():
+                        return int(val)
+                return 0
+
+            selected = set([x.lower() for x in (self._p115_events or [])])
+            def _match_rules(full_path: str, ev_simple: str) -> bool:
+                rules = self._p115_watch_rules or []
+                if not rules:
+                    return False
+                try:
+                    for r in rules:
+                        rp = (r.get('path') or '').strip()
+                        evs = [str(x).strip().lower() for x in (r.get('events') or [])]
+                        if not rp:
+                            continue
+                        if full_path.startswith(rp + '/') or full_path == rp:
+                            if not evs:
+                                return True
+                            return bool(ev_simple) and (ev_simple in evs)
+                    return False
+                except Exception:
+                    return False
+            has_new = False
+            new_last_ts = last_ts
+            new_last_id = last_id
+            triggered_events = []  # 收集触发的事件信息
+            for it in items:
+                # 输出原始事件数据用于调试
+                logger.debug(f"mhnotify: 115生活事件HTTP原始数据={it}")
+                
+                ev = normalize_event_name(it)
+                ts = extract_ts(it)
+                eid = extract_id(it)
+                if ts < last_ts or (ts == last_ts and eid <= last_id):
+                    continue
+                
+                # 如果事件类型未能识别，记录警告
+                if not ev:
+                    logger.warning(f"mhnotify: 115生活事件HTTP未识别类型，原始数据={it}")
+                
+                type_ok = (not selected) or (ev and ev in selected)
+                dir_ok = True
+                full_path = ""
+                # 目录事件规则优先（HTTP 兜底下尽力获取路径，可能不完整）
+                if type_ok and (self._p115_watch_rules or self._p115_watch_dirs):
+                    try:
+                        pid = int(it.get('parent_id') or 0)
+                        fname = str(it.get('file_name') or it.get('name') or '')
+                        full_dir = self._p115_dir_cache.get(pid)
+                        if not full_dir:
+                            full_dir = ''
+                        full_path = (full_dir + '/' + fname).replace('\\', '/')
+                        if self._p115_watch_rules:
+                            dir_ok = _match_rules(full_path=full_path, ev_simple=ev)
+                        elif self._p115_watch_dirs:
+                            dir_ok = any(full_path.startswith(d + '/') or full_path == d for d in self._p115_watch_dirs)
+                    except Exception:
+                        dir_ok = False
+                if type_ok and dir_ok:
+                    has_new = True
+                    # 记录触发的事件详情
+                    event_name_map = {
+                        "upload": "上传",
+                        "move": "移动",
+                        "receive": "接收",
+                        "create": "新建",
+                        "copy": "复制",
+                        "delete": "删除"
+                    }
+                    event_name = event_name_map.get(ev, ev or "未知")
+                    fname = str(it.get('file_name') or it.get('name') or '')
+                    triggered_events.append({"path": full_path or fname, "event": event_name})
+                if ts > new_last_ts or (ts == new_last_ts and eid > new_last_id):
+                    new_last_ts = ts
+                    new_last_id = eid
+
+            if has_new:
+                self._wait_notify_count += 1
+                self._last_event_time = int(time.time())
+                # 输出详细的触发信息
+                for evt in triggered_events:
+                    logger.info(f"mhnotify: 115生活事件触发 - 目录: {evt['path']} | 事件: {evt['event']}")
+                logger.info(f"mhnotify: 115生活事件触发（{hit_url}），共 {len(triggered_events)} 个事件，计入一次strm触发信号")
+                try:
+                    delay_seconds = max(int(self._p115_wait_minutes) * 60, 0)
+                except Exception:
+                    delay_seconds = 300
+                self._p115_next_notify_time = int(time.time()) + delay_seconds
+            if new_last_ts:
+                self.save_data(self._P115_LAST_TS_KEY, int(new_last_ts))
+            if new_last_id:
+                self.save_data(self._P115_LAST_ID_KEY, int(new_last_id))
+        except Exception:
+            logger.warning("mhnotify: 监听115生活事件异常", exc_info=True)
 
     @eventmanager.register(EventType.SubscribeAdded)
     def _on_subscribe_added(self, event: Event):
@@ -1430,9 +2560,9 @@ class MHNotify(_PluginBase):
                                     self.save_data(self._ASSIST_WATCH_KEY, watch)
                                     pending.pop(sid, None)
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
-            # 监听MP完成后删除MH
+            # 监听MP完成后删除MH（可选）
             watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
-            if watch:
+            if watch and self._mh_assist_auto_delete:
                 for sid, info in list(watch.items()):
                     with SessionFactory() as db:
                         sub = SubscribeOper(db=db).get(int(sid))
@@ -1518,6 +2648,101 @@ class MHNotify(_PluginBase):
             logger.error(f"mhnotify: 清除助手记录失败: {e}")
             return {"success": False, "error": str(e)}
 
+    def _add_offline_download(self, url: str) -> Tuple[bool, str]:
+        """
+        添加115离线下载任务
+        :param url: 下载链接（磁力链接、种子URL等）
+        :return: (是否成功, 消息文本)
+        """
+        try:
+            # 导入p115client
+            try:
+                from p115client import P115Client
+            except ImportError:
+                return False, "p115client 未安装，请先安装依赖"
+
+            # 创建115客户端
+            client = P115Client(self._p115_cookie, app="web")
+            
+            # 获取或创建目标目录ID
+            target_path = self._cloud_download_path or "/云下载"
+            try:
+                # 尝试获取目录信息
+                from p115client.tool.attr import get_path_to_cid
+                target_cid = get_path_to_cid(client, target_path)
+                if not target_cid:
+                    # 目录不存在，尝试创建
+                    logger.info(f"mhnotify: 目录 {target_path} 不存在，尝试创建...")
+                    # 使用115的mkdir接口创建目录
+                    parent_cid = 0  # 根目录
+                    dir_parts = [p for p in target_path.split('/') if p.strip()]
+                    for part in dir_parts:
+                        # 查找或创建子目录
+                        resp = client.fs_mkdir(part, pid=parent_cid)
+                        if resp.get('state'):
+                            parent_cid = resp.get('cid', parent_cid)
+                        else:
+                            # 可能目录已存在，尝试查找
+                            try:
+                                from p115client.tool.attr import get_cid_by_path_from_dir
+                                parent_cid = get_cid_by_path_from_dir(client, f"/{part}", parent_cid) or parent_cid
+                            except Exception:
+                                pass
+                    target_cid = parent_cid
+                logger.info(f"mhnotify: 目标目录ID: {target_cid}")
+            except Exception as e:
+                logger.warning(f"mhnotify: 获取目录ID失败，使用根目录: {e}")
+                target_cid = 0
+
+            # 添加离线下载任务
+            # 构建请求payload
+            payload = {
+                'url[0]': url,
+                'wp_path_id': target_cid
+            }
+            
+            # 调用115离线下载API
+            resp = client.offline_add_urls(payload)
+            
+            # 检查响应
+            if not resp:
+                return False, "115 API 响应为空"
+            
+            state = resp.get('state', False)
+            if not state:
+                error_msg = resp.get('error', '未知错误')
+                error_code = resp.get('errcode', '')
+                return False, f"添加失败: {error_msg} (错误码: {error_code})"
+            
+            # 解析返回的任务信息
+            data = resp.get('data', {})
+            result = data.get('result', [])
+            
+            if not result:
+                return False, "任务添加成功但未返回任务信息"
+            
+            # 获取第一个任务信息
+            task = result[0] if isinstance(result, list) else result
+            task_name = task.get('name', '未知任务')
+            info_hash = task.get('info_hash', '')
+            
+            success_msg = f"任务已添加到115云下载\n"
+            success_msg += f"任务名称: {task_name}\n"
+            success_msg += f"保存路径: {target_path}"
+            if info_hash:
+                success_msg += f"\nHash: {info_hash[:16]}..."
+            
+            logger.info(f"mhnotify: 115离线下载任务添加成功: {task_name}")
+            return True, success_msg
+            
+        except ImportError as e:
+            logger.error(f"mhnotify: 导入p115client失败: {e}")
+            return False, f"依赖库导入失败: {str(e)}"
+        except Exception as e:
+            logger.error(f"mhnotify: 添加115离线下载任务失败: {e}", exc_info=True)
+            return False, f"添加失败: {str(e)}"
+
+
     @eventmanager.register(EventType.PluginAction)
     def remote_clear_records(self, event: Event):
         """远程命令触发：清除订阅记录"""
@@ -1542,6 +2767,68 @@ class MHNotify(_PluginBase):
             title=title,
             userid=event_data.get("user")
         )
+
+    @eventmanager.register(EventType.PluginAction)
+    def handle_cloud_download(self, event: Event):
+        """远程命令触发：添加115云下载任务"""
+        if not event:
+            return
+        event_data = event.event_data
+        if not event_data or event_data.get("action") != "mh_add_offline":
+            return
+
+        # 检查功能是否启用
+        if not self._cloud_download_enabled:
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="云下载功能未启用",
+                text="请先在插件配置中启用115云下载功能",
+                userid=event_data.get("user")
+            )
+            return
+
+        # 检查115 Cookie是否配置
+        if not self._p115_cookie:
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="115 Cookie未配置",
+                text="请先在插件配置中填写115 Cookie",
+                userid=event_data.get("user")
+            )
+            return
+
+        # 获取下载链接
+        download_url = event_data.get("arg_str")
+        if not download_url or not download_url.strip():
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="参数错误",
+                text="用法: /mhol <下载链接>",
+                userid=event_data.get("user")
+            )
+            return
+
+        download_url = download_url.strip()
+        logger.info(f"mhnotify: 收到云下载命令，链接: {download_url}")
+
+        # 执行云下载
+        success, message = self._add_offline_download(download_url)
+
+        # 发送结果消息
+        if success:
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="云下载任务添加成功",
+                text=message,
+                userid=event_data.get("user")
+            )
+        else:
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="云下载任务添加失败",
+                text=message,
+                userid=event_data.get("user")
+            )
 
     def __finish_mp_subscribe(self, subscribe):
         try:
