@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.4.2"
+    plugin_version = "1.4.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2794,17 +2794,66 @@ class MHNotify(_PluginBase):
             # 响应可能是dict或其他类型
             if isinstance(resp, dict):
                 state = resp.get('state', False)
-                if not state:
-                    error_msg = resp.get('error', '未知错误')
-                    error_code = resp.get('errcode', '')
-                    logger.error(f"mhnotify: 离线下载失败，响应: {resp}")
-                    return False, f"添加失败: {error_msg} (错误码: {error_code})"
                 
-                # 解析返回的任务信息
+                # 解析返回的任务信息（无论成功还是失败，data中可能都有info_hash）
                 data = resp.get('data', {})
+                if isinstance(data, dict):
+                    info_hash = data.get('info_hash', '')
+                    task_name = data.get('name', '')
+                    files_list = data.get('files', [])
+                else:
+                    info_hash = ''
+                    task_name = ''
+                    files_list = []
+                
+                if not state:
+                    error_msg = resp.get('error_msg', '') or resp.get('error', '未知错误')
+                    error_code = resp.get('errcode', '')
+                    
+                    # 特殊处理错误码10008：任务已存在
+                    if error_code == 10008:
+                        logger.warning(f"mhnotify: 离线下载任务已存在: {info_hash}")
+                        
+                        # 构造详细的提示信息
+                        exist_msg = "⚠️ 云下载任务已存在\n"
+                        exist_msg += f"错误信息: {error_msg}\n"
+                        if info_hash:
+                            exist_msg += f"任务Hash: {info_hash[:16]}...\n"
+                        if files_list:
+                            exist_msg += f"包含文件: {len(files_list)} 个\n"
+                            # 显示主要文件名（跳过小图片）
+                            main_files = [f for f in files_list if f.get('size', 0) > 10*1024*1024]
+                            if main_files:
+                                exist_msg += f"主要文件: {main_files[0].get('name', '未知')[:50]}...\n"
+                        exist_msg += f"保存路径: {target_path}\n"
+                        exist_msg += "\n✅ 仍可监控现有任务完成状态"
+                        
+                        # 即使任务已存在，如果开启了后处理功能且有info_hash，仍然启动监控
+                        if (self._cloud_download_remove_small_files or self._cloud_download_organize) and info_hash:
+                            try:
+                                import threading
+                                threading.Thread(
+                                    target=self._monitor_and_remove_small_files,
+                                    args=(client, info_hash, target_cid, task_name or "已存在的任务", target_path),
+                                    daemon=True
+                                ).start()
+                                logger.info(f"mhnotify: 已为现有任务 {info_hash[:16]} 启动后处理监控")
+                            except Exception as e:
+                                logger.warning(f"mhnotify: 启动后处理任务失败: {e}")
+                        
+                        return True, exist_msg
+                    else:
+                        # 其他错误
+                        logger.error(f"mhnotify: 离线下载失败，响应: {resp}")
+                        fail_msg = f"❌ 添加失败\n"
+                        fail_msg += f"错误信息: {error_msg}\n"
+                        fail_msg += f"错误码: {error_code}"
+                        if info_hash:
+                            fail_msg += f"\nHash: {info_hash[:16]}..."
+                        return False, fail_msg
+                
+                # 成功添加
                 # 单个URL返回的结构可能不同
-                info_hash = data.get('info_hash', '')
-                task_name = data.get('name', '')
                 
                 if not task_name:
                     # 尝试从其他字段获取
@@ -2866,51 +2915,57 @@ class MHNotify(_PluginBase):
             # 最多等待24小时（每分钟检查一次）
             max_checks = 1440
             check_interval = 60  # 秒
+            # 连续失败计数器
+            consecutive_failures = 0
+            max_consecutive_failures = 5
             
             for i in range(max_checks):
                 try:
-                    # 查询离线下载任务状态
-                    tasks_result = client.offline_list()
+                    # 使用115 Web API查询离线任务列表
+                    # 参考 115-ol-list.txt，直接调用 task_lists 接口
+                    current_task = self._query_offline_task_by_hash(client, info_hash)
                     
-                    # 处理返回结果，可能是迭代器或列表
-                    tasks = []
-                    if tasks_result:
-                        try:
-                            # 尝试将结果转换为列表
-                            tasks = list(tasks_result) if hasattr(tasks_result, '__iter__') else []
-                        except Exception as e:
-                            logger.debug(f"mhnotify: 转换任务列表失败: {e}")
-                            tasks = []
-                    
-                    if not tasks:
-                        logger.debug(f"mhnotify: 无法获取离线任务列表，继续等待...")
-                        time.sleep(check_interval)
-                        continue
-                    
-                    # 查找当前任务
-                    current_task = None
-                    for task in tasks:
-                        # 确保task是字典类型
-                        if not isinstance(task, dict):
-                            continue
-                        if task.get('info_hash') == info_hash:
-                            current_task = task
-                            break
+                    # 类型检查：确保返回的是字典
+                    if current_task and not isinstance(current_task, dict):
+                        logger.warning(f"mhnotify: 查询任务返回类型错误: {type(current_task)}")
+                        current_task = None
                     
                     if not current_task:
-                        logger.warning(f"mhnotify: 未找到任务 {info_hash}，可能已完成或被删除")
-                        break
+                        # 第一次查询时可能任务还未同步，继续等待
+                        if i == 0:
+                            logger.debug(f"mhnotify: 任务 {info_hash} 暂未找到，继续等待...")
+                            consecutive_failures = 0  # 重置计数
+                            time.sleep(check_interval)
+                            continue
+                        else:
+                            logger.warning(f"mhnotify: 未找到任务 {info_hash}，可能已被删除")
+                            break
                     
-                    # 检查任务状态：2=已完成
+                    # 查询成功，重置失败计数
+                    consecutive_failures = 0
+                    
+                    # 检查任务状态：2=已完成, 1=失败, 0=下载中
                     status = current_task.get('status', 0)
                     if status == 2:
                         logger.info(f"mhnotify: 离线下载任务已完成: {task_name}")
+                        
+                        # 从任务信息中获取实际文件路径ID（wp_path_id）
+                        actual_cid = current_task.get('wp_path_id', '')
+                        if actual_cid:
+                            try:
+                                actual_cid = int(actual_cid)
+                            except:
+                                actual_cid = target_cid
+                        else:
+                            actual_cid = target_cid
+                        
+                        logger.info(f"mhnotify: 实际文件目录ID: {actual_cid}")
                         
                         # 如果开启了剔除小文件，先删除小文件
                         if self._cloud_download_remove_small_files:
                             logger.info(f"mhnotify: 开始清理小文件...")
                             time.sleep(5)  # 等待5秒确保文件列表同步
-                            self._remove_small_files_in_directory(client, target_cid)
+                            self._remove_small_files_in_directory(client, actual_cid)
                         
                         # 如果开启了移动整理，执行移动整理
                         if self._cloud_download_organize and target_path:
@@ -2934,13 +2989,105 @@ class MHNotify(_PluginBase):
                         time.sleep(check_interval)
                         
                 except Exception as e:
-                    logger.warning(f"mhnotify: 检查离线下载状态异常: {e}")
+                    consecutive_failures += 1
+                    logger.warning(f"mhnotify: 检查离线下载状态异常 ({consecutive_failures}/{max_consecutive_failures}): {e}")
+                    
+                    # 连续失败5次后停止检查
+                    if consecutive_failures >= max_consecutive_failures:
+                        logger.error(f"mhnotify: 连续{max_consecutive_failures}次检查失败，停止监控任务: {task_name}")
+                        break
+                    
                     time.sleep(check_interval)
             
             logger.info(f"mhnotify: 离线下载监控任务结束: {task_name}")
             
         except Exception as e:
             logger.error(f"mhnotify: 监控离线下载任务异常: {e}", exc_info=True)
+    
+    def _query_offline_task_by_hash(self, client, info_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        使用115 Web API查询离线任务（通过info_hash匹配）
+        :param client: P115Client实例
+        :param info_hash: 任务hash
+        :return: 任务信息字典或None
+        """
+        try:
+            # 构造请求参数
+            # 参考 115-ol-list.txt，需要 page, stat, uid, sign, time 参数
+            import time as time_module
+            import hashlib
+            
+            # 获取用户ID（从cookie或client中获取）
+            uid = None
+            try:
+                # 尝试从client获取用户信息
+                user_info = client.fs_userinfo()
+                if user_info and isinstance(user_info, dict):
+                    uid = user_info.get('user_id')
+            except:
+                pass
+            
+            if not uid:
+                # 从cookie中解析UID
+                cookie_dict = {}
+                for item in self._p115_cookie.split(';'):
+                    item = item.strip()
+                    if '=' in item:
+                        k, v = item.split('=', 1)
+                        cookie_dict[k.strip()] = v.strip()
+                uid_str = cookie_dict.get('UID', '')
+                if uid_str and '_' in uid_str:
+                    uid = uid_str.split('_')[0]
+            
+            if not uid:
+                logger.warning(f"mhnotify: 无法获取115用户ID")
+                return None
+            
+            # 构造签名（参考115-ol-list API）
+            timestamp = int(time_module.time())
+            # 签名算法：md5(uid + time)，实际算法可能不同，这里先尝试简单方式
+            sign_str = f"{uid}{timestamp}"
+            sign = hashlib.md5(sign_str.encode()).hexdigest()
+            
+            # 调用离线任务列表API
+            # stat=11表示查询所有任务（包括已完成）
+            url = "https://115.com/web/lixian/?ct=lixian&ac=task_lists"
+            params = {
+                'page': 1,
+                'stat': 11,  # 11=所有任务
+                'uid': uid,
+                'sign': sign,
+                'time': timestamp
+            }
+            
+            # 使用RequestUtils发送请求
+            headers = {
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Cookie": self._p115_cookie,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            
+            response = RequestUtils(headers=headers).post_res(url, data=params)
+            if not response or response.status_code != 200:
+                logger.debug(f"mhnotify: 查询离线任务列表失败: {response.status_code if response else 'No response'}")
+                return None
+            
+            result = response.json()
+            if not result or not result.get('state'):
+                logger.debug(f"mhnotify: 离线任务列表响应异常: {result}")
+                return None
+            
+            # 查找匹配的任务
+            tasks = result.get('tasks', [])
+            for task in tasks:
+                if task.get('info_hash', '').lower() == info_hash.lower():
+                    return task
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"mhnotify: 查询离线任务异常: {e}")
+            return None
 
     def _remove_small_files_in_directory(self, client, cid: int):
         """
