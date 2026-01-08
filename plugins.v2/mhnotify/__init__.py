@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.4.1"
+    plugin_version = "1.4.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -1666,6 +1666,12 @@ class MHNotify(_PluginBase):
                 new_last_ts = last_ts
                 new_last_id = last_id
                 triggered_events = []  # 收集触发的事件信息
+                
+                # 只处理最近10分钟内的事件
+                current_time = int(time.time())
+                time_window = 10 * 60  # 10分钟
+                cutoff_time = current_time - time_window
+                
                 # p115strmhelper 在 once_pull 中最终以最新事件更新指针；这里按时间/ID取最大
                 for it in events:
                     try:
@@ -1678,6 +1684,15 @@ class MHNotify(_PluginBase):
                         continue
                     # 跳过旧事件
                     if ut < last_ts or (ut == last_ts and eid <= last_id):
+                        continue
+                    
+                    # 跳过超过10分钟的旧事件
+                    if ut < cutoff_time:
+                        logger.debug(f"mhnotify: 跳过10分钟前的旧事件: {fname}, 时间: {ut}")
+                        # 更新指针但不触发
+                        if ut > new_last_ts or (ut == new_last_ts and eid > new_last_id):
+                            new_last_ts = ut
+                            new_last_id = eid
                         continue
                     
                     # 输出原始事件数据用于调试（仅记录新事件）
@@ -2855,7 +2870,18 @@ class MHNotify(_PluginBase):
             for i in range(max_checks):
                 try:
                     # 查询离线下载任务状态
-                    tasks = client.offline_list()
+                    tasks_result = client.offline_list()
+                    
+                    # 处理返回结果，可能是迭代器或列表
+                    tasks = []
+                    if tasks_result:
+                        try:
+                            # 尝试将结果转换为列表
+                            tasks = list(tasks_result) if hasattr(tasks_result, '__iter__') else []
+                        except Exception as e:
+                            logger.debug(f"mhnotify: 转换任务列表失败: {e}")
+                            tasks = []
+                    
                     if not tasks:
                         logger.debug(f"mhnotify: 无法获取离线任务列表，继续等待...")
                         time.sleep(check_interval)
@@ -2864,6 +2890,9 @@ class MHNotify(_PluginBase):
                     # 查找当前任务
                     current_task = None
                     for task in tasks:
+                        # 确保task是字典类型
+                        if not isinstance(task, dict):
+                            continue
                         if task.get('info_hash') == info_hash:
                             current_task = task
                             break
