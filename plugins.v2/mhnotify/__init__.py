@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.3.6"
+    plugin_version = "1.3.7"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2666,32 +2666,63 @@ class MHNotify(_PluginBase):
             
             # 获取或创建目标目录ID
             target_path = self._cloud_download_path or "/云下载"
+            target_cid = 0
+            
             try:
-                # 尝试获取目录信息
-                from p115client.tool.attr import get_path_to_cid
-                target_cid = get_path_to_cid(client, target_path)
-                if not target_cid:
-                    # 目录不存在，尝试创建
-                    logger.info(f"mhnotify: 目录 {target_path} 不存在，尝试创建...")
-                    # 使用115的mkdir接口创建目录
-                    parent_cid = 0  # 根目录
-                    dir_parts = [p for p in target_path.split('/') if p.strip()]
-                    for part in dir_parts:
-                        # 查找或创建子目录
-                        resp = client.fs_mkdir(part, pid=parent_cid)
-                        if resp.get('state'):
-                            parent_cid = resp.get('cid', parent_cid)
-                        else:
-                            # 可能目录已存在，尝试查找
-                            try:
-                                from p115client.tool.attr import get_cid_by_path_from_dir
-                                parent_cid = get_cid_by_path_from_dir(client, f"/{part}", parent_cid) or parent_cid
-                            except Exception:
-                                pass
-                    target_cid = parent_cid
-                logger.info(f"mhnotify: 目标目录ID: {target_cid}")
+                # 使用p115client的工具函数获取目录ID
+                # 参考p115strmhelper的实现
+                def get_cid_by_path(client, path):
+                    """根据路径获取目录ID"""
+                    if not path or path == '/':
+                        return 0
+                    
+                    # 标准化路径
+                    path = path.strip()
+                    if not path.startswith('/'):
+                        path = '/' + path
+                    path = path.rstrip('/')
+                    
+                    # 分割路径
+                    parts = [p for p in path.split('/') if p]
+                    if not parts:
+                        return 0
+                    
+                    # 从根目录开始逐级查找
+                    current_cid = 0
+                    for part in parts:
+                        # 获取当前目录下的文件列表
+                        resp = client.fs_files(cid=current_cid, limit=1150)
+                        if not resp or not resp.get('state'):
+                            return None
+                        
+                        # 查找匹配的子目录
+                        found = False
+                        for item in resp.get('data', []):
+                            if item.get('name') == part and item.get('is_directory'):
+                                current_cid = item.get('cid')
+                                found = True
+                                break
+                        
+                        if not found:
+                            # 目录不存在，创建它
+                            mkdir_resp = client.fs_mkdir(part, pid=current_cid)
+                            if mkdir_resp and mkdir_resp.get('state'):
+                                current_cid = mkdir_resp.get('cid')
+                            else:
+                                logger.warning(f"mhnotify: 创建目录 {part} 失败")
+                                return None
+                    
+                    return current_cid
+                
+                target_cid = get_cid_by_path(client, target_path)
+                if target_cid is None:
+                    logger.warning(f"mhnotify: 获取目录ID失败，使用根目录")
+                    target_cid = 0
+                else:
+                    logger.info(f"mhnotify: 目标目录ID: {target_cid}")
+                    
             except Exception as e:
-                logger.warning(f"mhnotify: 获取目录ID失败，使用根目录: {e}")
+                logger.warning(f"mhnotify: 获取目录ID异常，使用根目录: {e}")
                 target_cid = 0
 
             # 添加离线下载任务
