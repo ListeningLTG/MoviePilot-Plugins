@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.4.3"
+    plugin_version = "1.4.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2949,8 +2949,9 @@ class MHNotify(_PluginBase):
                     if status == 2:
                         logger.info(f"mhnotify: 离线下载任务已完成: {task_name}")
                         
-                        # 从任务信息中获取实际文件路径ID（wp_path_id）
-                        actual_cid = current_task.get('wp_path_id', '')
+                        # 从任务信息中获取实际文件/文件夹ID（file_id）
+                        # file_id 是下载完成后的文件或文件夹的实际ID
+                        actual_cid = current_task.get('file_id', '')
                         if actual_cid:
                             try:
                                 actual_cid = int(actual_cid)
@@ -2959,13 +2960,20 @@ class MHNotify(_PluginBase):
                         else:
                             actual_cid = target_cid
                         
-                        logger.info(f"mhnotify: 实际文件目录ID: {actual_cid}")
+                        logger.info(f"mhnotify: 实际文件/文件夹ID: {actual_cid}")
+                        
+                        # 检查 file_category，只有文件夹才需要清理小文件
+                        file_category = current_task.get('file_category', 1)
+                        is_directory = (file_category == 0)
                         
                         # 如果开启了剔除小文件，先删除小文件
                         if self._cloud_download_remove_small_files:
-                            logger.info(f"mhnotify: 开始清理小文件...")
-                            time.sleep(5)  # 等待5秒确保文件列表同步
-                            self._remove_small_files_in_directory(client, actual_cid)
+                            if is_directory:
+                                logger.info(f"mhnotify: 检测到文件夹，开始清理小文件...")
+                                time.sleep(5)  # 等待5秒确保文件列表同步
+                                self._remove_small_files_in_directory(client, actual_cid)
+                            else:
+                                logger.info(f"mhnotify: 检测到单个文件，跳过小文件清理")
                         
                         # 如果开启了移动整理，执行移动整理
                         if self._cloud_download_organize and target_path:
