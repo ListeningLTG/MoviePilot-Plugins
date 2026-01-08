@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.4.6"
+    plugin_version = "1.4.7"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -131,17 +131,29 @@ class MHNotify(_PluginBase):
             except Exception:
                 self._hdhive_refresh_before = 3600
 
-            # 清除助手记录（运行一次）
+            # 清理助手订阅记录（运行一次）
             try:
                 if bool(config.get("clear_once", False)):
-                    logger.info("mhnotify: 检测到清除助手记录（运行一次）开关已开启，开始清理...")
+                    logger.info("mhnotify: 检测到清理助手订阅记录（运行一次）开关已开启，开始清理...")
                     self._clear_all_records()
                     # 复位为关闭，并更新配置
                     config["clear_once"] = False
                     self.update_config(config)
-                    logger.info("mhnotify: 助手记录清理完成，已自动复位为关闭")
+                    logger.info("mhnotify: 助手订阅记录清理完成，已自动复位为关闭")
             except Exception:
-                logger.error("mhnotify: 执行清理助手记录失败", exc_info=True)
+                logger.error("mhnotify: 执行清理助手订阅记录失败", exc_info=True)
+            
+            # 清理助手云下载记录（运行一次）
+            try:
+                if bool(config.get("clear_cloud_download_once", False)):
+                    logger.info("mhnotify: 检测到清理助手云下载记录（运行一次）开关已开启，开始清理...")
+                    self._clear_cloud_download_records()
+                    # 复位为关闭，并更新配置
+                    config["clear_cloud_download_once"] = False
+                    self.update_config(config)
+                    logger.info("mhnotify: 助手云下载记录清理完成，已自动复位为关闭")
+            except Exception:
+                logger.error("mhnotify: 执行清理助手云下载记录失败", exc_info=True)
 
             # 115 生活事件
             self._p115_life_enabled = bool(config.get("p115_life_enabled", False))
@@ -310,15 +322,6 @@ class MHNotify(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         """定义远程控制命令"""
         return [
-            {
-                "cmd": "/mhnotify_clear",
-                "event": EventType.PluginAction,
-                "desc": "清除订阅记录（移除脏数据）",
-                "category": "维护",
-                "data": {
-                    "action": "mhnotify_clear"
-                }
-            },
             {
                 "cmd": "/mhol",
                 "event": EventType.PluginAction,
@@ -557,6 +560,7 @@ class MHNotify(_PluginBase):
             "mh_assist": False,
             "mh_assist_auto_delete": False,
             "clear_once": False,
+            "clear_cloud_download_once": False,
             "hdhive_enabled": False,
             "hdhive_query_mode": "api",
             "hdhive_username": "",
@@ -1137,16 +1141,36 @@ class MHNotify(_PluginBase):
                             {
                                 'component': 'VCol',
                                 'props': {
-                                    'cols': 12,
-                                    'md': 6
+                                    'cols': 12
                                 },
                                 'content': [
                                     {
                                         'component': 'VSwitch',
                                         'props': {
                                             'model': 'clear_once',
-                                            'label': '清除助手记录（运行一次）',
-                                            'hint': '开启后点保存立即清除所有助手记录（pending/watch），随后自动复位为关闭，移除脏数据'
+                                            'label': '清理助手订阅记录（运行一次）',
+                                            'hint': '⚠️ 开启后点保存立即清除本助手里的MH订阅监听记录（pending/watch），清理后将无法再监听之前添加的MH订阅记录。用于移除脏数据或重置助手状态，操作后自动复位为关闭'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'clear_cloud_download_once',
+                                            'label': '清理助手云下载记录（运行一次）',
+                                            'hint': '⚠️ 开启后点保存立即清除本助手里的云下载监控记录，清理后将无法再监听之前添加的云下载任务记录。当前版本云下载使用实时线程监控（预留接口），操作后自动复位为关闭'
                                         }
                                     }
                                 ]
@@ -2709,14 +2733,25 @@ class MHNotify(_PluginBase):
             logger.error(f"mhnotify: 助手调度异常: {e}")
 
     def _clear_all_records(self) -> Dict[str, Any]:
-        """清除助手记录（pending/watch），移除脏数据"""
+        """清理助手订阅记录（pending/watch），移除脏数据"""
         try:
             self.save_data(self._ASSIST_PENDING_KEY, {})
             self.save_data(self._ASSIST_WATCH_KEY, {})
-            logger.info("mhnotify: 已清除助手记录（pending/watch）")
+            logger.info("mhnotify: 已清理助手订阅记录（pending/watch）")
             return {"success": True}
         except Exception as e:
-            logger.error(f"mhnotify: 清除助手记录失败: {e}")
+            logger.error(f"mhnotify: 清理助手订阅记录失败: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _clear_cloud_download_records(self) -> Dict[str, Any]:
+        """清理助手云下载记录（预留接口）"""
+        try:
+            # 当前版本云下载使用daemon线程，无持久化数据需要清理
+            # 此方法为将来可能的云下载记录功能预留接口
+            logger.info("mhnotify: 云下载记录清理完成（当前版本无需清理）")
+            return {"success": True}
+        except Exception as e:
+            logger.error(f"mhnotify: 清理云下载记录失败: {e}")
             return {"success": False, "error": str(e)}
 
     def _add_offline_download(self, url: str) -> Tuple[bool, str]:
@@ -3808,31 +3843,6 @@ class MHNotify(_PluginBase):
             logger.info(f"mhnotify: 云下载失败通知已发送: {task_name}")
         except Exception as e:
             logger.error(f"mhnotify: 发送云下载失败通知失败: {e}", exc_info=True)
-
-    @eventmanager.register(EventType.PluginAction)
-    def remote_clear_records(self, event: Event):
-        """远程命令触发：清除订阅记录"""
-        if not event:
-            return
-        event_data = event.event_data
-        if not event_data or event_data.get("action") != "mhnotify_clear":
-            return
-
-        logger.info("收到命令，开始清除 mhnotify 助手记录...")
-        self.post_message(
-            channel=event_data.get("channel"),
-            title="开始清除 mhnotify 助手记录...",
-            userid=event_data.get("user")
-        )
-
-        result = self._clear_all_records()
-
-        title = "mhnotify 助手记录清除完成" if result.get("success") else f"mhnotify 助手记录清除失败：{result.get('error')}"
-        self.post_message(
-            channel=event_data.get("channel"),
-            title=title,
-            userid=event_data.get("user")
-        )
 
     @eventmanager.register(EventType.PluginAction)
     def handle_cloud_download(self, event: Event):
