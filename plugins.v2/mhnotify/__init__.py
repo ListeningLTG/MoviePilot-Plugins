@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.4.5"
+    plugin_version = "1.4.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2902,17 +2902,104 @@ class MHNotify(_PluginBase):
             import time
             logger.info(f"mhnotify: 开始监控离线下载任务: {task_name}")
             
-            # 最多等待24小时（每分钟检查一次）
-            max_checks = 1440
-            check_interval = 60  # 秒
-            # 连续失败计数器
-            consecutive_failures = 0
-            max_consecutive_failures = 5
+            # 添加任务后等待1分钟，让任务有时间出现在下载列表中
+            logger.info(f"mhnotify: 等待60秒，让任务进入下载队列...")
+            time.sleep(60)
             
-            for i in range(max_checks):
+            # ========== 第一阶段：监控正在下载 ==========
+            # 使用 stat=12 查询正在下载的任务
+            logger.info(f"mhnotify: 第一阶段 - 监控正在下载状态...")
+            
+            # 前10分钟每分钟检查一次（初始等待期），之后每2分钟检查一次
+            initial_checks = 10  # 初始快速检查次数
+            initial_check_interval = 60  # 初始检查间隔：1分钟
+            normal_check_interval = 120  # 正常检查间隔：2分钟
+            max_downloading_checks = 720  # 最多检查24小时
+            
+            task_found = False  # 标记是否至少找到过一次任务
+            not_found_count = 0  # 连续未找到任务的次数
+            max_not_found_before_found = 10  # 任务出现前最多容忍10次未找到（10分钟）
+            max_not_found_after_found = 3  # 任务出现后最多容忍3次未找到才认为已完成
+            
+            for i in range(max_downloading_checks):
                 try:
-                    # 使用115 Web API查询离线任务列表
-                    # 参考 115-ol-list.txt，直接调用 task_lists 接口
+                    # 查询正在下载的任务（stat=12）
+                    downloading_task = self._query_downloading_task_by_hash(client, info_hash)
+                    
+                    if downloading_task:
+                        # 找到任务了
+                        task_found = True
+                        not_found_count = 0  # 重置未找到计数
+                        
+                        percent = downloading_task.get('percentDone', 0)
+                        status = downloading_task.get('status', 0)
+                        
+                        # status=1 表示正在下载
+                        if status == 1:
+                            # 使用正常检查间隔（2分钟）
+                            if i % 5 == 0 or i < initial_checks:  # 初始期或每10分钟记录一次进度
+                                logger.info(f"mhnotify: 正在下载: {task_name} - {percent:.1f}%")
+                            time.sleep(normal_check_interval)
+                            continue
+                        else:
+                            # status != 1，可能下载完成或失败，跳出循环
+                            logger.info(f"mhnotify: 任务状态变化 (status={status})，进入下一阶段...")
+                            break
+                    else:
+                        # 正在下载列表中未找到任务
+                        not_found_count += 1
+                        
+                        if not task_found:
+                            # 任务还从未被找到过，可能还在初始化
+                            if not_found_count >= max_not_found_before_found:
+                                logger.warning(f"mhnotify: 等待10分钟仍未找到任务，可能添加失败或已被删除")
+                                self._send_cloud_download_deleted_notification(task_name)
+                                return
+                            else:
+                                # 使用初始检查间隔（1分钟）
+                                if not_found_count % 3 == 1:  # 每3分钟提示一次
+                                    logger.info(f"mhnotify: 等待任务出现在下载列表... ({not_found_count}/{max_not_found_before_found})")
+                                time.sleep(initial_check_interval)
+                                continue
+                        else:
+                            # 任务之前找到过，现在找不到了
+                            if not_found_count >= max_not_found_after_found:
+                                # 连续多次找不到，说明已完成或失败，进入第二阶段
+                                logger.info(f"mhnotify: 任务已不在下载列表中，进入已完成检查阶段...")
+                                break
+                            else:
+                                logger.debug(f"mhnotify: 暂时未找到任务 ({not_found_count}/{max_not_found_after_found})，继续等待...")
+                                time.sleep(normal_check_interval)
+                                continue
+                        
+                except Exception as e:
+                    logger.warning(f"mhnotify: 查询正在下载任务异常: {e}")
+                    # 出现异常也计入未找到次数
+                    not_found_count += 1
+                    
+                    if not task_found and not_found_count >= max_not_found_before_found:
+                        logger.error(f"mhnotify: 连续多次查询异常，停止监控")
+                        return
+                    
+                    # 根据是否在初始期选择等待时间
+                    wait_time = initial_check_interval if not task_found else normal_check_interval
+                    time.sleep(wait_time)
+            
+            # ========== 第二阶段：检查已完成任务 ==========
+            logger.info(f"mhnotify: 第二阶段 - 检查已完成任务...")
+            
+            # 等待3秒，确保任务状态同步
+            time.sleep(3)
+            
+            # 使用 stat=11 查询所有任务（包括已完成）
+            max_completed_checks = 5  # 最多检查5次
+            completed_check_interval = 10  # 10秒
+            consecutive_failures = 0
+            max_consecutive_failures = 3
+            
+            for i in range(max_completed_checks):
+                try:
+                    # 使用115 Web API查询离线任务列表（stat=11 查询所有任务）
                     current_task = self._query_offline_task_by_hash(client, info_hash)
                     
                     # 类型检查：确保返回的是字典
@@ -2921,15 +3008,18 @@ class MHNotify(_PluginBase):
                         current_task = None
                     
                     if not current_task:
-                        # 第一次查询时可能任务还未同步，继续等待
-                        if i == 0:
-                            logger.debug(f"mhnotify: 任务 {info_hash} 暂未找到，继续等待...")
-                            consecutive_failures = 0  # 重置计数
-                            time.sleep(check_interval)
-                            continue
-                        else:
-                            logger.warning(f"mhnotify: 未找到任务 {info_hash}，可能已被删除")
+                        # 未找到任务
+                        consecutive_failures += 1
+                        logger.warning(f"mhnotify: 未找到已完成任务 {info_hash[:16]}... (尝试 {consecutive_failures}/{max_consecutive_failures})")
+                        
+                        if consecutive_failures >= max_consecutive_failures:
+                            # 连续多次未找到，可能被删除了
+                            logger.error(f"mhnotify: 任务 {info_hash[:16]}... 可能已被删除")
+                            self._send_cloud_download_deleted_notification(task_name)
                             break
+                        
+                        time.sleep(completed_check_interval)
+                        continue
                     
                     # 查询成功，重置失败计数
                     consecutive_failures = 0
@@ -2956,12 +3046,17 @@ class MHNotify(_PluginBase):
                         file_category = current_task.get('file_category', 1)
                         is_directory = (file_category == 0)
                         
+                        # 记录清理结果用于通知
+                        removed_count = 0
+                        removed_size_mb = 0.0
+                        
                         # 如果开启了剔除小文件，先删除小文件
                         if self._cloud_download_remove_small_files:
                             if is_directory:
                                 logger.info(f"mhnotify: 检测到文件夹，开始清理小文件...")
                                 time.sleep(5)  # 等待5秒确保文件列表同步
-                                self._remove_small_files_in_directory(client, actual_cid)
+                                removed_count, removed_size = self._remove_small_files_in_directory(client, actual_cid)
+                                removed_size_mb = removed_size / 1024 / 1024
                             else:
                                 logger.info(f"mhnotify: 检测到单个文件，跳过小文件清理")
                         
@@ -2975,27 +3070,28 @@ class MHNotify(_PluginBase):
                             else:
                                 logger.error(f"mhnotify: 无法获取MH access token，跳过移动整理")
                         
+                        # 发送云下载完成通知
+                        self._send_cloud_download_notification(task_name, removed_count, removed_size_mb)
+                        
                         break
                     elif status == 1:
                         logger.warning(f"mhnotify: 离线下载任务失败: {task_name}")
+                        self._send_cloud_download_failed_notification(task_name)
                         break
                     else:
-                        # 继续等待
-                        percent = current_task.get('percentDone', 0)
-                        if i % 10 == 0:  # 每10分钟记录一次进度
-                            logger.debug(f"mhnotify: 离线下载进度: {task_name} - {percent*100:.1f}%")
-                        time.sleep(check_interval)
+                        # status 不为 2 也不为 1，继续等待
+                        logger.info(f"mhnotify: 任务状态: {status}，继续等待...")
+                        time.sleep(completed_check_interval)
                         
                 except Exception as e:
                     consecutive_failures += 1
-                    logger.warning(f"mhnotify: 检查离线下载状态异常 ({consecutive_failures}/{max_consecutive_failures}): {e}")
+                    logger.warning(f"mhnotify: 检查已完成任务异常 ({consecutive_failures}/{max_consecutive_failures}): {e}")
                     
-                    # 连续失败5次后停止检查
                     if consecutive_failures >= max_consecutive_failures:
                         logger.error(f"mhnotify: 连续{max_consecutive_failures}次检查失败，停止监控任务: {task_name}")
                         break
                     
-                    time.sleep(check_interval)
+                    time.sleep(completed_check_interval)
             
             logger.info(f"mhnotify: 离线下载监控任务结束: {task_name} (Hash: {info_hash[:16]}...)")
             
@@ -3087,114 +3183,220 @@ class MHNotify(_PluginBase):
             logger.debug(f"mhnotify: 查询离线任务异常: {e}")
             return None
 
-    def _remove_small_files_in_directory(self, client, cid: int):
+    def _remove_small_files_in_directory(self, client, cid: int) -> Tuple[int, int]:
         """
-        删除目录中小于10MB的文件
+        删除目录中小于10MB的文件（递归遍历子目录）
         :param client: P115Client实例
         :param cid: 目录ID (文件夹的file_id)
+        :return: (删除文件数量, 删除文件总大小字节数)
         """
         try:
-            # 查询目录下的文件列表
-            logger.info(f"mhnotify: 开始查询目录文件列表，cid={cid}")
+            logger.info(f"mhnotify: 开始递归清理小文件，根目录cid={cid}")
             
-            offset = 0
-            limit = 1000
+            min_size = 10 * 1024 * 1024  # 10MB
             removed_count = 0
             removed_size = 0
-            min_size = 10 * 1024 * 1024  # 10MB
             
-            while True:
-                # 调用115 API获取文件列表
-                # fs_files 返回的是迭代器或字典，需要正确处理
-                try:
-                    resp = client.fs_files(cid=cid, limit=limit, offset=offset)
-                    logger.debug(f"mhnotify: fs_files 响应类型: {type(resp)}")
-                except Exception as e:
-                    logger.warning(f"mhnotify: fs_files 调用失败: {e}")
-                    break
+            # 使用 p115client.tool.iterdir 的 iter_files 递归遍历所有文件
+            try:
+                from p115client.tool.iterdir import iter_files  # type: ignore
+                logger.info("mhnotify: 使用 iter_files 递归遍历目录...")
                 
-                # 处理响应，可能是字典或迭代器
-                files = []
-                if isinstance(resp, dict):
-                    # 字典格式，文件列表在 data 字段
-                    files = resp.get('data', [])
-                    if not files:
-                        # 也可能直接是文件列表格式
-                        files = resp.get('files', [])
-                    logger.debug(f"mhnotify: fs_files 返回字典，文件数: {len(files)}")
-                elif hasattr(resp, '__iter__'):
-                    # 迭代器格式
+                # iter_files 会递归返回所有文件（不含目录）
+                for attr in iter_files(client, cid):
                     try:
-                        files = list(resp)
-                        logger.debug(f"mhnotify: fs_files 返回迭代器，文件数: {len(files)}")
+                        # attr 是一个 dict，包含 id, parent_id, name, size, is_dir 等
+                        if not isinstance(attr, dict):
+                            continue
+                        
+                        # iter_files 只返回文件，但还是检查一下
+                        is_dir = attr.get('is_dir', False)
+                        if is_dir:
+                            continue
+                        
+                        file_id = attr.get('id') or attr.get('fid') or attr.get('file_id')
+                        file_name = attr.get('name') or attr.get('n') or attr.get('fn') or ''
+                        file_size = attr.get('size') or attr.get('fs') or attr.get('s') or 0
+                        
+                        if isinstance(file_size, str):
+                            try:
+                                file_size = int(file_size)
+                            except:
+                                file_size = 0
+                        
+                        if not file_id:
+                            logger.debug(f"mhnotify: 文件无ID，跳过: {file_name}")
+                            continue
+                        
+                        logger.debug(f"mhnotify: 检查文件: {file_name}, 大小: {file_size/1024/1024:.2f}MB")
+                        
+                        # 如果文件小于10MB，删除
+                        if file_size < min_size:
+                            try:
+                                logger.info(f"mhnotify: 准备删除小文件: {file_name} ({file_size/1024/1024:.2f}MB)")
+                                client.fs_delete(file_id)
+                                removed_count += 1
+                                removed_size += file_size
+                                logger.info(f"mhnotify: 成功删除小文件: {file_name}")
+                            except Exception as e:
+                                logger.warning(f"mhnotify: 删除文件失败 {file_name}: {e}")
                     except Exception as e:
-                        logger.warning(f"mhnotify: 转换文件列表失败: {e}")
-                        break
-                
-                if not files:
-                    logger.debug(f"mhnotify: 目录下没有文件")
-                    break
-                
-                # 遍历文件，找出小于10MB的
-                for item in files:
-                    if not isinstance(item, dict):
+                        logger.debug(f"mhnotify: 处理文件项异常: {e}")
                         continue
-                    
-                    # 115 API 字段名可能是 fc/file_category 或 ico 等
-                    # fc=1 或 file_category=1 表示文件
-                    file_category = item.get('fc') or item.get('file_category')
-                    # 如果没有fc字段，通过是否有fid且无cid来判断（文件有fid，目录有cid）
-                    is_file = file_category == 1 or file_category == '1'
-                    if not is_file:
-                        # 尝试其他方式判断
-                        if 'fid' in item and 'cid' not in item:
-                            is_file = True
-                        elif item.get('ico'):
-                            # 有图标通常是文件
-                            is_file = True
-                    
-                    if not is_file:
-                        continue
-                    
-                    # 获取文件大小和名称
-                    # 字段可能是 fs/size 或 s
-                    file_size = item.get('fs') or item.get('size') or item.get('s') or 0
-                    if isinstance(file_size, str):
-                        try:
-                            file_size = int(file_size)
-                        except:
-                            file_size = 0
-                    
-                    # 字段可能是 fn/name/n
-                    file_name = item.get('fn') or item.get('name') or item.get('n') or ''
-                    # 字段可能是 fid/file_id/id
-                    file_id = item.get('fid') or item.get('file_id') or item.get('id') or ''
-                    
-                    logger.debug(f"mhnotify: 检查文件: {file_name}, 大小: {file_size}, ID: {file_id}")
-                    
-                    # 如果文件小于10MB，删除
-                    if file_size < min_size and file_id:
-                        try:
-                            logger.info(f"mhnotify: 删除小文件: {file_name} ({file_size/1024/1024:.2f}MB)")
-                            # 调用115删除API
-                            client.fs_delete(file_id)
-                            removed_count += 1
-                            removed_size += file_size
-                        except Exception as e:
-                            logger.warning(f"mhnotify: 删除文件失败 {file_name}: {e}")
-                
-                # 检查是否还有更多文件
-                if len(files) < limit:
-                    break
-                offset += limit
+                        
+            except ImportError:
+                logger.warning("mhnotify: iter_files 导入失败，使用备用方案...")
+                # 备用方案：手动递归遍历
+                removed_count, removed_size = self._remove_small_files_recursive(client, cid, min_size)
+            except Exception as e:
+                logger.warning(f"mhnotify: iter_files 调用失败: {e}，使用备用方案...")
+                removed_count, removed_size = self._remove_small_files_recursive(client, cid, min_size)
             
             if removed_count > 0:
                 logger.info(f"mhnotify: 云下载小文件清理完成，共删除 {removed_count} 个文件，释放空间 {removed_size/1024/1024:.2f}MB")
             else:
                 logger.info(f"mhnotify: 云下载目录中没有小于10MB的文件需要删除")
+            
+            return removed_count, removed_size
                 
         except Exception as e:
             logger.error(f"mhnotify: 删除小文件异常: {e}", exc_info=True)
+            return 0, 0
+
+    def _remove_small_files_recursive(self, client, cid: int, min_size: int) -> Tuple[int, int]:
+        """
+        备用方案：手动递归遍历目录删除小文件
+        :param client: P115Client实例
+        :param cid: 目录ID
+        :param min_size: 最小文件大小阈值（字节）
+        :return: (删除数量, 删除大小)
+        """
+        removed_count = 0
+        removed_size = 0
+        
+        # 使用栈实现非递归遍历，避免深层递归导致栈溢出
+        dir_stack = [cid]
+        
+        while dir_stack:
+            current_cid = dir_stack.pop()
+            logger.debug(f"mhnotify: 遍历目录 cid={current_cid}")
+            
+            offset = 0
+            limit = 1000
+            
+            while True:
+                try:
+                    # 调用 fs_files 获取目录内容
+                    resp = client.fs_files(cid=current_cid, limit=limit, offset=offset)
+                except Exception as e:
+                    logger.warning(f"mhnotify: fs_files 调用失败 (cid={current_cid}): {e}")
+                    break
+                
+                # 处理响应
+                items = []
+                if isinstance(resp, dict):
+                    items = resp.get('data', []) or resp.get('files', [])
+                elif hasattr(resp, '__iter__'):
+                    try:
+                        items = list(resp)
+                    except:
+                        break
+                
+                if not items:
+                    break
+                
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    # 判断是文件还是目录
+                    # 根据 p115client 的逻辑：
+                    # - 如果有 'n' 字段: 没有 'fid' 的是目录
+                    # - 如果有 'fn' 字段: fc == "0" 是目录，fc == "1" 是文件
+                    is_dir = False
+                    if 'n' in item:
+                        # 新格式：没有 fid 的是目录
+                        is_dir = 'fid' not in item
+                    elif 'fn' in item:
+                        # 老格式：fc 字段
+                        fc = item.get('fc')
+                        is_dir = (fc == '0' or fc == 0)
+                    else:
+                        # 其他格式：检查 file_category
+                        fc = item.get('file_category')
+                        is_dir = (fc == 0 or fc == '0')
+                    
+                    if is_dir:
+                        # 是目录，获取目录ID并加入栈
+                        sub_cid = item.get('cid') or item.get('id') or item.get('category_id')
+                        if sub_cid:
+                            try:
+                                sub_cid = int(sub_cid)
+                                dir_stack.append(sub_cid)
+                                dir_name = item.get('n') or item.get('fn') or item.get('name') or item.get('category_name') or ''
+                                logger.debug(f"mhnotify: 发现子目录: {dir_name} (cid={sub_cid})")
+                            except:
+                                pass
+                    else:
+                        # 是文件，检查大小
+                        file_id = item.get('fid') or item.get('file_id') or item.get('id')
+                        file_name = item.get('n') or item.get('fn') or item.get('name') or item.get('file_name') or ''
+                        file_size = item.get('s') or item.get('fs') or item.get('size') or item.get('file_size') or 0
+                        
+                        if isinstance(file_size, str):
+                            try:
+                                file_size = int(file_size)
+                            except:
+                                file_size = 0
+                        
+                        if not file_id:
+                            continue
+                        
+                        logger.debug(f"mhnotify: 检查文件: {file_name}, 大小: {file_size/1024/1024:.2f}MB")
+                        
+                        if file_size < min_size:
+                            try:
+                                logger.info(f"mhnotify: 准备删除小文件: {file_name} ({file_size/1024/1024:.2f}MB)")
+                                client.fs_delete(file_id)
+                                removed_count += 1
+                                removed_size += file_size
+                                logger.info(f"mhnotify: 成功删除小文件: {file_name}")
+                            except Exception as e:
+                                logger.warning(f"mhnotify: 删除文件失败 {file_name}: {e}")
+                
+                if len(items) < limit:
+                    break
+                offset += limit
+        
+        return removed_count, removed_size
+
+    def _send_cloud_download_notification(self, task_name: str, removed_count: int, removed_size_mb: float):
+        """
+        发送云下载完成通知
+        :param task_name: 任务名称
+        :param removed_count: 删除的小文件数量
+        :param removed_size_mb: 删除的文件总大小(MB)
+        """
+        try:
+            # 构建通知消息
+            title = "✅ 115云下载完成"
+            text_parts = [f"📦 任务: {task_name}"]
+            
+            if removed_count > 0:
+                text_parts.append(f"🧹 清理小文件: {removed_count} 个")
+                text_parts.append(f"💾 释放空间: {removed_size_mb:.2f} MB")
+            
+            text = "\n".join(text_parts)
+            
+            # 发送通知
+            self.post_message(
+                mtype=None,
+                title=title,
+                text=text
+            )
+            logger.info(f"mhnotify: 云下载完成通知已发送: {task_name}")
+        except Exception as e:
+            logger.error(f"mhnotify: 发送云下载通知失败: {e}", exc_info=True)
 
     def _get_mh_access_token(self) -> Optional[str]:
         """
@@ -3248,27 +3450,39 @@ class MHNotify(_PluginBase):
                 "Accept-Language": "zh-CN"
             }
             
+            logger.info(f"mhnotify: 正在获取云账户列表...")
             cloud_res = RequestUtils(headers=headers).get_res(cloud_url)
-            if not cloud_res or cloud_res.status_code != 200:
-                logger.error(f"mhnotify: 获取云账户列表失败")
+            
+            if not cloud_res:
+                logger.error(f"mhnotify: 获取云账户列表失败 - 响应为空")
+                return
+            
+            if cloud_res.status_code != 200:
+                logger.error(f"mhnotify: 获取云账户列表失败 - 状态码: {cloud_res.status_code}, 响应: {cloud_res.text[:500]}")
                 return
             
             try:
                 cloud_data = cloud_res.json()
-            except Exception:
-                logger.error(f"mhnotify: 解析云账户响应失败")
+                logger.debug(f"mhnotify: 云账户响应数据: {cloud_data}")
+            except Exception as e:
+                logger.error(f"mhnotify: 解析云账户响应失败 - {e}, 原始响应: {cloud_res.text[:500]}")
                 return
             
             # 查找第一个115网盘账户
             accounts = cloud_data.get("data", {}).get("accounts", [])
+            logger.info(f"mhnotify: 找到 {len(accounts)} 个云账户")
+            
             drive115_account = None
             for account in accounts:
-                if account.get("cloud_type") == "drive115":
+                account_type = account.get("cloud_type")
+                account_name = account.get("name")
+                logger.debug(f"mhnotify: 检查账户: {account_name} (类型: {account_type})")
+                if account_type == "drive115":
                     drive115_account = account
                     break
             
             if not drive115_account:
-                logger.error(f"mhnotify: 未找到115网盘账户")
+                logger.error(f"mhnotify: 未找到115网盘账户，可用账户类型: {[a.get('cloud_type') for a in accounts]}")
                 return
             
             account_identifier = drive115_account.get("external_id")
@@ -3282,20 +3496,30 @@ class MHNotify(_PluginBase):
                 "cloud_path": target_path
             }
             
+            logger.info(f"mhnotify: 正在提交网盘分析任务...")
+            logger.debug(f"mhnotify: 分析任务参数: {analyze_payload}")
+            
             analyze_res = RequestUtils(headers=headers).post_res(analyze_url, json=analyze_payload)
-            if not analyze_res or analyze_res.status_code != 200:
-                logger.error(f"mhnotify: 提交网盘分析任务失败")
+            
+            if not analyze_res:
+                logger.error(f"mhnotify: 提交网盘分析任务失败 - 响应为空")
+                return
+            
+            if analyze_res.status_code != 200:
+                logger.error(f"mhnotify: 提交网盘分析任务失败 - 状态码: {analyze_res.status_code}, 响应: {analyze_res.text[:500]}")
                 return
             
             try:
                 analyze_data = analyze_res.json()
-            except Exception:
-                logger.error(f"mhnotify: 解析分析任务响应失败")
+                logger.debug(f"mhnotify: 分析任务响应数据: {analyze_data}")
+            except Exception as e:
+                logger.error(f"mhnotify: 解析分析任务响应失败 - {e}, 原始响应: {analyze_res.text[:500]}")
                 return
             
             task_id = analyze_data.get("data", {}).get("task_id")
             if not task_id:
-                logger.error(f"mhnotify: 未获取到分析任务ID")
+                message = analyze_data.get("message", "")
+                logger.error(f"mhnotify: 未获取到分析任务ID - message: {message}, 完整响应: {analyze_data}")
                 return
             
             logger.info(f"mhnotify: 网盘分析任务已提交，task_id: {task_id}")
@@ -3341,18 +3565,28 @@ class MHNotify(_PluginBase):
                 logger.warning(f"mhnotify: 网盘分析任务超时，跳过移动整理")
                 return
             
+            # 等待3秒后再进行下一步，确保后端处理完成
+            logger.info(f"mhnotify: 网盘分析完成，等待3秒后继续...")
+            time.sleep(3)
+            
             # 4. 获取默认目录配置
             defaults_url = f"{self._mh_domain}/api/v1/subscription/config/cloud-defaults"
+            logger.info(f"mhnotify: 正在获取默认目录配置...")
             defaults_res = RequestUtils(headers=headers).get_res(defaults_url)
             
-            if not defaults_res or defaults_res.status_code != 200:
-                logger.error(f"mhnotify: 获取默认目录配置失败")
+            if not defaults_res:
+                logger.error(f"mhnotify: 获取默认目录配置失败 - 响应为空")
+                return
+            
+            if defaults_res.status_code != 200:
+                logger.error(f"mhnotify: 获取默认目录配置失败 - 状态码: {defaults_res.status_code}, 响应: {defaults_res.text[:500]}")
                 return
             
             try:
                 defaults_data = defaults_res.json()
-            except Exception:
-                logger.error(f"mhnotify: 解析默认目录配置失败")
+                logger.debug(f"mhnotify: 默认目录配置数据: {defaults_data}")
+            except Exception as e:
+                logger.error(f"mhnotify: 解析默认目录配置失败 - {e}, 原始响应: {defaults_res.text[:500]}")
                 return
             
             account_configs = defaults_data.get("data", {}).get("account_configs", {})
@@ -3360,10 +3594,15 @@ class MHNotify(_PluginBase):
             default_directory = account_config.get("default_directory", "/影视")
             
             logger.info(f"mhnotify: 获取到默认目录: {default_directory}")
+            logger.debug(f"mhnotify: 账户配置: {account_config}")
             
             # 5. 提交文件整理任务
+            logger.info(f"mhnotify: 等待3秒后提交文件整理任务...")
+            time.sleep(3)
+            
             organize_url = f"{self._mh_domain}/api/v1/library-tool/organize-files-async"
             organize_payload = {
+                "task_id": task_id,  # 使用网盘分析任务的task_id
                 "cloud_type": "drive115",
                 "source_path": target_path,
                 "account_identifier": account_identifier,
@@ -3374,26 +3613,201 @@ class MHNotify(_PluginBase):
                 "include_movies": True
             }
             
-            organize_res = RequestUtils(headers=headers).post_res(organize_url, json=organize_payload)
+            logger.info(f"mhnotify: 准备提交文件整理任务")
+            logger.info(f"mhnotify: 请求URL: {organize_url}")
+            logger.info(f"mhnotify: 请求参数: {organize_payload}")
+            logger.info(f"mhnotify: 请求头Authorization: Bearer {access_token[:20]}...")
             
-            if not organize_res or organize_res.status_code != 200:
-                logger.error(f"mhnotify: 提交文件整理任务失败")
+            try:
+                organize_res = RequestUtils(headers=headers).post_res(organize_url, json=organize_payload)
+                
+                # 检查响应对象
+                if organize_res is None:
+                    logger.error(f"mhnotify: 提交文件整理任务失败 - RequestUtils返回None")
+                    logger.error(f"mhnotify: 这可能是网络错误或请求超时")
+                    return
+                
+                # 打印响应的基本信息
+                logger.info(f"mhnotify: 响应对象类型: {type(organize_res)}")
+                logger.info(f"mhnotify: 响应对象属性: {dir(organize_res)}")
+                
+                # 尝试获取状态码
+                try:
+                    status_code = organize_res.status_code
+                    logger.info(f"mhnotify: 文件整理任务响应状态码: {status_code}")
+                except Exception as e:
+                    logger.error(f"mhnotify: 无法获取响应状态码: {e}")
+                    return
+                
+                # 尝试获取响应内容
+                try:
+                    response_text = organize_res.text
+                    logger.info(f"mhnotify: 响应内容长度: {len(response_text)} 字节")
+                    logger.info(f"mhnotify: 响应内容: {response_text[:1000]}")
+                except Exception as e:
+                    logger.error(f"mhnotify: 无法获取响应内容: {e}")
+                    return
+                
+            except Exception as e:
+                logger.error(f"mhnotify: 提交文件整理任务请求异常: {e}", exc_info=True)
+                return
+            
+            if status_code != 200:
+                try:
+                    error_text = response_text
+                    logger.error(f"mhnotify: 提交文件整理任务失败 - 状态码: {status_code}")
+                    logger.error(f"mhnotify: 错误响应内容: {error_text}")
+                except:
+                    logger.error(f"mhnotify: 提交文件整理任务失败 - 状态码: {status_code}, 无法读取响应内容")
                 return
             
             try:
                 organize_data = organize_res.json()
-            except Exception:
-                logger.error(f"mhnotify: 解析整理任务响应失败")
+                logger.info(f"mhnotify: 整理任务响应JSON: {organize_data}")
+            except Exception as e:
+                logger.error(f"mhnotify: 解析整理任务响应失败 - {e}")
+                logger.error(f"mhnotify: 原始响应: {response_text}")
+                return
+            
+            # 检查响应状态
+            success = organize_data.get("success", False)
+            code = organize_data.get("code", "")
+            message = organize_data.get("message", "")
+            
+            if not success:
+                logger.error(f"mhnotify: 文件整理任务提交失败 - code: {code}, message: {message}")
                 return
             
             organize_task_id = organize_data.get("data", {}).get("task_id")
-            message = organize_data.get("message", "")
             
-            logger.info(f"mhnotify: 文件整理任务已提交，task_id: {organize_task_id}, {message}")
+            if not organize_task_id:
+                logger.warning(f"mhnotify: 未获取到整理任务ID，但消息为: {message}")
+            else:
+                logger.info(f"mhnotify: 文件整理任务已提交，task_id: {organize_task_id}, message: {message}")
             
         except Exception as e:
             logger.error(f"mhnotify: 云下载移动整理异常: {e}", exc_info=True)
 
+    def _query_downloading_task_by_hash(self, client, info_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        使用115 Web API查询正在下载的离线任务（通过info_hash匹配）
+        :param client: P115Client实例
+        :param info_hash: 任务hash
+        :return: 任务信息字典或None
+        """
+        try:
+            # 构造请求参数
+            # 参考 115-downing.txt，stat=12 表示查询正在下载的任务
+            import time as time_module
+            import hashlib
+            
+            # 获取用户ID
+            uid = self._get_115_uid()
+            if not uid:
+                logger.warning(f"mhnotify: 无法获取115用户ID")
+                return None
+            
+            # 构造签名
+            timestamp = int(time_module.time())
+            sign_str = f"{uid}{timestamp}"
+            sign = hashlib.md5(sign_str.encode()).hexdigest()
+            
+            # 调用离线任务列表API（stat=12 表示正在下载）
+            url = "https://115.com/web/lixian/?ct=lixian&ac=task_lists"
+            params = {
+                'page': 1,
+                'stat': 12,  # 12=正在下载
+                'uid': uid,
+                'sign': sign,
+                'time': timestamp
+            }
+            
+            # 使用RequestUtils发送请求
+            headers = {
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Cookie": self._p115_cookie,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            
+            response = RequestUtils(headers=headers).post_res(url, data=params)
+            if not response or response.status_code != 200:
+                logger.debug(f"mhnotify: 查询正在下载任务失败: {response.status_code if response else 'No response'}")
+                return None
+            
+            result = response.json()
+            if not result or not result.get('state'):
+                logger.debug(f"mhnotify: 正在下载任务列表响应异常: {result}")
+                return None
+            
+            # 查找匹配的任务
+            tasks = result.get('tasks', [])
+            for task in tasks:
+                if task.get('info_hash', '').lower() == info_hash.lower():
+                    return task
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"mhnotify: 查询正在下载任务异常: {e}")
+            return None
+
+    def _get_115_uid(self) -> Optional[str]:
+        """
+        从 cookie 中获取 115 用户 ID
+        :return: 用户ID或None
+        """
+        try:
+            cookie_dict = {}
+            for item in self._p115_cookie.split(';'):
+                item = item.strip()
+                if '=' in item:
+                    k, v = item.split('=', 1)
+                    cookie_dict[k.strip()] = v.strip()
+            
+            uid_str = cookie_dict.get('UID', '')
+            if uid_str and '_' in uid_str:
+                return uid_str.split('_')[0]
+            
+            return None
+        except Exception as e:
+            logger.warning(f"mhnotify: 解析UID失败: {e}")
+            return None
+
+    def _send_cloud_download_deleted_notification(self, task_name: str):
+        """
+        发送云下载任务被删除通知
+        :param task_name: 任务名称
+        """
+        try:
+            title = "⚠️ 115云下载任务已被删除"
+            text = f"📦 任务: {task_name}\n\n任务在监控期间被删除，已停止监控。"
+            
+            self.post_message(
+                mtype=None,
+                title=title,
+                text=text
+            )
+            logger.info(f"mhnotify: 云下载任务删除通知已发送: {task_name}")
+        except Exception as e:
+            logger.error(f"mhnotify: 发送云下载删除通知失败: {e}", exc_info=True)
+
+    def _send_cloud_download_failed_notification(self, task_name: str):
+        """
+        发送云下载任务失败通知
+        :param task_name: 任务名称
+        """
+        try:
+            title = "❌ 115云下载失败"
+            text = f"📦 任务: {task_name}\n\n下载过程中出现错误，请检查115网盘。"
+            
+            self.post_message(
+                mtype=None,
+                title=title,
+                text=text
+            )
+            logger.info(f"mhnotify: 云下载失败通知已发送: {task_name}")
+        except Exception as e:
+            logger.error(f"mhnotify: 发送云下载失败通知失败: {e}", exc_info=True)
 
     @eventmanager.register(EventType.PluginAction)
     def remote_clear_records(self, event: Event):
