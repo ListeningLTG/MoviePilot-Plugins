@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.4.4"
+    plugin_version = "1.4.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2826,20 +2826,10 @@ class MHNotify(_PluginBase):
                             if main_files:
                                 exist_msg += f"主要文件: {main_files[0].get('name', '未知')[:50]}...\n"
                         exist_msg += f"保存路径: {target_path}\n"
-                        exist_msg += "\n✅ 仍可监控现有任务完成状态"
+                        exist_msg += "\nℹ️ 任务已存在，请在115网盘查看下载进度"
                         
-                        # 即使任务已存在，如果开启了后处理功能且有info_hash，仍然启动监控
-                        if (self._cloud_download_remove_small_files or self._cloud_download_organize) and info_hash:
-                            try:
-                                import threading
-                                threading.Thread(
-                                    target=self._monitor_and_remove_small_files,
-                                    args=(client, info_hash, target_cid, task_name or "已存在的任务", target_path),
-                                    daemon=True
-                                ).start()
-                                logger.info(f"mhnotify: 已为现有任务 {info_hash[:16]} 启动后处理监控")
-                            except Exception as e:
-                                logger.warning(f"mhnotify: 启动后处理任务失败: {e}")
+                        # 任务已存在时不启动监控线程，避免重复监控
+                        # 用户可以手动在115网盘查看任务状态
                         
                         return True, exist_msg
                     else:
@@ -3007,7 +2997,7 @@ class MHNotify(_PluginBase):
                     
                     time.sleep(check_interval)
             
-            logger.info(f"mhnotify: 离线下载监控任务结束: {task_name}")
+            logger.info(f"mhnotify: 离线下载监控任务结束: {task_name} (Hash: {info_hash[:16]}...)")
             
         except Exception as e:
             logger.error(f"mhnotify: 监控离线下载任务异常: {e}", exc_info=True)
@@ -3101,11 +3091,9 @@ class MHNotify(_PluginBase):
         """
         删除目录中小于10MB的文件
         :param client: P115Client实例
-        :param cid: 目录ID
+        :param cid: 目录ID (文件夹的file_id)
         """
         try:
-            from pathlib import Path
-            
             # 查询目录下的文件列表
             logger.info(f"mhnotify: 开始查询目录文件列表，cid={cid}")
             
@@ -3117,30 +3105,72 @@ class MHNotify(_PluginBase):
             
             while True:
                 # 调用115 API获取文件列表
-                resp = client.fs_files({
-                    "cid": cid,
-                    "limit": limit,
-                    "offset": offset,
-                    "show_dir": 1
-                })
-                
-                if not resp or not resp.get('data'):
+                # fs_files 返回的是迭代器或字典，需要正确处理
+                try:
+                    resp = client.fs_files(cid=cid, limit=limit, offset=offset)
+                    logger.debug(f"mhnotify: fs_files 响应类型: {type(resp)}")
+                except Exception as e:
+                    logger.warning(f"mhnotify: fs_files 调用失败: {e}")
                     break
                 
-                files = resp['data']
+                # 处理响应，可能是字典或迭代器
+                files = []
+                if isinstance(resp, dict):
+                    # 字典格式，文件列表在 data 字段
+                    files = resp.get('data', [])
+                    if not files:
+                        # 也可能直接是文件列表格式
+                        files = resp.get('files', [])
+                    logger.debug(f"mhnotify: fs_files 返回字典，文件数: {len(files)}")
+                elif hasattr(resp, '__iter__'):
+                    # 迭代器格式
+                    try:
+                        files = list(resp)
+                        logger.debug(f"mhnotify: fs_files 返回迭代器，文件数: {len(files)}")
+                    except Exception as e:
+                        logger.warning(f"mhnotify: 转换文件列表失败: {e}")
+                        break
+                
                 if not files:
+                    logger.debug(f"mhnotify: 目录下没有文件")
                     break
                 
                 # 遍历文件，找出小于10MB的
                 for item in files:
-                    file_category = item.get('fc', '')
-                    # fc="1"表示文件，fc="0"表示目录
-                    if file_category != '1':
+                    if not isinstance(item, dict):
                         continue
                     
-                    file_size = item.get('fs', 0)
-                    file_name = item.get('fn', '')
-                    file_id = item.get('fid', '')
+                    # 115 API 字段名可能是 fc/file_category 或 ico 等
+                    # fc=1 或 file_category=1 表示文件
+                    file_category = item.get('fc') or item.get('file_category')
+                    # 如果没有fc字段，通过是否有fid且无cid来判断（文件有fid，目录有cid）
+                    is_file = file_category == 1 or file_category == '1'
+                    if not is_file:
+                        # 尝试其他方式判断
+                        if 'fid' in item and 'cid' not in item:
+                            is_file = True
+                        elif item.get('ico'):
+                            # 有图标通常是文件
+                            is_file = True
+                    
+                    if not is_file:
+                        continue
+                    
+                    # 获取文件大小和名称
+                    # 字段可能是 fs/size 或 s
+                    file_size = item.get('fs') or item.get('size') or item.get('s') or 0
+                    if isinstance(file_size, str):
+                        try:
+                            file_size = int(file_size)
+                        except:
+                            file_size = 0
+                    
+                    # 字段可能是 fn/name/n
+                    file_name = item.get('fn') or item.get('name') or item.get('n') or ''
+                    # 字段可能是 fid/file_id/id
+                    file_id = item.get('fid') or item.get('file_id') or item.get('id') or ''
+                    
+                    logger.debug(f"mhnotify: 检查文件: {file_name}, 大小: {file_size}, ID: {file_id}")
                     
                     # 如果文件小于10MB，删除
                     if file_size < min_size and file_id:
@@ -3161,7 +3191,7 @@ class MHNotify(_PluginBase):
             if removed_count > 0:
                 logger.info(f"mhnotify: 云下载小文件清理完成，共删除 {removed_count} 个文件，释放空间 {removed_size/1024/1024:.2f}MB")
             else:
-                logger.info(f"mhnotify: 云下载目录中没有需要删除的小文件")
+                logger.info(f"mhnotify: 云下载目录中没有小于10MB的文件需要删除")
                 
         except Exception as e:
             logger.error(f"mhnotify: 删除小文件异常: {e}", exc_info=True)
