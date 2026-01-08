@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.4.7"
+    plugin_version = "1.4.8"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2754,19 +2754,21 @@ class MHNotify(_PluginBase):
             logger.error(f"mhnotify: 清理云下载记录失败: {e}")
             return {"success": False, "error": str(e)}
 
-    def _add_offline_download(self, url: str) -> Tuple[bool, str]:
+    def _add_offline_download(self, url: str, start_monitor: bool = True) -> Tuple[bool, str, Dict[str, Any]]:
         """
         添加115离线下载任务
         参考 p115client 官方库的 P115Offline.add 方法实现
         :param url: 下载链接（磁力链接、种子URL等）
-        :return: (是否成功, 消息文本)
+        :param start_monitor: 是否启动后台监控线程（批量下载时设为False，统一监控）
+        :return: (是否成功, 消息文本, 任务信息字典)
         """
+        task_info = {}  # 用于返回任务信息，供批量处理使用
         try:
             # 导入p115client
             try:
                 from p115client import P115Client
             except ImportError:
-                return False, "p115client 未安装，请先安装依赖"
+                return False, "p115client 未安装，请先安装依赖", task_info
 
             # 创建115客户端
             client = P115Client(self._p115_cookie, app="web")
@@ -2866,7 +2868,7 @@ class MHNotify(_PluginBase):
                         # 任务已存在时不启动监控线程，避免重复监控
                         # 用户可以手动在115网盘查看任务状态
                         
-                        return True, exist_msg
+                        return True, exist_msg, task_info
                     else:
                         # 其他错误
                         logger.error(f"mhnotify: 离线下载失败，响应: {resp}")
@@ -2875,7 +2877,7 @@ class MHNotify(_PluginBase):
                         fail_msg += f"错误码: {error_code}"
                         if info_hash:
                             fail_msg += f"\nHash: {info_hash[:16]}..."
-                        return False, fail_msg
+                        return False, fail_msg, task_info
                 
                 # 成功添加
                 # 单个URL返回的结构可能不同
@@ -2893,8 +2895,17 @@ class MHNotify(_PluginBase):
                 
                 logger.info(f"mhnotify: 115离线下载任务添加成功: {task_name or info_hash or '未知'}")
                 
-                # 如果开启了剔除小文件或移动整理功能，等待下载完成后处理
-                if (self._cloud_download_remove_small_files or self._cloud_download_organize) and info_hash:
+                # 填充任务信息，供批量处理使用
+                task_info = {
+                    "client": client,
+                    "info_hash": info_hash,
+                    "target_cid": target_cid,
+                    "task_name": task_name,
+                    "target_path": target_path
+                }
+                
+                # 如果开启了剔除小文件或移动整理功能，且需要启动监控
+                if (self._cloud_download_remove_small_files or self._cloud_download_organize) and info_hash and start_monitor:
                     try:
                         if self._cloud_download_remove_small_files:
                             logger.info(f"mhnotify: 云下载剔除小文件已启用，将等待任务完成后处理...")
@@ -2911,18 +2922,266 @@ class MHNotify(_PluginBase):
                     except Exception as e:
                         logger.warning(f"mhnotify: 启动后处理任务失败: {e}")
                 
-                return True, success_msg
+                return True, success_msg, task_info
             else:
                 # 可能返回的是其他类型
                 logger.info(f"mhnotify: 离线下载响应类型: {type(resp)}, 内容: {resp}")
-                return True, f"任务已提交到115云下载\n保存路径: {target_path}"
+                return True, f"任务已提交到115云下载\n保存路径: {target_path}", task_info
             
         except ImportError as e:
             logger.error(f"mhnotify: 导入p115client失败: {e}")
-            return False, f"依赖库导入失败: {str(e)}"
+            return False, f"依赖库导入失败: {str(e)}", task_info
         except Exception as e:
             logger.error(f"mhnotify: 添加115离线下载任务失败: {e}", exc_info=True)
-            return False, f"添加失败: {str(e)}"
+            return False, f"添加失败: {str(e)}", task_info
+
+    def _monitor_batch_downloads(self, tasks: List[Dict[str, Any]]):
+        """
+        批量监控多个离线下载任务，等待全部完成后统一清理和整理
+        如果某个任务10分钟内仍在下载中，将其独立出去单独监控
+        :param tasks: 任务信息列表，每个元素包含 client, info_hash, target_cid, task_name, target_path
+        """
+        import time
+        import threading
+        
+        if not tasks:
+            return
+        
+        logger.info(f"mhnotify: 开始批量监控 {len(tasks)} 个离线下载任务")
+        
+        # 等待15秒，让任务进入下载队列
+        logger.info(f"mhnotify: 等待15秒，让任务进入下载队列...")
+        time.sleep(15)
+        
+        # 任务状态跟踪
+        task_status = {}  # info_hash -> {"completed": bool, "success": bool, "actual_cid": int, "is_directory": bool, "split_out": bool}
+        task_first_seen_downloading = {}  # info_hash -> 首次发现在下载中的时间戳
+        
+        for task in tasks:
+            task_status[task["info_hash"]] = {
+                "completed": False,
+                "success": False,
+                "actual_cid": task["target_cid"],
+                "is_directory": False,
+                "task_name": task["task_name"],
+                "split_out": False  # 是否已被独立出去
+            }
+        
+        client = tasks[0]["client"]  # 使用第一个任务的client
+        target_path = tasks[0]["target_path"]  # 假设所有任务保存到同一目录
+        
+        # 超时配置
+        split_timeout = 600  # 10分钟后将慢任务独立出去
+        check_interval = 30  # 检查间隔：30秒（为了更快检测超时）
+        max_checks = 1440  # 最多检查12小时（30秒 * 1440 = 12小时）
+        
+        # ========== 第一阶段：监控所有任务下载完成 ==========
+        logger.info(f"mhnotify: 第一阶段 - 监控所有任务下载状态（10分钟超时后独立慢任务）...")
+        
+        for check_round in range(max_checks):
+            all_done = True  # 所有任务都已完成或被独立出去
+            current_time = time.time()
+            
+            for task in tasks:
+                info_hash = task["info_hash"]
+                status = task_status[info_hash]
+                
+                # 已完成或已独立出去的任务跳过
+                if status["completed"] or status["split_out"]:
+                    continue
+                
+                all_done = False
+                
+                try:
+                    # 先查正在下载列表
+                    downloading_task = self._query_downloading_task_by_hash(client, info_hash)
+                    
+                    if downloading_task and downloading_task.get('status', 0) == 1:
+                        # 仍在下载中
+                        percent = downloading_task.get('percentDone', 0)
+                        
+                        # 记录首次发现下载中的时间
+                        if info_hash not in task_first_seen_downloading:
+                            task_first_seen_downloading[info_hash] = current_time
+                            logger.info(f"mhnotify: 任务开始下载: {task['task_name']}")
+                        
+                        # 检查是否超过10分钟
+                        downloading_duration = current_time - task_first_seen_downloading[info_hash]
+                        if downloading_duration >= split_timeout:
+                            # 超过10分钟，独立出去单独监控
+                            logger.info(f"mhnotify: 任务 {task['task_name']} 下载超过10分钟（{percent:.1f}%），独立出去单独监控")
+                            status["split_out"] = True
+                            
+                            # 启动独立的监控线程
+                            threading.Thread(
+                                target=self._monitor_and_remove_small_files,
+                                args=(client, info_hash, task["target_cid"], task["task_name"], task["target_path"]),
+                                daemon=True
+                            ).start()
+                        else:
+                            # 每2分钟记录一次进度
+                            if check_round % 4 == 0:
+                                remaining = int((split_timeout - downloading_duration) / 60)
+                                logger.info(f"mhnotify: 正在下载: {task['task_name']} - {percent:.1f}%（{remaining}分钟后独立）")
+                        continue
+                    
+                    # 不在下载列表，查已完成列表
+                    current_task = self._query_offline_task_by_hash(client, info_hash)
+                    
+                    if current_task and isinstance(current_task, dict):
+                        task_api_status = current_task.get('status', 0)
+                        if task_api_status == 2:
+                            # 已完成
+                            status["completed"] = True
+                            status["success"] = True
+                            actual_cid = current_task.get('file_id', '')
+                            if actual_cid:
+                                try:
+                                    status["actual_cid"] = int(actual_cid)
+                                except:
+                                    pass
+                            file_category = current_task.get('file_category', 1)
+                            status["is_directory"] = (file_category == 0)
+                            logger.info(f"mhnotify: 任务已完成: {task['task_name']}")
+                        elif task_api_status == 1:
+                            # 失败
+                            status["completed"] = True
+                            status["success"] = False
+                            logger.warning(f"mhnotify: 任务失败: {task['task_name']}")
+                    else:
+                        # 两处都找不到，可能被删除
+                        status["completed"] = True
+                        status["success"] = False
+                        logger.warning(f"mhnotify: 任务可能已被删除: {task['task_name']}")
+                        
+                except Exception as e:
+                    logger.warning(f"mhnotify: 查询任务 {task['task_name']} 异常: {e}")
+            
+            if all_done:
+                logger.info(f"mhnotify: 批量监控的任务已全部处理完成")
+                break
+            
+            time.sleep(check_interval)
+        
+        # ========== 第二阶段：统计结果（只统计未被独立出去的任务） ==========
+        batch_tasks = [t for t in tasks if not task_status[t["info_hash"]]["split_out"]]
+        success_tasks = [t["info_hash"] for t in batch_tasks if task_status[t["info_hash"]]["success"]]
+        failed_tasks = [t["info_hash"] for t in batch_tasks if task_status[t["info_hash"]]["completed"] and not task_status[t["info_hash"]]["success"]]
+        split_tasks = [t for t in tasks if task_status[t["info_hash"]]["split_out"]]
+        
+        logger.info(f"mhnotify: 批量任务统计 - 成功: {len(success_tasks)}, 失败: {len(failed_tasks)}, 独立监控: {len(split_tasks)}")
+        
+        # 如果没有成功的任务，直接发送通知并结束
+        if not success_tasks:
+            if split_tasks:
+                # 有任务被独立出去，发送部分通知
+                self._send_batch_cloud_download_notification(
+                    tasks=batch_tasks,
+                    task_status=task_status,
+                    removed_count=0,
+                    removed_size_mb=0,
+                    split_count=len(split_tasks)
+                )
+            logger.info(f"mhnotify: 批量监控无成功任务，结束")
+            return
+        
+        # ========== 第三阶段：统一清理小文件 ==========
+        total_removed_count = 0
+        total_removed_size = 0
+        
+        if self._cloud_download_remove_small_files and success_tasks:
+            logger.info(f"mhnotify: 开始统一清理小文件...")
+            time.sleep(5)  # 等待文件列表同步
+            
+            for info_hash in success_tasks:
+                status = task_status[info_hash]
+                if status["is_directory"]:
+                    try:
+                        removed_count, removed_size = self._remove_small_files_in_directory(client, status["actual_cid"])
+                        total_removed_count += removed_count
+                        total_removed_size += removed_size
+                        if removed_count > 0:
+                            logger.info(f"mhnotify: 任务 {status['task_name']} 清理了 {removed_count} 个小文件")
+                    except Exception as e:
+                        logger.warning(f"mhnotify: 清理任务 {status['task_name']} 小文件异常: {e}")
+        
+        # ========== 第四阶段：统一执行一次移动整理 ==========
+        if self._cloud_download_organize and target_path and success_tasks:
+            logger.info(f"mhnotify: 开始统一移动整理...")
+            try:
+                access_token = self._get_mh_access_token()
+                if access_token:
+                    self._organize_cloud_download(access_token, target_path)
+                else:
+                    logger.error(f"mhnotify: 无法获取MH access token，跳过移动整理")
+            except Exception as e:
+                logger.error(f"mhnotify: 移动整理异常: {e}")
+        
+        # ========== 第五阶段：发送汇总通知 ==========
+        self._send_batch_cloud_download_notification(
+            tasks=batch_tasks,
+            task_status=task_status,
+            removed_count=total_removed_count,
+            removed_size_mb=total_removed_size / 1024 / 1024,
+            split_count=len(split_tasks)
+        )
+        
+        logger.info(f"mhnotify: 批量离线下载监控任务结束")
+
+    def _send_batch_cloud_download_notification(self, tasks: List[Dict[str, Any]], 
+                                                  task_status: Dict[str, Dict],
+                                                  removed_count: int, removed_size_mb: float,
+                                                  split_count: int = 0):
+        """
+        发送批量云下载完成的汇总通知
+        :param split_count: 被独立出去单独监控的任务数量
+        """
+        try:
+            success_count = sum(1 for s in task_status.values() if s.get("success"))
+            fail_count = sum(1 for s in task_status.values() if s.get("completed") and not s.get("success") and not s.get("split_out"))
+            
+            title = f"✅ 115云下载批量任务完成"
+            if fail_count > 0:
+                title = f"⚠️ 115云下载批量任务完成（{fail_count}个失败）"
+            
+            text_parts = [f"📦 共 {len(tasks) + split_count} 个任务"]
+            status_line = f"✅ 成功: {success_count} | ❌ 失败: {fail_count}"
+            if split_count > 0:
+                status_line += f" | ⏳ 独立监控: {split_count}"
+            text_parts.append(status_line)
+            
+            # 列出任务名称
+            if tasks:
+                text_parts.append("")
+                for task in tasks:
+                    info_hash = task["info_hash"]
+                    status = task_status.get(info_hash, {})
+                    if status.get("success"):
+                        text_parts.append(f"✅ {task['task_name'][:30]}")
+                    elif status.get("split_out"):
+                        text_parts.append(f"⏳ {task['task_name'][:30]}")
+                    else:
+                        text_parts.append(f"❌ {task['task_name'][:30]}")
+            
+            if split_count > 0:
+                text_parts.append("")
+                text_parts.append(f"ℹ️ {split_count} 个慢任务已独立监控，完成后将单独通知")
+            
+            if removed_count > 0:
+                text_parts.append("")
+                text_parts.append(f"🧹 清理小文件: {removed_count} 个")
+                text_parts.append(f"💾 释放空间: {removed_size_mb:.2f} MB")
+            
+            text = "\n".join(text_parts)
+            
+            self.post_message(
+                mtype=None,
+                title=title,
+                text=text
+            )
+            logger.info(f"mhnotify: 批量云下载完成通知已发送")
+        except Exception as e:
+            logger.error(f"mhnotify: 发送批量云下载通知失败: {e}", exc_info=True)
 
     def _monitor_and_remove_small_files(self, client, info_hash: str, target_cid: int, task_name: str, target_path: str = ""):
         """
@@ -2937,23 +3196,19 @@ class MHNotify(_PluginBase):
             import time
             logger.info(f"mhnotify: 开始监控离线下载任务: {task_name}")
             
-            # 添加任务后等待1分钟，让任务有时间出现在下载列表中
-            logger.info(f"mhnotify: 等待60秒，让任务进入下载队列...")
-            time.sleep(60)
+            # 添加任务后等待15秒，让任务有时间出现在下载列表中
+            logger.info(f"mhnotify: 等待15秒，让任务进入下载队列...")
+            time.sleep(15)
             
             # ========== 第一阶段：监控正在下载 ==========
             # 使用 stat=12 查询正在下载的任务
             logger.info(f"mhnotify: 第一阶段 - 监控正在下载状态...")
             
-            # 前10分钟每分钟检查一次（初始等待期），之后每2分钟检查一次
-            initial_checks = 10  # 初始快速检查次数
-            initial_check_interval = 60  # 初始检查间隔：1分钟
             normal_check_interval = 120  # 正常检查间隔：2分钟
             max_downloading_checks = 720  # 最多检查24小时
             
             task_found = False  # 标记是否至少找到过一次任务
             not_found_count = 0  # 连续未找到任务的次数
-            max_not_found_before_found = 10  # 任务出现前最多容忍10次未找到（10分钟）
             max_not_found_after_found = 3  # 任务出现后最多容忍3次未找到才认为已完成
             
             for i in range(max_downloading_checks):
@@ -2972,7 +3227,7 @@ class MHNotify(_PluginBase):
                         # status=1 表示正在下载
                         if status == 1:
                             # 使用正常检查间隔（2分钟）
-                            if i % 5 == 0 or i < initial_checks:  # 初始期或每10分钟记录一次进度
+                            if i % 5 == 0:  # 每10分钟记录一次进度
                                 logger.info(f"mhnotify: 正在下载: {task_name} - {percent:.1f}%")
                             time.sleep(normal_check_interval)
                             continue
@@ -2985,17 +3240,9 @@ class MHNotify(_PluginBase):
                         not_found_count += 1
                         
                         if not task_found:
-                            # 任务还从未被找到过，可能还在初始化
-                            if not_found_count >= max_not_found_before_found:
-                                logger.warning(f"mhnotify: 等待10分钟仍未找到任务，可能添加失败或已被删除")
-                                self._send_cloud_download_deleted_notification(task_name)
-                                return
-                            else:
-                                # 使用初始检查间隔（1分钟）
-                                if not_found_count % 3 == 1:  # 每3分钟提示一次
-                                    logger.info(f"mhnotify: 等待任务出现在下载列表... ({not_found_count}/{max_not_found_before_found})")
-                                time.sleep(initial_check_interval)
-                                continue
+                            # 任务从未在下载列表中找到过，直接进入第二阶段查找已完成任务
+                            logger.info(f"mhnotify: 未在下载列表中找到任务，进入已完成检查阶段...")
+                            break
                         else:
                             # 任务之前找到过，现在找不到了
                             if not_found_count >= max_not_found_after_found:
@@ -3009,16 +3256,9 @@ class MHNotify(_PluginBase):
                         
                 except Exception as e:
                     logger.warning(f"mhnotify: 查询正在下载任务异常: {e}")
-                    # 出现异常也计入未找到次数
-                    not_found_count += 1
-                    
-                    if not task_found and not_found_count >= max_not_found_before_found:
-                        logger.error(f"mhnotify: 连续多次查询异常，停止监控")
-                        return
-                    
-                    # 根据是否在初始期选择等待时间
-                    wait_time = initial_check_interval if not task_found else normal_check_interval
-                    time.sleep(wait_time)
+                    # 出现异常直接进入第二阶段
+                    logger.info(f"mhnotify: 查询异常，进入已完成检查阶段...")
+                    break
             
             # ========== 第二阶段：检查已完成任务 ==========
             logger.info(f"mhnotify: 第二阶段 - 检查已完成任务...")
@@ -3705,18 +3945,20 @@ class MHNotify(_PluginBase):
                 return
             
             # 检查响应状态
+            # 接口可能返回 success 字段，也可能返回 code 字段表示成功
             success = organize_data.get("success", False)
             code = organize_data.get("code", "")
             message = organize_data.get("message", "")
             
-            if not success:
+            # code == 200 或 code == "200" 也视为成功
+            if not success and str(code) != "200":
                 logger.error(f"mhnotify: 文件整理任务提交失败 - code: {code}, message: {message}")
                 return
             
             organize_task_id = organize_data.get("data", {}).get("task_id")
             
             if not organize_task_id:
-                logger.warning(f"mhnotify: 未获取到整理任务ID，但消息为: {message}")
+                logger.info(f"mhnotify: 文件整理任务已创建: {message}")
             else:
                 logger.info(f"mhnotify: 文件整理任务已提交，task_id: {organize_task_id}, message: {message}")
             
@@ -3873,38 +4115,101 @@ class MHNotify(_PluginBase):
             )
             return
 
-        # 获取下载链接
-        download_url = event_data.get("arg_str")
-        if not download_url or not download_url.strip():
+        # 获取下载链接（支持多个链接，用逗号、空格或换行分隔）
+        download_urls_raw = event_data.get("arg_str")
+        if not download_urls_raw or not download_urls_raw.strip():
             self.post_message(
                 channel=event_data.get("channel"),
                 title="参数错误",
-                text="用法: /mhol <下载链接>",
+                text="用法: /mhol <下载链接>\n支持多个链接，用逗号分隔: /mhol url1,url2,url3",
                 userid=event_data.get("user")
             )
             return
 
-        download_url = download_url.strip()
-        logger.info(f"mhnotify: 收到云下载命令，链接: {download_url}")
+        # 解析多个URL（支持逗号、空格、换行分隔）
+        import re
+        download_urls = re.split(r'[,\s]+', download_urls_raw.strip())
+        download_urls = [url.strip() for url in download_urls if url.strip()]
+        
+        if not download_urls:
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="参数错误",
+                text="未解析到有效的下载链接",
+                userid=event_data.get("user")
+            )
+            return
+
+        logger.info(f"mhnotify: 收到云下载命令，共 {len(download_urls)} 个链接")
+
+        # 判断是否需要批量监控
+        is_batch = len(download_urls) > 1
+        need_monitor = self._cloud_download_remove_small_files or self._cloud_download_organize
 
         # 执行云下载
-        success, message = self._add_offline_download(download_url)
+        success_count = 0
+        fail_count = 0
+        results = []
+        batch_tasks = []  # 用于批量监控的任务列表
+        last_message = ""
+        
+        for idx, download_url in enumerate(download_urls, 1):
+            logger.info(f"mhnotify: 处理第 {idx}/{len(download_urls)} 个链接: {download_url[:80]}...")
+            # 批量模式下不启动单独的监控线程，由统一的批量监控处理
+            success, message, task_info = self._add_offline_download(download_url, start_monitor=(not is_batch))
+            last_message = message
+            if success:
+                success_count += 1
+                results.append(f"✅ 链接{idx}: 成功")
+                # 收集任务信息用于批量监控
+                if is_batch and need_monitor and task_info.get("info_hash"):
+                    batch_tasks.append(task_info)
+            else:
+                fail_count += 1
+                results.append(f"❌ 链接{idx}: {message}")
 
         # 发送结果消息
-        if success:
-            self.post_message(
-                channel=event_data.get("channel"),
-                title="云下载任务添加成功",
-                text=message,
-                userid=event_data.get("user")
-            )
+        if len(download_urls) == 1:
+            # 单个链接，保持原有格式
+            if success_count == 1:
+                self.post_message(
+                    channel=event_data.get("channel"),
+                    title="云下载任务添加成功",
+                    text=last_message,
+                    userid=event_data.get("user")
+                )
+            else:
+                self.post_message(
+                    channel=event_data.get("channel"),
+                    title="云下载任务添加失败",
+                    text=last_message,
+                    userid=event_data.get("user")
+                )
         else:
+            # 多个链接，汇总结果
+            summary = f"共 {len(download_urls)} 个链接\n成功: {success_count} | 失败: {fail_count}\n\n" + "\n".join(results)
+            if need_monitor and batch_tasks:
+                summary += f"\n\n⏳ 将统一监控 {len(batch_tasks)} 个任务，完成后执行清理和整理"
+            title = "云下载批量任务已提交" if fail_count == 0 else f"云下载批量任务已提交（{fail_count}个失败）"
             self.post_message(
                 channel=event_data.get("channel"),
-                title="云下载任务添加失败",
-                text=message,
+                title=title,
+                text=summary,
                 userid=event_data.get("user")
             )
+            
+            # 启动批量监控线程
+            if need_monitor and batch_tasks:
+                try:
+                    import threading
+                    logger.info(f"mhnotify: 启动批量监控线程，监控 {len(batch_tasks)} 个任务")
+                    threading.Thread(
+                        target=self._monitor_batch_downloads,
+                        args=(batch_tasks,),
+                        daemon=True
+                    ).start()
+                except Exception as e:
+                    logger.warning(f"mhnotify: 启动批量监控线程失败: {e}")
 
     def __finish_mp_subscribe(self, subscribe):
         try:
