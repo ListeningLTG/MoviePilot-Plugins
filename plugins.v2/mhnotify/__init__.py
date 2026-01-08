@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
     # 插件版本
-    plugin_version = "1.3.9"
+    plugin_version = "1.4.0"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -1537,6 +1537,14 @@ class MHNotify(_PluginBase):
                 last_id = int(last_id_raw) if last_id_raw is not None else 0
             except Exception:
                 last_id = 0
+            
+            # 首次启用时，从当前时间开始监听，避免拉取所有历史事件
+            if last_ts == 0:
+                current_ts = int(time.time())
+                logger.info(f"mhnotify: 115生活事件首次启用，从当前时间开始监听 (ts={current_ts})")
+                self.save_data(self._P115_LAST_TS_KEY, current_ts)
+                self.save_data(self._P115_LAST_ID_KEY, 0)
+                return
 
             # 优先使用 p115client 的 life API（与 p115strmhelper 保持一致）
             try:
@@ -1680,7 +1688,7 @@ class MHNotify(_PluginBase):
                             "delete": "删除"
                         }
                         event_name = event_name_map.get(simple, simple or f"type_{t}")
-                        triggered_events.append({"path": full_path or fname, "event": event_name, "type": t})
+                        triggered_events.append({"path": full_path or fname, "event": event_name, "type": t, "time": ut})
                     if ut > new_last_ts or (ut == new_last_ts and eid > new_last_id):
                         new_last_ts = ut
                         new_last_id = eid
@@ -1688,9 +1696,11 @@ class MHNotify(_PluginBase):
                 if has_new:
                     self._wait_notify_count += 1
                     self._last_event_time = int(time.time())
-                    # 输出详细的触发信息
+                    # 输出详细的触发信息（包含事件发生时间）
+                    from datetime import datetime
                     for evt in triggered_events:
-                        logger.info(f"mhnotify: 115生活事件触发 - 目录: {evt['path']} | 事件: {evt['event']} (type={evt['type']})")
+                        evt_time = datetime.fromtimestamp(evt.get('time', 0)).strftime('%Y-%m-%d %H:%M:%S') if evt.get('time') else '未知'
+                        logger.info(f"mhnotify: 115生活事件触发 - 目录: {evt['path']} | 事件: {evt['event']} | 发生时间: {evt_time}")
                     logger.info(f"mhnotify: 115生活事件触发（p115client.life），共 {len(triggered_events)} 个事件，计入一次strm触发信号")
                     # 设置/延长生活事件静默窗口
                     try:
