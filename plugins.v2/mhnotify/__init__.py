@@ -20,7 +20,7 @@ class MHNotify(_PluginBase):
     # 插件描述
     plugin_desc = "监听115生活事件和MP整理/刮削事件后，通知MediaHelper执行strm生成任务；提供mh订阅辅助；支持115云下载（/mhol命令）、自动删除小文件及移动整理"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/JieWSOFT/MediaHelp/main/frontend/apps/web-antd/public/icon.png"
+    plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
     plugin_version = "1.4.8"
     # 插件作者
