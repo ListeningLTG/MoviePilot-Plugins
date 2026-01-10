@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.0"
+    plugin_version = "1.5.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2054,6 +2054,7 @@ class MHNotify(_PluginBase):
             # 若已存在相同 tmdb_id 的 MH 订阅，则复用或重建（以聚合季为准）
             existing_uuid: Optional[str] = None
             existing_selected: List[int] = []
+            existing_custom_links: List[str] = []  # 保留现有订阅的自定义链接
             try:
                 lst = self.__mh_list_subscriptions(access_token)
                 subs = (lst.get("data") or {}).get("subscriptions") or []
@@ -2065,6 +2066,10 @@ class MHNotify(_PluginBase):
                             existing_selected = [int(x) for x in (params.get("selected_seasons") or [])]
                         except Exception:
                             existing_selected = []
+                        # 获取现有订阅的自定义链接
+                        existing_custom_links = params.get("user_custom_links") or []
+                        if existing_custom_links:
+                            logger.info(f"mhnotify: 现有MH订阅已有 {len(existing_custom_links)} 个自定义链接")
                         logger.info(f"mhnotify: 现有MH订阅命中 tmdb_id={params.get('tmdb_id')} uuid={existing_uuid} seasons={existing_selected}")
                         break
                 if existing_uuid:
@@ -2086,20 +2091,61 @@ class MHNotify(_PluginBase):
             except Exception:
                 logger.warning("mhnotify: 检查现有MH订阅失败", exc_info=True)
             # HDHive 查询自定义链接
+            links: List[str] = []
             try:
                 links = self.__fetch_hdhive_links(
                     tmdb_id=create_payload.get("tmdb_id"),
                     media_type=create_payload.get("media_type")
                 )
                 if links:
-                    create_payload["user_custom_links"] = links
-                    logger.info(f"mhnotify: HDHive 获取到 {len(links)} 个免费115链接，已加入自定义链接")
+                    logger.info(f"mhnotify: HDHive 获取到 {len(links)} 个免费115链接")
             except Exception:
                 logger.error("mhnotify: HDHive 查询链接失败", exc_info=True)
+            
+            # 合并现有自定义链接与新查询的 HDHive 链接（去重）
+            merged_links: List[str] = list(existing_custom_links)  # 保留现有链接
+            if links:
+                # 提取链接的核心标识用于去重（去除协议前缀和尾部参数差异）
+                def extract_link_key(link: str) -> str:
+                    """提取链接的核心部分用于去重比较"""
+                    # 移除协议前缀
+                    key = link.replace("https://", "").replace("http://", "")
+                    # 移除尾部的 & 或 空格
+                    key = key.rstrip("& ")
+                    return key.lower()
+                
+                existing_keys = set(extract_link_key(l) for l in existing_custom_links)
+                new_count = 0
+                for link in links:
+                    link_key = extract_link_key(link)
+                    if link_key not in existing_keys:
+                        merged_links.append(link)
+                        existing_keys.add(link_key)
+                        new_count += 1
+                if new_count > 0:
+                    logger.info(f"mhnotify: 合并后共 {len(merged_links)} 个自定义链接（新增 {new_count} 个）")
+                else:
+                    logger.info(f"mhnotify: HDHive 链接已存在于现有自定义链接中，无需添加")
+            
+            # 设置 create_payload 的自定义链接（用于新建订阅）
+            if merged_links:
+                create_payload["user_custom_links"] = merged_links
+            
             # 创建订阅（或复用现有）
             mh_uuid = None
             if existing_uuid:
                 mh_uuid = existing_uuid
+                # 如果有新的 HDHive 链接需要添加，更新现有订阅
+                if links and len(merged_links) > len(existing_custom_links):
+                    try:
+                        update_payload = {"user_custom_links": merged_links}
+                        upd_resp = self.__mh_update_subscription(access_token, existing_uuid, update_payload)
+                        if upd_resp:
+                            logger.info(f"mhnotify: 已将自定义链接更新到现有订阅 {existing_uuid}（共 {len(merged_links)} 个）")
+                        else:
+                            logger.warning(f"mhnotify: 更新现有订阅的自定义链接失败")
+                    except Exception as e:
+                        logger.warning(f"mhnotify: 更新现有订阅的自定义链接异常: {e}")
             else:
                 resp = self.__mh_create_subscription(access_token, create_payload)
                 mh_uuid = (resp or {}).get("data", {}).get("subscription_id") or (resp or {}).get("data", {}).get("task", {}).get("uuid")
