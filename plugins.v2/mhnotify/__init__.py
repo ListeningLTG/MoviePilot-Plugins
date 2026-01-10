@@ -18,11 +18,11 @@ class MHNotify(_PluginBase):
     # 插件名称
     plugin_name = "MediaHelper增强"
     # 插件描述
-    plugin_desc = "监听115生活事件和MP整理/刮削事件后，通知MediaHelper执行strm生成任务；提供mh订阅辅助；支持115云下载（/mhol命令）、自动删除小文件及移动整理"
+    plugin_desc = "监听115生活事件和MP整理/刮削事件后，通知MediaHelper执行strm生成任务；提供mh订阅辅助；支持115云下载（/mhol命令）、阿里云盘分享秒传到115（/mhaly2115命令，需配置阿里云盘refresh_token）、自动删除小文件及移动整理"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.3"
+    plugin_version = "1.5.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -101,6 +101,16 @@ class MHNotify(_PluginBase):
     _cloud_download_remove_small_files: bool = False
     # 云下载移动整理开关
     _cloud_download_organize: bool = False
+    # 阿里云盘秒传开关
+    _ali2115_enabled: bool = False
+    # 阿里云盘 Refresh Token
+    _ali2115_token: str = ""
+    # 阿里云盘秒传临时文件夹路径
+    _ali2115_ali_folder: str = "/秒传转存"
+    # 115云盘秒传接收文件夹路径
+    _ali2115_115_folder: str = "/秒传接收"
+    # 阿里云盘秒传后移动整理开关
+    _ali2115_organize: bool = False
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -264,6 +274,13 @@ class MHNotify(_PluginBase):
             self._cloud_download_path = config.get("cloud_download_path", "/云下载") or "/云下载"
             self._cloud_download_remove_small_files = bool(config.get("cloud_download_remove_small_files", False))
             self._cloud_download_organize = bool(config.get("cloud_download_organize", False))
+            
+            # 阿里云盘秒传配置
+            self._ali2115_enabled = bool(config.get("ali2115_enabled", False))
+            self._ali2115_token = config.get("ali2115_token", "") or ""
+            self._ali2115_ali_folder = config.get("ali2115_ali_folder", "/秒传转存") or "/秒传转存"
+            self._ali2115_115_folder = config.get("ali2115_115_folder", "/秒传接收") or "/秒传接收"
+            self._ali2115_organize = bool(config.get("ali2115_organize", False))
 
     def get_state(self) -> bool:
         return self._enabled
@@ -329,6 +346,15 @@ class MHNotify(_PluginBase):
                 "category": "下载",
                 "data": {
                     "action": "mh_add_offline"
+                }
+            },
+            {
+                "cmd": "/mhaly2115",
+                "event": EventType.PluginAction,
+                "desc": "阿里云盘分享秒传到115",
+                "category": "下载",
+                "data": {
+                    "action": "mh_ali_to_115"
                 }
             }
         ]
@@ -581,7 +607,12 @@ class MHNotify(_PluginBase):
             "mp_event_wait_minutes": 5,
             "mp_event_storages": [],
             "cloud_download_enabled": False,
-            "cloud_download_path": "/云下载"
+            "cloud_download_path": "/云下载",
+            "ali2115_enabled": False,
+            "ali2115_token": "",
+            "ali2115_ali_folder": "/秒传转存",
+            "ali2115_115_folder": "/秒传接收",
+            "ali2115_organize": False
         }
         
         # 将现有规则填充到对应的 rule_path_X 和 rule_events_X
@@ -795,6 +826,97 @@ class MHNotify(_PluginBase):
                                             'label': '移动整理',
                                             'hint': '云下载完成后自动移动到MH默认目录并整理',
                                             'persistent-hint': True
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # 阿里云盘秒传配置
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'ali2115_enabled',
+                                            'label': '启用阿里云盘秒传',
+                                            'hint': '开启后，可使用 /mhaly2115 命令将阿里云盘分享秒传到115'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'ali2115_organize',
+                                            'label': '秒传后移动整理',
+                                            'hint': '秒传完成后自动移动到MH默认目录并整理',
+                                            'persistent-hint': True
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'ali2115_ali_folder',
+                                            'label': '阿里云盘临时文件夹',
+                                            'placeholder': '/秒传转存',
+                                            'hint': '阿里云盘中用于临时转存分享文件的目录'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'ali2115_115_folder',
+                                            'label': '115云盘秒传接收文件夹',
+                                            'placeholder': '/秒传接收',
+                                            'hint': '115网盘中接收秒传文件的目录'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'ali2115_token',
+                                            'label': '阿里云盘 Refresh Token',
+                                            'type': 'password',
+                                            'placeholder': '输入阿里云盘的 refresh_token',
+                                            'hint': '从阿里云盘客户端或浏览器获取的 refresh_token，用于认证阿里云盘API'
                                         }
                                     }
                                 ]
@@ -4292,6 +4414,499 @@ class MHNotify(_PluginBase):
                     ).start()
                 except Exception as e:
                     logger.warning(f"mhnotify: 启动批量监控线程失败: {e}")
+
+    @eventmanager.register(EventType.PluginAction)
+    def handle_ali_to_115(self, event: Event):
+        """远程命令触发：阿里云盘分享秒传到115"""
+        if not event:
+            return
+        event_data = event.event_data
+        if not event_data or event_data.get("action") != "mh_ali_to_115":
+            return
+
+        # 检查功能是否启用
+        if not self._ali2115_enabled:
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="阿里云盘秒传功能未启用",
+                text="请先在插件配置中启用阿里云盘秒传功能",
+                userid=event_data.get("user")
+            )
+            return
+
+        # 检查阿里云盘 Token 是否配置
+        if not self._ali2115_token:
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="阿里云盘 Token 未配置",
+                text="请先在插件配置中填写阿里云盘 Refresh Token",
+                userid=event_data.get("user")
+            )
+            return
+
+        # 检查115 Cookie 是否配置
+        if not self._p115_cookie:
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="115 Cookie 未配置",
+                text="请先在插件配置中填写115 Cookie",
+                userid=event_data.get("user")
+            )
+            return
+
+        # 获取分享链接
+        share_url = event_data.get("arg_str")
+        if not share_url or not share_url.strip():
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="参数错误",
+                text="用法: /mhaly2115 <阿里云盘分享链接>\n例如: /mhaly2115 https://www.alipan.com/s/xxxxx",
+                userid=event_data.get("user")
+            )
+            return
+
+        share_url = share_url.strip()
+        logger.info(f"mhnotify: 收到阿里云盘秒传命令: {share_url}")
+
+        # 发送确认消息
+        self.post_message(
+            channel=event_data.get("channel"),
+            title="⏳ 阿里云盘秒传任务开始",
+            text=f"正在处理分享链接...\n{share_url[:60]}...",
+            userid=event_data.get("user")
+        )
+
+        # 在后台线程执行秒传
+        try:
+            import threading
+            threading.Thread(
+                target=self._execute_ali_to_115,
+                args=(share_url, event_data.get("channel"), event_data.get("user")),
+                daemon=True
+            ).start()
+        except Exception as e:
+            logger.error(f"mhnotify: 启动阿里云盘秒传线程失败: {e}")
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="❌ 阿里云盘秒传失败",
+                text=f"启动秒传任务失败: {str(e)}",
+                userid=event_data.get("user")
+            )
+
+    def _execute_ali_to_115(self, share_url: str, channel: str = None, userid: str = None):
+        """
+        执行阿里云盘分享秒传到115
+        :param share_url: 阿里云盘分享链接
+        :param channel: 消息通道
+        :param userid: 用户ID
+        """
+        from hashlib import sha1
+        from time import sleep
+        from urllib.parse import urlparse
+        from pathlib import Path
+        
+        try:
+            # 导入依赖
+            try:
+                from p115client import P115Client
+            except ImportError:
+                logger.error("mhnotify: p115client 未安装")
+                self.post_message(
+                    channel=channel,
+                    title="❌ 阿里云盘秒传失败",
+                    text="p115client 未安装，请先安装依赖",
+                    userid=userid
+                )
+                return
+
+            try:
+                from aligo import Aligo
+            except ImportError:
+                logger.error("mhnotify: aligo 未安装")
+                self.post_message(
+                    channel=channel,
+                    title="❌ 阿里云盘秒传失败",
+                    text="aligo 未安装，请先安装依赖",
+                    userid=userid
+                )
+                return
+            
+            # 提取分享码
+            share_id = self._extract_ali_share_code(share_url)
+            if not share_id:
+                logger.error(f"mhnotify: 无法从链接中提取分享码: {share_url}")
+                self.post_message(
+                    channel=channel,
+                    title="❌ 阿里云盘秒传失败",
+                    text=f"无法从链接中提取分享码，请检查链接格式\n链接: {share_url}",
+                    userid=userid
+                )
+                return
+            
+            logger.info(f"mhnotify: 提取到分享码: {share_id}")
+            
+            # 创建阿里云盘客户端
+            try:
+                ali_client = Aligo(refresh_token=self._ali2115_token)
+                logger.info("mhnotify: 阿里云盘客户端创建成功")
+            except Exception as e:
+                logger.error(f"mhnotify: 创建阿里云盘客户端失败: {e}")
+                self.post_message(
+                    channel=channel,
+                    title="❌ 阿里云盘秒传失败",
+                    text=f"阿里云盘登录失败: {str(e)}\n请检查 Refresh Token 是否有效",
+                    userid=userid
+                )
+                return
+            
+            # 创建115客户端
+            try:
+                p115_client = P115Client(self._p115_cookie, app="web")
+                logger.info("mhnotify: 115客户端创建成功")
+            except Exception as e:
+                logger.error(f"mhnotify: 创建115客户端失败: {e}")
+                self.post_message(
+                    channel=channel,
+                    title="❌ 阿里云盘秒传失败",
+                    text=f"115登录失败: {str(e)}\n请检查 Cookie 是否有效",
+                    userid=userid
+                )
+                return
+            
+            # 获取分享 Token
+            try:
+                share_token = ali_client.get_share_token(share_id)
+                logger.info(f"mhnotify: 获取分享 Token 成功")
+            except Exception as e:
+                logger.error(f"mhnotify: 获取分享 Token 失败: {e}")
+                self.post_message(
+                    channel=channel,
+                    title="❌ 阿里云盘秒传失败",
+                    text=f"获取分享信息失败: {str(e)}\n分享链接可能已失效",
+                    userid=userid
+                )
+                return
+            
+            # 获取或创建阿里云盘临时文件夹
+            ali_folder_path = self._ali2115_ali_folder.strip() or "/秒传转存"
+            if not ali_folder_path.startswith('/'):
+                ali_folder_path = '/' + ali_folder_path
+            ali_folder_name = ali_folder_path.lstrip('/').split('/')[0]
+            
+            try:
+                folder_info = ali_client.get_folder_by_path(path=ali_folder_name)
+                if not folder_info:
+                    folder_info = ali_client.create_folder(name=ali_folder_name, check_name_mode="overwrite")
+                ali_folder_id = folder_info.file_id
+                logger.info(f"mhnotify: 阿里云盘临时文件夹 ID: {ali_folder_id}")
+            except Exception as e:
+                logger.error(f"mhnotify: 获取/创建阿里云盘临时文件夹失败: {e}")
+                self.post_message(
+                    channel=channel,
+                    title="❌ 阿里云盘秒传失败",
+                    text=f"创建阿里云盘临时文件夹失败: {str(e)}",
+                    userid=userid
+                )
+                return
+            
+            # 获取115目标文件夹ID
+            target_path = self._ali2115_115_folder.strip() or "/秒传接收"
+            if not target_path.startswith('/'):
+                target_path = '/' + target_path
+            target_path = target_path.rstrip('/')
+            
+            try:
+                resp = p115_client.fs_dir_getid(target_path)
+                if resp and resp.get("id"):
+                    target_cid = int(resp.get("id"))
+                else:
+                    # 目录不存在，创建它
+                    mkdir_resp = p115_client.fs_makedirs_app(target_path, pid=0)
+                    target_cid = int(mkdir_resp.get("cid", 0))
+                logger.info(f"mhnotify: 115目标文件夹 ID: {target_cid}")
+            except Exception as e:
+                logger.error(f"mhnotify: 获取/创建115目标文件夹失败: {e}")
+                self.post_message(
+                    channel=channel,
+                    title="❌ 阿里云盘秒传失败",
+                    text=f"创建115目标文件夹失败: {str(e)}",
+                    userid=userid
+                )
+                return
+            
+            # 保存分享到阿里云盘
+            try:
+                logger.info("mhnotify: 开始保存分享到阿里云盘...")
+                ali_client.share_file_save_all_to_drive(
+                    share_token=share_token,
+                    to_parent_file_id=ali_folder_id,
+                )
+                logger.info("mhnotify: 分享保存成功，等待同步...")
+                sleep(3)
+            except Exception as e:
+                logger.error(f"mhnotify: 保存分享失败: {e}")
+                self.post_message(
+                    channel=channel,
+                    title="❌ 阿里云盘秒传失败",
+                    text=f"保存分享到阿里云盘失败: {str(e)}",
+                    userid=userid
+                )
+                return
+            
+            # 获取分享文件列表（递归）
+            media_exts = ['.mp4', '.mkv', '.avi', '.wmv', '.mov', '.flv', '.rmvb', '.rm', '.ts', '.m2ts', '.webm', '.mpg', '.mpeg', '.m4v', '.3gp']
+            
+            def get_share_files(share_token, parent_file_id="root"):
+                """递归获取分享文件列表"""
+                files = []
+                try:
+                    file_list = ali_client.get_share_file_list(share_token, parent_file_id=parent_file_id)
+                    for file in file_list:
+                        if file.type == "folder":
+                            files.extend(get_share_files(share_token, file.file_id))
+                        else:
+                            suffix = Path(file.name).suffix.lower()
+                            if suffix in media_exts:
+                                files.append(file)
+                            else:
+                                logger.debug(f"mhnotify: 跳过非媒体文件: {file.name}")
+                except Exception as e:
+                    logger.warning(f"mhnotify: 获取文件列表异常: {e}")
+                return files
+            
+            share_files = get_share_files(share_token)
+            if not share_files:
+                logger.warning("mhnotify: 分享中没有找到媒体文件")
+                self.post_message(
+                    channel=channel,
+                    title="⚠️ 阿里云盘秒传完成",
+                    text="分享中没有找到媒体文件（支持的格式：mp4、mkv、avi 等）",
+                    userid=userid
+                )
+                return
+            
+            share_file_names = [f.name for f in share_files]
+            logger.info(f"mhnotify: 找到 {len(share_file_names)} 个媒体文件待秒传")
+            
+            # 获取已转存文件的下载链接和SHA1
+            download_url_list = []
+            remove_list = []
+            
+            def walk_files(parent_file_id, callback):
+                """遍历阿里云盘目录"""
+                try:
+                    file_list = ali_client.get_file_list(parent_file_id=parent_file_id)
+                    for file in file_list:
+                        callback(file)
+                        if file.type == "folder":
+                            walk_files(file.file_id, callback)
+                except Exception as e:
+                    logger.warning(f"mhnotify: 遍历文件夹异常: {e}")
+            
+            file_name_list = list(share_file_names)
+            
+            def collect_file_info(file):
+                nonlocal file_name_list
+                if file.file_id not in remove_list:
+                    remove_list.append(file.file_id)
+                
+                if file.type == "file" and file.name in file_name_list:
+                    try:
+                        url_info = ali_client.get_download_url(file_id=file.file_id)
+                        if url_info and url_info.url:
+                            info = {
+                                "url": url_info.url,
+                                "size": url_info.size,
+                                "name": file.name,
+                                "sha1": str(url_info.content_hash).upper(),
+                                "file_id": file.file_id  # 保存file_id用于重新获取下载链接
+                            }
+                            download_url_list.append(info)
+                            file_name_list = [n for n in file_name_list if n != file.name]
+                    except Exception as e:
+                        logger.warning(f"mhnotify: 获取文件 {file.name} 下载链接失败: {e}")
+            
+            # 最多尝试5次获取所有文件信息
+            for attempt in range(5):
+                if not file_name_list:
+                    break
+                walk_files(ali_folder_id, collect_file_info)
+                if file_name_list:
+                    sleep(2)
+            
+            if not download_url_list:
+                logger.error("mhnotify: 未能获取任何文件的下载信息")
+                self.post_message(
+                    channel=channel,
+                    title="❌ 阿里云盘秒传失败",
+                    text="未能获取文件下载信息，请重试",
+                    userid=userid
+                )
+                return
+            
+            logger.info(f"mhnotify: 获取到 {len(download_url_list)} 个文件的下载信息")
+            
+            # 执行秒传到115
+            success_count = 0
+            fail_count = 0
+            
+            # 创建用于二次校验的辅助函数
+            def calculate_sha1_range(url: str, sign_check: str) -> str:
+                """计算指定范围的 sha1"""
+                import httpx
+                headers = {
+                    "Range": f"bytes={sign_check}",
+                    "Referer": "https://www.aliyundrive.com/",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
+                with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=120) as r:
+                    r.raise_for_status()
+                    _sha1 = sha1()
+                    for chunk in r.iter_bytes(chunk_size=8192):
+                        _sha1.update(chunk)
+                    return _sha1.hexdigest().upper()
+            
+            def make_read_range_func(file_id: str, fallback_url: str):
+                """创建一个读取范围数据的函数，每次调用时实时获取新的下载链接"""
+                def read_range_bytes_or_hash(sign_check: str) -> str:
+                    # 每次二次校验时都重新获取下载链接（阿里云盘链接过期很快）
+                    try:
+                        url_info = ali_client.get_download_url(file_id=file_id)
+                        url = url_info.url
+                        logger.debug(f"mhnotify: 获取新的下载链接进行二次校验")
+                    except Exception as e:
+                        logger.warning(f"mhnotify: 二次校验时获取下载链接失败: {e}，使用备用链接")
+                        url = fallback_url
+                    return calculate_sha1_range(url, sign_check)
+                return read_range_bytes_or_hash
+            
+            def upload_to_115(file_info: dict):
+                """上传文件到115"""
+                file_id = file_info.get("file_id")
+                file_name = file_info.get("name")
+                fallback_url = file_info.get("url")
+                
+                # 创建专属于这个文件的读取函数
+                read_range_func = make_read_range_func(file_id, fallback_url)
+                
+                return p115_client.upload_file_init(
+                    filename=file_name,
+                    filesize=file_info.get("size"),
+                    filesha1=file_info.get("sha1"),
+                    pid=target_cid,
+                    read_range_bytes_or_hash=read_range_func,
+                )
+            
+            # 顺序上传（避免并发时下载链接混乱）
+            for file_info in download_url_list:
+                file_name = file_info.get("name")
+                retries = 0
+                max_retries = 3
+                
+                while retries <= max_retries:
+                    try:
+                        result = upload_to_115(file_info)
+                        if result and isinstance(result, dict) and result.get("status") == 2:
+                            logger.info(f"mhnotify: 文件 '{file_name}' 秒传成功")
+                            success_count += 1
+                            break
+                        else:
+                            status_code = result.get("status", "N/A") if isinstance(result, dict) else "N/A"
+                            logger.warning(f"mhnotify: 文件 '{file_name}' 上传状态异常 (status: {status_code})")
+                    except Exception as exc:
+                        logger.warning(f"mhnotify: 文件 '{file_name}' 上传异常: {exc}")
+                    
+                    retries += 1
+                    if retries <= max_retries:
+                        delay = 2 * (2 ** (retries - 1))
+                        logger.info(f"mhnotify: 文件 '{file_name}' 将在 {delay} 秒后进行第 {retries} 次重试...")
+                        sleep(delay)
+                    else:
+                        logger.error(f"mhnotify: 文件 '{file_name}' 已达到最大重试次数，放弃上传")
+                        fail_count += 1
+            # 清理阿里云盘临时文件
+            try:
+                logger.info("mhnotify: 开始清理阿里云盘临时文件...")
+                if remove_list:
+                    # 使用 aligo 的 move_file_to_trash 或直接删除
+                    for file_id in remove_list:
+                        try:
+                            ali_client.move_file_to_trash(file_id=file_id)
+                        except Exception as del_err:
+                            logger.debug(f"mhnotify: 删除文件 {file_id} 失败: {del_err}")
+                logger.info(f"mhnotify: 已清理 {len(remove_list)} 个临时文件")
+            except Exception as e:
+                logger.warning(f"mhnotify: 清理阿里云盘临时文件失败: {e}")
+            
+            # 发送结果通知
+            result_text = f"📦 分享链接: {share_url[:50]}...\n\n"
+            result_text += f"✅ 秒传成功: {success_count} 个文件\n"
+            if fail_count > 0:
+                result_text += f"❌ 秒传失败: {fail_count} 个文件\n"
+            result_text += f"\n📂 保存路径: {target_path}"
+            
+            title = "✅ 阿里云盘秒传完成" if fail_count == 0 else f"⚠️ 阿里云盘秒传完成（{fail_count}个失败）"
+            
+            self.post_message(
+                channel=channel,
+                title=title,
+                text=result_text,
+                userid=userid
+            )
+            
+            logger.info(f"mhnotify: 阿里云盘秒传完成，成功 {success_count} 个，失败 {fail_count} 个")
+            
+            # 如果开启了移动整理，执行整理
+            if self._ali2115_organize and success_count > 0:
+                logger.info("mhnotify: 开始执行秒传后移动整理...")
+                try:
+                    access_token = self._get_mh_access_token()
+                    if access_token:
+                        self._organize_cloud_download(access_token, target_path)
+                        self.post_message(
+                            channel=channel,
+                            title="📁 移动整理已启动",
+                            text=f"正在整理 {target_path} 目录中的文件...",
+                            userid=userid
+                        )
+                    else:
+                        logger.error("mhnotify: 无法获取MH access token，跳过移动整理")
+                except Exception as e:
+                    logger.error(f"mhnotify: 秒传后移动整理失败: {e}")
+            
+        except Exception as e:
+            logger.error(f"mhnotify: 阿里云盘秒传异常: {e}", exc_info=True)
+            self.post_message(
+                channel=channel,
+                title="❌ 阿里云盘秒传失败",
+                text=f"秒传过程中发生错误: {str(e)}",
+                userid=userid
+            )
+
+    @staticmethod
+    def _extract_ali_share_code(url: str) -> Optional[str]:
+        """
+        从阿里云盘分享链接中提取分享码
+        支持格式:
+        - https://www.alipan.com/s/xxxxx
+        - https://www.aliyundrive.com/s/xxxxx
+        """
+        from urllib.parse import urlparse
+        try:
+            parsed_url = urlparse(url)
+            path_parts = parsed_url.path.split("/")
+            if len(path_parts) >= 3 and path_parts[-2] == "s":
+                share_code = path_parts[-1]
+                if share_code:
+                    return share_code
+            # 尝试直接匹配 /s/ 后面的部分
+            if "/s/" in url:
+                share_code = url.split("/s/")[-1].split("/")[0].split("?")[0]
+                if share_code:
+                    return share_code
+        except Exception as e:
+            logger.warning(f"mhnotify: 提取分享码异常: {e}")
+        return None
 
     def __finish_mp_subscribe(self, subscribe):
         try:
