@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.4.9"
+    plugin_version = "1.5.0"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -4257,111 +4257,644 @@ class MHNotify(_PluginBase):
         except Exception as e:
             logger.error(f"mhnotify: 完成MP订阅失败: {e}")
 
+    # HDHive 模块缓存
+    _hdhive_module: Any = None
+    _hdhive_module_checked: bool = False
+    
+    def __get_hdhive_extension_filename(self) -> Optional[str]:
+        """
+        根据当前平台获取 hdhive 扩展模块的文件名
+        
+        :return: 文件名，如果平台不支持则返回 None
+        """
+        import platform
+        machine = platform.machine().lower()
+        system = platform.system().lower()
+        
+        # 映射架构名称
+        arch_map = {
+            "x86_64": "x86_64",
+            "amd64": "x86_64",
+            "aarch64": "aarch64",
+            "arm64": "aarch64",
+        }
+        arch = arch_map.get(machine, machine)
+        
+        if system == "windows":
+            return f"hdhive.cp312-win_{arch}.pyd"
+        elif system == "darwin":
+            return "hdhive.cpython-312-darwin.so"
+        elif system == "linux":
+            return f"hdhive.cpython-312-{arch}-linux-gnu.so"
+        else:
+            return None
+    
+    def __download_hdhive_module(self) -> bool:
+        """
+        检查并下载 hdhive 扩展模块
+        
+        :return: 是否成功获取模块
+        """
+        import platform
+        import os
+        from pathlib import Path
+        import urllib.request
+        import urllib.error
+        
+        # 获取插件目录下的 lib 文件夹
+        plugin_dir = Path(__file__).parent
+        lib_dir = plugin_dir / "lib"
+        lib_dir.mkdir(parents=True, exist_ok=True)
+        
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+        
+        ext_filename = self.__get_hdhive_extension_filename()
+        if not ext_filename:
+            logger.warning(f"mhnotify: 不支持的平台: {system}/{machine}，HDHive 模块功能无法使用")
+            return False
+        
+        target_path = lib_dir / ext_filename
+        
+        # 本地文件已存在
+        if target_path.exists():
+            logger.debug(f"mhnotify: hdhive 扩展模块已存在: {target_path}")
+            return True
+        
+        # 从 GitHub 下载
+        base_url = "https://raw.githubusercontent.com/mrtian2016/hdhive_resource/main"
+        download_url = f"{base_url}/{ext_filename}"
+        
+        logger.info(f"mhnotify: 本地未找到 hdhive 扩展模块，尝试下载: {download_url}")
+        
+        try:
+            proxy = getattr(settings, "PROXY", None)
+            if proxy:
+                if isinstance(proxy, dict):
+                    proxy_handler = urllib.request.ProxyHandler(proxy)
+                else:
+                    proxy_handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+                opener = urllib.request.build_opener(proxy_handler)
+                logger.debug(f"mhnotify: 下载 hdhive 使用代理: {proxy}")
+                response = opener.open(download_url, timeout=120)
+            else:
+                response = urllib.request.urlopen(download_url, timeout=120)
+            
+            with response:
+                content = response.read()
+            
+            with open(target_path, "wb") as f:
+                f.write(content)
+            
+            # 非 Windows 平台设置可执行权限
+            if system != "windows":
+                os.chmod(target_path, 0o755)
+            
+            logger.info(f"mhnotify: ✓ hdhive 扩展模块下载成功: {target_path}")
+            return True
+            
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                logger.warning(f"mhnotify: ⚠️ hdhive 扩展模块暂不支持当前平台 ({system}/{machine})，将使用 HTTP API 模式")
+            else:
+                logger.error(f"mhnotify: 下载 hdhive 扩展模块失败 (HTTP {e.code}): {e}")
+            return False
+        except urllib.error.URLError as e:
+            logger.error(f"mhnotify: 下载 hdhive 扩展模块失败（网络错误）: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"mhnotify: 下载 hdhive 扩展模块失败: {e}")
+            return False
+    
+    def __load_hdhive_module(self) -> Optional[Any]:
+        """
+        加载 hdhive 模块，优先使用本地下载的模块
+        
+        :return: hdhive 模块对象，失败返回 None
+        """
+        if self._hdhive_module_checked:
+            return self._hdhive_module
+        
+        self._hdhive_module_checked = True
+        
+        # 尝试下载模块
+        if not self.__download_hdhive_module():
+            return None
+        
+        # 动态加载模块
+        import sys
+        import importlib.util
+        from pathlib import Path
+        
+        plugin_dir = Path(__file__).parent
+        lib_dir = plugin_dir / "lib"
+        
+        ext_filename = self.__get_hdhive_extension_filename()
+        if not ext_filename:
+            return None
+        
+        module_path = lib_dir / ext_filename
+        if not module_path.exists():
+            return None
+        
+        try:
+            # 将 lib 目录添加到 sys.path
+            lib_dir_str = str(lib_dir)
+            if lib_dir_str not in sys.path:
+                sys.path.insert(0, lib_dir_str)
+            
+            # 加载模块
+            spec = importlib.util.spec_from_file_location("hdhive", str(module_path))
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules["hdhive"] = module
+                spec.loader.exec_module(module)
+                self._hdhive_module = module
+                logger.info(f"mhnotify: ✓ hdhive 模块加载成功")
+                return module
+            else:
+                logger.error("mhnotify: 无法创建 hdhive 模块 spec")
+                return None
+        except Exception as e:
+            logger.error(f"mhnotify: 加载 hdhive 模块失败: {type(e).__name__}: {e}")
+            return None
+    
     def __fetch_hdhive_links(self, tmdb_id: Optional[int], media_type: Optional[str]) -> List[str]:
-        """根据配置从 HDHive 查询免费115分享链接，返回 URL 列表"""
+        """
+        根据配置从 HDHive 查询免费115分享链接，返回 URL 列表
+        优先使用 hdhive 模块（Linux/macOS），不可用时回退到 HTTP API 模式
+        """
         results: List[str] = []
         try:
+            logger.debug(f"mhnotify: HDHive 查询开始 tmdb_id={tmdb_id} media_type={media_type} enabled={self._hdhive_enabled}")
             if not self._hdhive_enabled:
+                logger.debug("mhnotify: HDHive 未启用，跳过查询")
                 return results
             if not tmdb_id:
                 logger.warning("mhnotify: 缺少 TMDB ID，无法使用 HDHive 查询")
                 return results
-            # 延迟导入 HDHive 库
-            import importlib
-            hdhive_mod = importlib.import_module('app.plugins.p115strgmsub.lib.hdhive')
-            HDHiveMediaType = getattr(hdhive_mod, 'MediaType')
-            h_type = HDHiveMediaType.MOVIE if (media_type or "movie").lower() == "movie" else HDHiveMediaType.TV
-
-            # API 模式
-            if (self._hdhive_query_mode or "api").lower() == "api":
-                cookie = self._hdhive_cookie or ""
-                # 自动刷新 Cookie（若开启）
-                try:
-                    if self._hdhive_auto_refresh:
-                        utils_mod = importlib.import_module('app.plugins.p115strgmsub.utils')
-                        check_valid = getattr(utils_mod, 'check_hdhive_cookie_valid', None)
-                        do_refresh = getattr(utils_mod, 'refresh_hdhive_cookie_with_playwright', None)
-                        if check_valid:
-                            is_valid, reason = check_valid(cookie, self._hdhive_refresh_before)
-                        else:
-                            is_valid, reason = (bool(cookie), 'no-check-func')
-                        if not cookie or not is_valid:
-                            logger.info(f"HDHive: Cookie 需要刷新 - {reason}")
-                            if self._hdhive_username and self._hdhive_password and do_refresh:
-                                new_cookie = do_refresh(self._hdhive_username, self._hdhive_password)
-                                if new_cookie:
-                                    cookie = new_cookie
-                                    self._hdhive_cookie = new_cookie
-                                    # 持久化更新
-                                    cfg = self.get_config()
-                                    if isinstance(cfg, dict):
-                                        cfg["hdhive_cookie"] = new_cookie
-                                        self.update_config(cfg)
-                                    logger.info("HDHive: Cookie 刷新成功并已保存到配置")
-                except Exception:
-                    logger.warning("HDHive: 自动刷新 Cookie 失败", exc_info=True)
-
-                if not cookie:
-                    logger.warning("HDHive API 模式需要有效的 Cookie")
-                    return results
-                try:
-                    proxy = getattr(settings, "PROXY", None)
-                    create_client = getattr(hdhive_mod, 'create_client')
-                    with create_client(cookie=cookie, proxy=proxy) as client:
-                        media = client.get_media_by_tmdb_id(tmdb_id, h_type)
-                        if not media:
-                            return results
-                        res = client.get_resources(media.slug, h_type, media_id=media.id)
-                        if not res or not res.success:
-                            return results
-                        for item in res.resources:
-                            if hasattr(item, 'website') and getattr(item.website, 'value', '') == '115' and getattr(item, 'is_free', False):
-                                share = client.get_share_url(item.slug)
-                                if share and share.url:
-                                    results.append(share.url)
-                except Exception:
-                    logger.error("HDHive (API) 查询失败", exc_info=True)
-                return results
-
-            # Playwright 模式
-            if not self._hdhive_username or not self._hdhive_password:
-                logger.warning("HDHive Playwright 模式需要配置用户名和密码")
-                return results
-            try:
-                import asyncio
-                proxy = getattr(settings, "PROXY", None)
-                async def async_search():
-                    create_async = getattr(hdhive_mod, 'create_async_client')
-                    async with create_async(
-                        username=self._hdhive_username,
-                        password=self._hdhive_password,
-                        cookie=self._hdhive_cookie,
-                        browser_type="chromium",
-                        headless=True,
-                        proxy=proxy
-                    ) as client:
-                        media = await client.get_media_by_tmdb_id(tmdb_id, h_type)
-                        if not media:
-                            return []
-                        res = await client.get_resources(media.slug, h_type, media_id=media.id)
-                        if not res or not res.success:
-                            return []
-                        links: List[str] = []
-                        for item in res.resources:
-                            if hasattr(item, 'website') and getattr(item.website, 'value', '') == '115' and getattr(item, 'is_free', False):
-                                share_result = await client.get_share_url_by_click(item.slug)
-                                if share_result and share_result.url:
-                                    links.append(share_result.url)
-                        return links
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    results = loop.run_until_complete(async_search())
-                finally:
-                    loop.close()
-            except Exception:
-                logger.error("HDHive (Playwright) 查询失败", exc_info=True)
-            return results
-        except Exception:
-            logger.error("mhnotify: __fetch_hdhive_links 异常", exc_info=True)
+            
+            # 尝试加载 hdhive 模块
+            hdhive_mod = self.__load_hdhive_module()
+            
+            if hdhive_mod:
+                # 使用 hdhive 模块查询
+                return self.__fetch_hdhive_links_with_module(tmdb_id, media_type, hdhive_mod)
+            else:
+                # 回退到 HTTP API 模式
+                logger.debug("mhnotify: hdhive 模块不可用，使用 HTTP API 模式")
+                return self.__fetch_hdhive_links_with_http(tmdb_id, media_type)
+                
+        except Exception as e:
+            logger.error(f"mhnotify: __fetch_hdhive_links 异常: {type(e).__name__}: {e}", exc_info=True)
             return []
+    
+    def __fetch_hdhive_links_with_module(self, tmdb_id: int, media_type: str, hdhive_mod: Any) -> List[str]:
+        """
+        使用 hdhive 模块查询 HDHive 资源
+        """
+        results: List[str] = []
+        try:
+            h_type_str = "movie" if (media_type or "movie").lower() == "movie" else "tv"
+            
+            # 获取 MediaType 枚举
+            MediaType = getattr(hdhive_mod, 'MediaType', None)
+            if MediaType is None:
+                logger.error("mhnotify: hdhive 模块缺少 MediaType 类")
+                return self.__fetch_hdhive_links_with_http(tmdb_id, media_type)
+            
+            h_type = MediaType.MOVIE if h_type_str == "movie" else MediaType.TV
+            
+            cookie = self._hdhive_cookie or ""
+            
+            # Cookie 有效性检查和刷新
+            if self._hdhive_auto_refresh and self._hdhive_username and self._hdhive_password:
+                is_valid, reason = self.__check_hdhive_cookie_valid(cookie, self._hdhive_refresh_before)
+                if not cookie or not is_valid:
+                    logger.info(f"HDHive: Cookie 需要刷新 - {reason}")
+                    new_cookie = self.__refresh_hdhive_cookie(self._hdhive_username, self._hdhive_password)
+                    if new_cookie:
+                        cookie = new_cookie
+                        self._hdhive_cookie = new_cookie
+                        cfg = self.get_config()
+                        if isinstance(cfg, dict):
+                            cfg["hdhive_cookie"] = new_cookie
+                            self.update_config(cfg)
+                        logger.info("HDHive: Cookie 刷新成功")
+            
+            if not cookie:
+                if self._hdhive_username and self._hdhive_password:
+                    new_cookie = self.__refresh_hdhive_cookie(self._hdhive_username, self._hdhive_password)
+                    if new_cookie:
+                        cookie = new_cookie
+                        self._hdhive_cookie = new_cookie
+                        cfg = self.get_config()
+                        if isinstance(cfg, dict):
+                            cfg["hdhive_cookie"] = new_cookie
+                            self.update_config(cfg)
+                    else:
+                        logger.warning("HDHive: 无法获取有效 Cookie")
+                        return results
+                else:
+                    logger.warning("HDHive: 需要配置 Cookie 或用户名密码")
+                    return results
+            
+            proxy = getattr(settings, "PROXY", None)
+            create_client = getattr(hdhive_mod, 'create_client', None)
+            
+            if create_client is None:
+                logger.error("mhnotify: hdhive 模块缺少 create_client 函数")
+                return self.__fetch_hdhive_links_with_http(tmdb_id, media_type)
+            
+            logger.debug(f"mhnotify: 使用 hdhive 模块查询 tmdb_id={tmdb_id}")
+            
+            with create_client(cookie=cookie, proxy=proxy) as client:
+                media = client.get_media_by_tmdb_id(tmdb_id, h_type)
+                if not media:
+                    logger.info(f"mhnotify: HDHive 未找到媒体 tmdb_id={tmdb_id}")
+                    return results
+                
+                logger.debug(f"mhnotify: HDHive 找到媒体 slug={getattr(media, 'slug', None)}")
+                
+                res = client.get_resources(media.slug, h_type, media_id=media.id)
+                if not res or not res.success:
+                    logger.info(f"mhnotify: HDHive 获取资源失败")
+                    return results
+                
+                logger.debug(f"mhnotify: HDHive 获取到资源数量={len(res.resources) if hasattr(res, 'resources') else 0}")
+                
+                for item in res.resources:
+                    website_val = getattr(item.website, 'value', '') if hasattr(item, 'website') else ''
+                    is_free = getattr(item, 'is_free', False)
+                    
+                    if website_val == '115' and is_free:
+                        share = client.get_share_url(item.slug)
+                        if share and share.url:
+                            logger.info(f"mhnotify: HDHive 获取到免费分享链接: {share.url}")
+                            results.append(share.url)
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"mhnotify: hdhive 模块查询失败: {type(e).__name__}: {e}", exc_info=True)
+            # 回退到 HTTP API
+            return self.__fetch_hdhive_links_with_http(tmdb_id, media_type)
+    
+    def __fetch_hdhive_links_with_http(self, tmdb_id: int, media_type: str) -> List[str]:
+        """
+        使用 HTTP API 直接查询 HDHive 资源（无需 hdhive 模块）
+        """
+        results: List[str] = []
+        try:
+            import requests
+            
+            base_url = "https://hdhive.com"
+            h_type = "movie" if (media_type or "movie").lower() == "movie" else "tv"
+            logger.debug(f"mhnotify: HDHive HTTP API 查询 tmdb_id={tmdb_id} h_type={h_type}")
+
+            # API 模式需要 Cookie
+            query_mode = (self._hdhive_query_mode or "api").lower()
+            logger.debug(f"mhnotify: HDHive 查询模式: {query_mode}")
+            
+            cookie = self._hdhive_cookie or ""
+            
+            # 自动刷新 Cookie（若开启且 Cookie 无效）
+            if self._hdhive_auto_refresh and self._hdhive_username and self._hdhive_password:
+                is_valid, reason = self.__check_hdhive_cookie_valid(cookie, self._hdhive_refresh_before)
+                logger.debug(f"mhnotify: Cookie 有效性检查: valid={is_valid}, reason={reason}")
+                if not cookie or not is_valid:
+                    logger.info(f"HDHive: Cookie 需要刷新 - {reason}")
+                    new_cookie = self.__refresh_hdhive_cookie(self._hdhive_username, self._hdhive_password)
+                    if new_cookie:
+                        cookie = new_cookie
+                        self._hdhive_cookie = new_cookie
+                        cfg = self.get_config()
+                        if isinstance(cfg, dict):
+                            cfg["hdhive_cookie"] = new_cookie
+                            self.update_config(cfg)
+                        logger.info("HDHive: Cookie 刷新成功并已保存到配置")
+                    else:
+                        logger.warning("mhnotify: Cookie 刷新失败")
+            
+            if not cookie:
+                # 尝试 Playwright 模式登录获取 Cookie
+                if query_mode == "playwright" and self._hdhive_username and self._hdhive_password:
+                    logger.info("mhnotify: HDHive 无有效 Cookie，尝试 Playwright 登录...")
+                    new_cookie = self.__refresh_hdhive_cookie(self._hdhive_username, self._hdhive_password)
+                    if new_cookie:
+                        cookie = new_cookie
+                        self._hdhive_cookie = new_cookie
+                        cfg = self.get_config()
+                        if isinstance(cfg, dict):
+                            cfg["hdhive_cookie"] = new_cookie
+                            self.update_config(cfg)
+                        logger.info("HDHive: Playwright 登录成功，Cookie 已保存")
+                    else:
+                        logger.warning("HDHive: Playwright 登录失败")
+                        return results
+                else:
+                    logger.warning("HDHive: 需要有效的 Cookie 或配置用户名密码使用 Playwright 模式")
+                    return results
+            
+            # 设置请求头
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": base_url,
+                "Cookie": cookie,
+            }
+            
+            # 从 Cookie 中提取 csrf_access_token（用于 API 请求）
+            csrf_token = ""
+            for part in cookie.split(';'):
+                part = part.strip()
+                if part.startswith('csrf_access_token='):
+                    csrf_token = part.split('=', 1)[1]
+                    break
+            if csrf_token:
+                headers["X-CSRF-TOKEN"] = csrf_token
+            
+            proxy = getattr(settings, "PROXY", None)
+            proxies = None
+            if proxy:
+                if isinstance(proxy, dict):
+                    proxies = proxy
+                else:
+                    proxies = {"http": proxy, "https": proxy}
+            
+            session = requests.Session()
+            session.headers.update(headers)
+            if proxies:
+                session.proxies.update(proxies)
+            
+            try:
+                # 1. 通过 TMDB ID 查询媒体信息
+                search_url = f"{base_url}/api/media/tmdb/{tmdb_id}?type={h_type}"
+                logger.debug(f"mhnotify: HDHive 查询媒体 GET {search_url}")
+                
+                resp = session.get(search_url, timeout=30)
+                if resp.status_code != 200:
+                    logger.info(f"mhnotify: HDHive 查询媒体失败，状态码={resp.status_code}")
+                    return results
+                
+                media_data = resp.json()
+                if not media_data:
+                    logger.info(f"mhnotify: HDHive 未找到媒体 tmdb_id={tmdb_id}")
+                    return results
+                
+                media_slug = media_data.get("slug")
+                media_id = media_data.get("id")
+                logger.debug(f"mhnotify: HDHive 找到媒体 slug={media_slug} id={media_id}")
+                
+                if not media_slug:
+                    logger.info(f"mhnotify: HDHive 媒体数据无 slug")
+                    return results
+                
+                # 2. 获取资源列表
+                resources_url = f"{base_url}/api/resource/{h_type}/{media_slug}"
+                if media_id:
+                    resources_url += f"?media_id={media_id}"
+                logger.debug(f"mhnotify: HDHive 获取资源 GET {resources_url}")
+                
+                resp = session.get(resources_url, timeout=30)
+                if resp.status_code != 200:
+                    logger.info(f"mhnotify: HDHive 获取资源失败，状态码={resp.status_code}")
+                    return results
+                
+                resources_data = resp.json()
+                if not resources_data or not resources_data.get("success"):
+                    logger.info(f"mhnotify: HDHive 获取资源返回 success=False")
+                    return results
+                
+                resources = resources_data.get("resources", [])
+                logger.debug(f"mhnotify: HDHive 获取到资源数量={len(resources)}")
+                
+                # 3. 筛选免费的 115 资源并获取分享链接
+                for item in resources:
+                    website = item.get("website", "")
+                    is_free = item.get("is_free", False)
+                    res_slug = item.get("slug", "")
+                    logger.debug(f"mhnotify: HDHive 资源项 slug={res_slug} website={website} is_free={is_free}")
+                    
+                    if website == "115" and is_free and res_slug:
+                        # 获取分享链接
+                        share_url_api = f"{base_url}/api/resource/{res_slug}/share"
+                        logger.debug(f"mhnotify: HDHive 获取分享链接 GET {share_url_api}")
+                        
+                        try:
+                            share_resp = session.get(share_url_api, timeout=30)
+                            if share_resp.status_code == 200:
+                                share_data = share_resp.json()
+                                share_link = share_data.get("url") or share_data.get("share_url")
+                                if share_link:
+                                    logger.info(f"mhnotify: HDHive 获取到免费分享链接: {share_link}")
+                                    results.append(share_link)
+                                else:
+                                    logger.debug(f"mhnotify: HDHive 分享链接响应无 url 字段: {share_data}")
+                            else:
+                                logger.debug(f"mhnotify: HDHive 获取分享链接失败 status={share_resp.status_code}")
+                        except Exception as e:
+                            logger.debug(f"mhnotify: HDHive 获取分享链接异常: {e}")
+                
+                logger.debug(f"mhnotify: HDHive 查询结束，结果数量={len(results)}")
+                return results
+                
+            except requests.exceptions.RequestException as e:
+                logger.error(f"HDHive API 请求失败: {type(e).__name__}: {e}")
+                return results
+                
+        except Exception as e:
+            logger.error(f"mhnotify: __fetch_hdhive_links 异常: {type(e).__name__}: {e}", exc_info=True)
+            return []
+    
+    def __check_hdhive_cookie_valid(self, cookie: str, refresh_before: int = 3600) -> Tuple[bool, str]:
+        """
+        检查 HDHive Cookie 是否有效
+        
+        :param cookie: Cookie 字符串
+        :param refresh_before: 在过期前多少秒视为需要刷新
+        :return: (是否有效, 原因说明)
+        """
+        import base64
+        import json
+        
+        if not cookie:
+            return False, "Cookie 为空"
+        
+        # 从 Cookie 中提取 token
+        token = None
+        for part in cookie.split(';'):
+            part = part.strip()
+            if part.startswith('token='):
+                token = part.split('=', 1)[1]
+                break
+        
+        if not token:
+            return False, "Cookie 中无 token"
+        
+        try:
+            # JWT 格式: header.payload.signature
+            parts = token.split('.')
+            if len(parts) != 3:
+                return False, "token 格式错误"
+            
+            # 解码 payload（第二部分）
+            payload = parts[1]
+            # 补齐 base64 padding
+            padding = 4 - len(payload) % 4
+            if padding != 4:
+                payload += '=' * padding
+            
+            decoded = base64.urlsafe_b64decode(payload)
+            payload_data = json.loads(decoded)
+            
+            exp = payload_data.get('exp')
+            if not exp:
+                return False, "token 无过期时间"
+            
+            import time
+            now = time.time()
+            time_left = exp - now
+            
+            if time_left <= 0:
+                return False, "Cookie 已过期"
+            
+            if time_left < refresh_before:
+                hours_left = time_left / 3600
+                return False, f"Cookie 将在 {hours_left:.1f} 小时后过期"
+            
+            return True, f"Cookie 有效，还有 {time_left / 3600:.1f} 小时"
+            
+        except Exception as e:
+            logger.debug(f"mhnotify: 解析 HDHive Cookie 失败: {e}")
+            return False, f"解析失败: {e}"
+    
+    def __refresh_hdhive_cookie(self, username: str, password: str) -> Optional[str]:
+        """
+        使用 Playwright 登录 HDHive 获取新 Cookie
+        
+        :param username: HDHive 用户名
+        :param password: HDHive 密码
+        :return: 新的 Cookie 字符串，失败返回 None
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            logger.error("Playwright 未安装，无法自动刷新 HDHive Cookie")
+            logger.info("请运行: pip install playwright && playwright install chromium")
+            return None
+        
+        try:
+            base_url = "https://hdhive.com"
+            login_url = f"{base_url}/login"
+            proxy = getattr(settings, "PROXY", None)
+            
+            with sync_playwright() as pw:
+                launch_options = {"headless": True}
+                context_options = {}
+                
+                if proxy:
+                    if isinstance(proxy, dict):
+                        proxy_url = proxy.get("http") or proxy.get("https")
+                    else:
+                        proxy_url = proxy
+                    if proxy_url:
+                        context_options["proxy"] = {"server": proxy_url}
+                        logger.debug(f"HDHive Cookie 刷新使用代理: {proxy_url}")
+                
+                browser = pw.chromium.launch(**launch_options)
+                context = browser.new_context(**context_options)
+                page = context.new_page()
+                
+                logger.info("HDHive: 访问登录页...")
+                page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(2000)
+                
+                # 填写用户名
+                username_selectors = ['#username', 'input[name="username"]', 'input[name="email"]', 'input[type="email"]']
+                username_filled = False
+                for sel in username_selectors:
+                    try:
+                        if page.query_selector(sel):
+                            page.fill(sel, username)
+                            logger.debug("HDHive: ✓ 填写用户名")
+                            username_filled = True
+                            break
+                    except Exception:
+                        continue
+                
+                if not username_filled:
+                    logger.error("HDHive: 未找到用户名输入框")
+                    context.close()
+                    browser.close()
+                    return None
+                
+                # 填写密码
+                password_selectors = ['#password', 'input[name="password"]', 'input[type="password"]']
+                password_filled = False
+                for sel in password_selectors:
+                    try:
+                        if page.query_selector(sel):
+                            page.fill(sel, password)
+                            logger.debug("HDHive: ✓ 填写密码")
+                            password_filled = True
+                            break
+                    except Exception:
+                        continue
+                
+                if not password_filled:
+                    logger.error("HDHive: 未找到密码输入框")
+                    context.close()
+                    browser.close()
+                    return None
+                
+                # 提交登录
+                page.wait_for_timeout(500)
+                try:
+                    btn = page.query_selector('button[type="submit"]')
+                    if btn:
+                        btn.click()
+                        logger.debug("HDHive: ✓ 点击登录按钮")
+                    else:
+                        page.keyboard.press("Enter")
+                        logger.debug("HDHive: ✓ 按 Enter 键提交")
+                except Exception:
+                    page.keyboard.press("Enter")
+                
+                # 等待登录完成
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                
+                page.wait_for_timeout(3000)
+                
+                # 检查登录结果
+                current_url = page.url
+                logger.debug(f"HDHive: 登录后 URL: {current_url}")
+                
+                if "/login" in current_url:
+                    logger.warning("HDHive: 登录可能失败，仍在登录页面")
+                
+                # 获取 Cookie
+                cookies = context.cookies()
+                cookie_parts = []
+                for c in cookies:
+                    if c.get("domain", "").endswith("hdhive.com"):
+                        cookie_parts.append(f"{c['name']}={c['value']}")
+                
+                context.close()
+                browser.close()
+                
+                if cookie_parts:
+                    cookie_str = "; ".join(cookie_parts)
+                    logger.info(f"HDHive: 获取 Cookie 成功，长度={len(cookie_str)}")
+                    return cookie_str
+                else:
+                    logger.warning("HDHive: 未获取到有效 Cookie")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"HDHive Playwright 登录失败: {type(e).__name__}: {e}", exc_info=True)
+            return None
