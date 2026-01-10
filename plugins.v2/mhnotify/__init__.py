@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.2"
+    plugin_version = "1.5.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2159,6 +2159,15 @@ class MHNotify(_PluginBase):
             delay_mins = max(1, int(self._assist_initial_delay_seconds / 60))
             if existing_uuid:
                 logger.info(f"mhnotify: 复用现有MH订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
+                # 复用现有订阅时，触发立即执行查询（MH不会自动触发）
+                try:
+                    access_token = self.__mh_login()
+                    if access_token and self.__mh_execute_subscription(access_token, mh_uuid):
+                        logger.info(f"mhnotify: 已触发复用订阅 {mh_uuid} 立即执行查询")
+                    else:
+                        logger.warning(f"mhnotify: 触发复用订阅执行失败")
+                except Exception as e:
+                    logger.warning(f"mhnotify: 触发复用订阅执行异常: {e}")
             else:
                 logger.info(f"mhnotify: 已在MH创建订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
             # 记录待检查项
@@ -2533,6 +2542,30 @@ class MHNotify(_PluginBase):
         except Exception:
             logger.error("mhnotify: 更新MH订阅异常", exc_info=True)
         return {}
+
+    def __mh_execute_subscription(self, access_token: str, uuid: str) -> bool:
+        """触发MH订阅立即执行查询
+        POST /api/v1/subscription/{uuid}/execute
+        """
+        try:
+            url = f"{self._mh_domain}/api/v1/subscription/{uuid}/execute"
+            headers = self.__auth_headers(access_token)
+            headers.update({"Content-Length": "0", "Origin": self._mh_domain})
+            logger.info(f"mhnotify: 触发MH订阅执行 POST {url}")
+            res = RequestUtils(headers=headers, timeout=30).post_res(url)
+            if res is None:
+                logger.error("mhnotify: 触发MH订阅执行未返回响应")
+                return False
+            elif res.status_code != 200:
+                logger.error(f"mhnotify: 触发MH订阅执行失败 status={res.status_code} body={getattr(res, 'text', '')[:200]}")
+                return False
+            else:
+                data = res.json() or {}
+                logger.info(f"mhnotify: 触发MH订阅执行成功：{data.get('message', '')}")
+                return True
+        except Exception:
+            logger.error("mhnotify: 触发MH订阅执行异常", exc_info=True)
+        return False
 
     def __compute_progress(self, sub_rec: Dict[str, Any]) -> Tuple[str, int, int]:
         """返回 (media_type, saved, expected_total)"""
