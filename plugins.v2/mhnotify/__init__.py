@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.1"
+    plugin_version = "1.5.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2077,6 +2077,9 @@ class MHNotify(_PluginBase):
                     exist_set = set(existing_selected or [])
                     if agg_set and agg_set != exist_set:
                         # 需要包含更多季：优先尝试更新订阅季集合；失败则重建
+                        # 更新时保留现有的自定义链接
+                        if existing_custom_links:
+                            create_payload["user_custom_links"] = existing_custom_links
                         logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，季集合不一致，尝试更新为 {sorted(agg_set)}")
                         upd = self.__mh_update_subscription(access_token, existing_uuid, create_payload)
                         if upd:
