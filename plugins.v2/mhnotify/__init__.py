@@ -6,7 +6,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
 from app.core.event import eventmanager, Event
-from app.schemas.types import EventType
+from app.schemas.types import EventType, NotificationType
 from app.utils.http import RequestUtils
 from app.log import logger
 from app.plugins import _PluginBase
@@ -18,11 +18,11 @@ class MHNotify(_PluginBase):
     # 插件名称
     plugin_name = "MediaHelper增强"
     # 插件描述
-    plugin_desc = "监听115生活事件和MP整理/刮削事件后，通知MediaHelper执行strm生成任务；提供mh订阅辅助；支持115云下载（/mhol命令）、阿里云盘分享秒传到115（/mhaly2115命令，需配置阿里云盘refresh_token）、自动删除小文件及移动整理"
+    plugin_desc = "配合MediaHelper使用的一些小功能"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.5"
+    plugin_version = "1.5.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -67,6 +67,7 @@ class MHNotify(_PluginBase):
     _hdhive_refresh_enabled: bool = False
     _hdhive_refresh_cron: str = "0 */6 * * *"
     _hdhive_refresh_once: bool = False
+    _hdhive_max_subscriptions: int = 20
     # MH登录缓存
     _mh_token: Optional[str] = None
     _mh_token_expire_ts: int = 0
@@ -166,6 +167,10 @@ class MHNotify(_PluginBase):
                     logger.info("mhnotify: HDHive资源刷新一次性任务执行完成，已自动复位为关闭")
             except Exception:
                 logger.error("mhnotify: 运行一次HDHive资源刷新失败", exc_info=True)
+            try:
+                self._hdhive_max_subscriptions = int(config.get("hdhive_max_subscriptions", 20) or 20)
+            except Exception:
+                self._hdhive_max_subscriptions = 20
             
             # 清理助手订阅记录（运行一次）
             try:
@@ -650,6 +655,7 @@ class MHNotify(_PluginBase):
             "hdhive_refresh_enabled": False,
             "hdhive_refresh_cron": "0 */6 * * *",
             "hdhive_refresh_once": False,
+            "hdhive_max_subscriptions": 20,
             "p115_life_enabled": False,
             "p115_cookie": "",
             "p115_life_events": [],
@@ -1352,6 +1358,27 @@ class MHNotify(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'hdhive_max_subscriptions',
+                                            'label': '最多订阅条数',
+                                            'type': 'number',
+                                            'placeholder': '默认 20',
+                                            'hint': '仅处理启用且为115的前 N 条订阅'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
                                 'props': {'cols': 12},
                                 'content': [
                                     {
@@ -1835,14 +1862,17 @@ class MHNotify(_PluginBase):
             if not access_token:
                 logger.error("mhnotify: HDHive刷新失败，无法登录MH")
                 if channel:
-                    self.post_message(channel=channel, title="❌ HDHive资源刷新失败", text="登录MediaHelper失败", userid=userid)
+                    self.post_message(channel=channel, title="❌ HDHive资源刷新失败", text="登录MediaHelper失败", userid=userid, mtype=NotificationType.Plugin)
                 return
             lst = self.__mh_list_subscriptions(access_token)
             subs = (lst.get("data") or {}).get("subscriptions") or []
+            subs = [x for x in subs if (x.get("enabled", True) is not False)]
             if not subs:
                 logger.info("mhnotify: MH订阅列表为空，跳过刷新")
                 if channel:
-                    self.post_message(channel=channel, title="ℹ️ HDHive资源刷新", text="MH订阅列表为空", userid=userid)
+                    self.post_message(channel=channel, title="ℹ️ HDHive资源刷新", text="MH订阅列表为空", userid=userid, mtype=NotificationType.Plugin)
+                else:
+                    self.post_message(title="ℹ️ HDHive资源刷新", text="MH订阅列表为空", mtype=NotificationType.Plugin)
                 return
             # 目标筛选
             targets = []
@@ -1857,10 +1887,17 @@ class MHNotify(_PluginBase):
                 if not targets:
                     logger.info(f"mhnotify: 未找到指定订阅: {subscription_name}")
                     if channel:
-                        self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid)
+                        self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid, mtype=NotificationType.Plugin)
+                    else:
+                        self.post_message(title="未找到相应订阅", text=f"名称: {subscription_name}", mtype=NotificationType.Plugin)
                     return
             else:
-                targets = subs
+                targets = [x for x in subs if (x.get("params") or {}).get("cloud_type", "").lower() == "drive115"]
+                try:
+                    if isinstance(self._hdhive_max_subscriptions, int) and self._hdhive_max_subscriptions > 0:
+                        targets = targets[:self._hdhive_max_subscriptions]
+                except Exception:
+                    pass
             updated = 0
             checked = 0
             updated_names: List[str] = []
@@ -1891,8 +1928,17 @@ class MHNotify(_PluginBase):
                     if len(merged) > len(existing_links):
                         uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
                         name = rec.get("name") or rec.get("task", {}).get("name") or (params.get("custom_name") or params.get("title"))
+                        # 提取 custom_name：优先已有，其次从 name 去掉前缀 [订阅]
+                        def _extract_custom_name(n: Optional[str]) -> Optional[str]:
+                            if not n:
+                                return None
+                            return re.sub(r'^\[订阅\]\s*', '', n).strip()
+                        custom_name = params.get("custom_name") or _extract_custom_name(name) or params.get("title")
                         try:
-                            upd = self.__mh_update_subscription(access_token, uuid, {"user_custom_links": merged})
+                            payload = {"user_custom_links": merged}
+                            if custom_name:
+                                payload["custom_name"] = custom_name
+                            upd = self.__mh_update_subscription(access_token, uuid, payload)
                             if upd:
                                 updated += 1
                                 updated_names.append(str(name or uuid))
@@ -1901,6 +1947,16 @@ class MHNotify(_PluginBase):
                                     self.__mh_execute_subscription(access_token, uuid)
                                 except Exception:
                                     logger.warning(f"mhnotify: 触发订阅立即执行失败 uuid={uuid}")
+                                try:
+                                    new_count = len(merged) - len(existing_links)
+                                    if new_count > 0:
+                                        msg_text = f"订阅: {str(name or uuid)}\n新增链接: {new_count}"
+                                        if channel:
+                                            self.post_message(channel=channel, title="HDHive资源更新并已执行", text=msg_text, userid=userid, mtype=NotificationType.Plugin)
+                                        else:
+                                            self.post_message(title="HDHive资源更新并已执行", text=msg_text, mtype=NotificationType.Plugin)
+                                except Exception:
+                                    pass
                         except Exception:
                             logger.warning(f"mhnotify: 更新订阅链接失败 uuid={uuid}", exc_info=True)
                 except Exception:
@@ -1910,19 +1966,26 @@ class MHNotify(_PluginBase):
             if channel:
                 if subscription_name:
                     if updated > 0:
-                        self.post_message(channel=channel, title="✅ HDHive资源刷新完成", text=f"订阅: {subscription_name}\n新增链接: {updated}", userid=userid)
+                        self.post_message(channel=channel, title="✅ HDHive资源刷新完成", text=f"订阅: {subscription_name}\n新增链接: {updated}", userid=userid, mtype=NotificationType.Plugin)
                     else:
-                        self.post_message(channel=channel, title="未找到新的资源链接", text=f"订阅: {subscription_name}", userid=userid)
+                        self.post_message(channel=channel, title="未找到新的资源链接", text=f"订阅: {subscription_name}", userid=userid, mtype=NotificationType.Plugin)
                 else:
                     text = f"检查订阅: {checked}\n有更新: {updated}"
                     if updated_names:
                         text += f"\n更新订阅: {', '.join(updated_names[:10])}" + (" ..." if len(updated_names) > 10 else "")
-                    self.post_message(channel=channel, title="✅ HDHive资源刷新完成", text=text, userid=userid)
+                    self.post_message(channel=channel, title="✅ HDHive资源刷新完成", text=text, userid=userid, mtype=NotificationType.Plugin)
             else:
-                if updated > 0:
-                    logger.info(f"mhnotify: HDHive资源刷新完成，检查 {checked}，更新 {updated}")
+                # 没有指定消息渠道，走插件消息（系统队列+通知模块按开关分发）
+                if subscription_name:
+                    if updated > 0:
+                        self.post_message(title="✅ HDHive资源刷新完成", text=f"订阅: {subscription_name}\n新增链接: {updated}", mtype=NotificationType.Plugin)
+                    else:
+                        self.post_message(title="未找到新的资源链接", text=f"订阅: {subscription_name}", mtype=NotificationType.Plugin)
                 else:
-                    logger.info(f"mhnotify: HDHive资源刷新完成，无更新，检查 {checked}")
+                    text = f"检查订阅: {checked}\n有更新: {updated}"
+                    if updated_names:
+                        text += f"\n更新订阅: {', '.join(updated_names[:10])}" + (" ..." if len(updated_names) > 10 else "")
+                    self.post_message(title="✅ HDHive资源刷新完成", text=text, mtype=NotificationType.Plugin)
         except Exception:
             logger.error("mhnotify: 执行HDHive资源刷新异常", exc_info=True)
 
@@ -1942,7 +2005,8 @@ class MHNotify(_PluginBase):
                 channel=event_data.get("channel"),
                 title="⏳ HDHive资源刷新开始",
                 text=("目标订阅: " + name) if name else "刷新所有115订阅",
-                userid=event_data.get("user")
+                userid=event_data.get("user"),
+                mtype=NotificationType.Plugin
             )
             threading.Thread(
                 target=self._execute_hdhive_refresh,
@@ -2892,12 +2956,16 @@ class MHNotify(_PluginBase):
             url = f"{self._mh_domain}/api/v1/subscription/{uuid}"
             headers = self.__auth_headers(access_token)
             headers.update({"Content-Type": "application/json;charset=UTF-8", "Origin": self._mh_domain})
-            # 组装更新体：尽量复用创建参数作为 params，确保字段完整
-            update_body = {
-                "name": f"[订阅] {payload.get('title')}",
-                "cron": payload.get("cron") or "0 */6 * * *",
+            # 组装更新体：仅更新提供的字段，避免覆盖已有 name/cron
+            update_body: Dict[str, Any] = {
                 "params": payload
             }
+            # 仅当显式传入 name 或 title 时才更新 name
+            if payload.get("name") or payload.get("title"):
+                update_body["name"] = payload.get("name") or f"[订阅] {payload.get('title')}"
+            # 仅当显式传入 cron 时才更新 cron
+            if "cron" in payload:
+                update_body["cron"] = payload.get("cron")
             logger.info(f"mhnotify: 更新MH订阅 PUT {url} seasons={payload.get('selected_seasons')}")
             res = RequestUtils(headers=headers, timeout=30).put_res(url, json=update_body)
             if res is None:
