@@ -23,7 +23,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.8"
+    plugin_version = "1.5.9"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -1909,34 +1909,34 @@ class MHNotify(_PluginBase):
                 return
             # 目标筛选
             targets = []
-        if subscription_name:
-            name_norm = subscription_name.strip().lower()
-            matched = []
-            for rec in subs:
-                params = rec.get("params") or {}
-                rec_name = (rec.get("name") or rec.get("task", {}).get("name") or params.get("custom_name") or params.get("title") or "").strip().lower()
-                if rec_name and (rec_name == name_norm or name_norm in rec_name):
-                    matched.append(rec)
-            if not matched:
-                logger.info(f"mhnotify: 未找到指定订阅: {subscription_name}")
-                if channel:
-                    self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid, mtype=NotificationType.Plugin)
-                else:
-                    self.post_message(title="未找到相应订阅", text=f"名称: {subscription_name}", mtype=NotificationType.Plugin)
-                return
-            targets = [x for x in matched if (x.get("params") or {}).get("cloud_type", "").lower() == "drive115"]
-            if not targets:
-                logger.info(f"mhnotify: 指定订阅非115类型，跳过刷新: {subscription_name}")
-                if channel:
-                    self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid, mtype=NotificationType.Plugin)
-                else:
-                    self.post_message(title="未找到相应订阅", text=f"名称: {subscription_name}", mtype=NotificationType.Plugin)
-                return
-        else:
-            targets = [x for x in subs if (x.get("params") or {}).get("cloud_type", "").lower() == "drive115"]
-            try:
-                if isinstance(self._hdhive_max_subscriptions, int) and self._hdhive_max_subscriptions > 0:
-                    targets = targets[:self._hdhive_max_subscriptions]
+            if subscription_name:
+                name_norm = subscription_name.strip().lower()
+                matched = []
+                for rec in subs:
+                    params = rec.get("params") or {}
+                    rec_name = (rec.get("name") or rec.get("task", {}).get("name") or params.get("custom_name") or params.get("title") or "").strip().lower()
+                    if rec_name and (rec_name == name_norm or name_norm in rec_name):
+                        matched.append(rec)
+                if not matched:
+                    logger.info(f"mhnotify: 未找到指定订阅: {subscription_name}")
+                    if channel:
+                        self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid, mtype=NotificationType.Plugin)
+                    else:
+                        self.post_message(title="未找到相应订阅", text=f"名称: {subscription_name}", mtype=NotificationType.Plugin)
+                    return
+                targets = [x for x in matched if (x.get("params") or {}).get("cloud_type", "").lower() == "drive115"]
+                if not targets:
+                    logger.info(f"mhnotify: 指定订阅非115类型，跳过刷新: {subscription_name}")
+                    if channel:
+                        self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid, mtype=NotificationType.Plugin)
+                    else:
+                        self.post_message(title="未找到相应订阅", text=f"名称: {subscription_name}", mtype=NotificationType.Plugin)
+                    return
+            else:
+                targets = [x for x in subs if (x.get("params") or {}).get("cloud_type", "").lower() == "drive115"]
+                try:
+                    if isinstance(self._hdhive_max_subscriptions, int) and self._hdhive_max_subscriptions > 0:
+                        targets = targets[:self._hdhive_max_subscriptions]
                 except Exception:
                     pass
             updated = 0
