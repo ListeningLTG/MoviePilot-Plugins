@@ -23,7 +23,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.9.2"
+    plugin_version = "1.5.9.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -5386,45 +5386,49 @@ class MHNotify(_PluginBase):
         download_url = f"{base_url}/{ext_filename}"
         
         logger.info(f"mhnotify: 本地未找到 hdhive 扩展模块，尝试下载: {download_url}")
-        
-        try:
-            proxy = getattr(settings, "PROXY", None)
-            if proxy:
-                if isinstance(proxy, dict):
-                    proxy_handler = urllib.request.ProxyHandler(proxy)
+        # 额外增加5次重试（共最多6次尝试）
+        max_attempts = 6
+        for attempt in range(1, max_attempts + 1):
+            try:
+                proxy = getattr(settings, "PROXY", None)
+                if proxy:
+                    if isinstance(proxy, dict):
+                        proxy_handler = urllib.request.ProxyHandler(proxy)
+                    else:
+                        proxy_handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+                    opener = urllib.request.build_opener(proxy_handler)
+                    logger.debug(f"mhnotify: 下载 hdhive 使用代理: {proxy}（第 {attempt}/{max_attempts} 次）")
+                    response = opener.open(download_url, timeout=120)
                 else:
-                    proxy_handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-                opener = urllib.request.build_opener(proxy_handler)
-                logger.debug(f"mhnotify: 下载 hdhive 使用代理: {proxy}")
-                response = opener.open(download_url, timeout=120)
-            else:
-                response = urllib.request.urlopen(download_url, timeout=120)
-            
-            with response:
-                content = response.read()
-            
-            with open(target_path, "wb") as f:
-                f.write(content)
-            
-            # 非 Windows 平台设置可执行权限
-            if system != "windows":
-                os.chmod(target_path, 0o755)
-            
-            logger.info(f"mhnotify: ✓ hdhive 扩展模块下载成功: {target_path}")
-            return True
-            
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                logger.warning(f"mhnotify: ⚠️ hdhive 扩展模块暂不支持当前平台 ({system}/{machine})，将使用 HTTP API 模式")
-            else:
-                logger.error(f"mhnotify: 下载 hdhive 扩展模块失败 (HTTP {e.code}): {e}")
-            return False
-        except urllib.error.URLError as e:
-            logger.error(f"mhnotify: 下载 hdhive 扩展模块失败（网络错误）: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"mhnotify: 下载 hdhive 扩展模块失败: {e}")
-            return False
+                    logger.debug(f"mhnotify: 直接下载 hdhive（第 {attempt}/{max_attempts} 次）")
+                    response = urllib.request.urlopen(download_url, timeout=120)
+                
+                with response:
+                    content = response.read()
+                
+                with open(target_path, "wb") as f:
+                    f.write(content)
+                
+                # 非 Windows 平台设置可执行权限
+                if system != "windows":
+                    os.chmod(target_path, 0o755)
+                
+                logger.info(f"mhnotify: ✓ hdhive 扩展模块下载成功: {target_path}")
+                return True
+            except urllib.error.HTTPError as e:
+                # 404 表示资源不存在/不支持平台，不必重试
+                if e.code == 404:
+                    logger.warning(f"mhnotify: ⚠️ hdhive 扩展模块暂不支持当前平台 ({system}/{machine})，将使用 HTTP API 模式")
+                    return False
+                logger.error(f"mhnotify: 下载 hdhive 扩展模块失败 (HTTP {e.code})，第 {attempt}/{max_attempts} 次: {e}")
+            except urllib.error.URLError as e:
+                logger.error(f"mhnotify: 下载 hdhive 扩展模块失败（网络错误），第 {attempt}/{max_attempts} 次: {e}")
+            except Exception as e:
+                logger.error(f"mhnotify: 下载 hdhive 扩展模块失败（未知错误），第 {attempt}/{max_attempts} 次: {e}")
+            # 若未到最后一次，做短暂等待后重试
+            if attempt < max_attempts:
+                time.sleep(2)
+        return False
     
     def __load_hdhive_module(self) -> Optional[Any]:
         """
@@ -5432,38 +5436,27 @@ class MHNotify(_PluginBase):
         
         :return: hdhive 模块对象，失败返回 None
         """
-        if self._hdhive_module_checked:
-            return self._hdhive_module
-        
-        self._hdhive_module_checked = True
-        
-        # 尝试下载模块
-        if not self.__download_hdhive_module():
-            return None
-        
-        # 动态加载模块
+        # 每次运行都先检测模块文件是否存在；缺失则尝试下载（带重试）
         import sys
         import importlib.util
         from pathlib import Path
-        
         plugin_dir = Path(__file__).parent
         lib_dir = plugin_dir / "lib"
-        
         ext_filename = self.__get_hdhive_extension_filename()
         if not ext_filename:
             return None
-        
         module_path = lib_dir / ext_filename
         if not module_path.exists():
-            return None
-        
+            if not self.__download_hdhive_module():
+                return None
+        # 若已加载过且仍然可用，直接复用
+        if self._hdhive_module is not None:
+            return self._hdhive_module
+        # 动态加载模块
         try:
-            # 将 lib 目录添加到 sys.path
             lib_dir_str = str(lib_dir)
             if lib_dir_str not in sys.path:
                 sys.path.insert(0, lib_dir_str)
-            
-            # 加载模块
             spec = importlib.util.spec_from_file_location("hdhive", str(module_path))
             if spec and spec.loader:
                 module = importlib.util.module_from_spec(spec)
@@ -5472,9 +5465,8 @@ class MHNotify(_PluginBase):
                 self._hdhive_module = module
                 logger.info(f"mhnotify: ✓ hdhive 模块加载成功")
                 return module
-            else:
-                logger.error("mhnotify: 无法创建 hdhive 模块 spec")
-                return None
+            logger.error("mhnotify: 无法创建 hdhive 模块 spec")
+            return None
         except Exception as e:
             logger.error(f"mhnotify: 加载 hdhive 模块失败: {type(e).__name__}: {e}")
             return None
