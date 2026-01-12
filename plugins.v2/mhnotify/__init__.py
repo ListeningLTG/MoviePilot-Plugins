@@ -1,5 +1,6 @@
 import time
 import re
+from urllib.parse import quote
 
 from typing import List, Tuple, Dict, Any, Optional, Union
 from apscheduler.triggers.cron import CronTrigger
@@ -22,7 +23,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.6"
+    plugin_version = "1.5.7"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -1887,7 +1888,16 @@ class MHNotify(_PluginBase):
                 if channel:
                     self.post_message(channel=channel, title="❌ HDHive资源刷新失败", text="登录MediaHelper失败", userid=userid, mtype=NotificationType.Plugin)
                 return
-            lst = self.__mh_list_subscriptions(access_token)
+            if subscription_name:
+                try:
+                    page_n = int(self._hdhive_max_subscriptions or 20)
+                    if page_n <= 0:
+                        page_n = 20
+                except Exception:
+                    page_n = 20
+                lst = self.__mh_list_subscriptions(access_token, status="active", search=subscription_name, page_size=page_n)
+            else:
+                lst = self.__mh_list_subscriptions(access_token, status="active", page_size=2000)
             subs = (lst.get("data") or {}).get("subscriptions") or []
             subs = [x for x in subs if (x.get("enabled", True) is not False)]
             if not subs:
@@ -1899,26 +1909,34 @@ class MHNotify(_PluginBase):
                 return
             # 目标筛选
             targets = []
-            if subscription_name:
-                name_norm = subscription_name.strip().lower()
-                for rec in subs:
-                    # 兼容不同字段
-                    params = rec.get("params") or {}
-                    rec_name = (rec.get("name") or rec.get("task", {}).get("name") or params.get("custom_name") or params.get("title") or "").strip().lower()
-                    if rec_name and (rec_name == name_norm or name_norm in rec_name):
-                        targets.append(rec)
-                if not targets:
-                    logger.info(f"mhnotify: 未找到指定订阅: {subscription_name}")
-                    if channel:
-                        self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid, mtype=NotificationType.Plugin)
-                    else:
-                        self.post_message(title="未找到相应订阅", text=f"名称: {subscription_name}", mtype=NotificationType.Plugin)
-                    return
-            else:
-                targets = [x for x in subs if (x.get("params") or {}).get("cloud_type", "").lower() == "drive115"]
-                try:
-                    if isinstance(self._hdhive_max_subscriptions, int) and self._hdhive_max_subscriptions > 0:
-                        targets = targets[:self._hdhive_max_subscriptions]
+        if subscription_name:
+            name_norm = subscription_name.strip().lower()
+            matched = []
+            for rec in subs:
+                params = rec.get("params") or {}
+                rec_name = (rec.get("name") or rec.get("task", {}).get("name") or params.get("custom_name") or params.get("title") or "").strip().lower()
+                if rec_name and (rec_name == name_norm or name_norm in rec_name):
+                    matched.append(rec)
+            if not matched:
+                logger.info(f"mhnotify: 未找到指定订阅: {subscription_name}")
+                if channel:
+                    self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid, mtype=NotificationType.Plugin)
+                else:
+                    self.post_message(title="未找到相应订阅", text=f"名称: {subscription_name}", mtype=NotificationType.Plugin)
+                return
+            targets = [x for x in matched if (x.get("params") or {}).get("cloud_type", "").lower() == "drive115"]
+            if not targets:
+                logger.info(f"mhnotify: 指定订阅非115类型，跳过刷新: {subscription_name}")
+                if channel:
+                    self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid, mtype=NotificationType.Plugin)
+                else:
+                    self.post_message(title="未找到相应订阅", text=f"名称: {subscription_name}", mtype=NotificationType.Plugin)
+                return
+        else:
+            targets = [x for x in subs if (x.get("params") or {}).get("cloud_type", "").lower() == "drive115"]
+            try:
+                if isinstance(self._hdhive_max_subscriptions, int) and self._hdhive_max_subscriptions > 0:
+                    targets = targets[:self._hdhive_max_subscriptions]
                 except Exception:
                     pass
             updated = 0
@@ -2934,9 +2952,16 @@ class MHNotify(_PluginBase):
             pass
         return {}
 
-    def __mh_list_subscriptions(self, access_token: str) -> Dict[str, Any]:
+    def __mh_list_subscriptions(self, access_token: str, status: Optional[str] = None, search: Optional[str] = None, page_size: int = 2000) -> Dict[str, Any]:
         try:
-            url = f"{self._mh_domain}/api/v1/subscription/list?page=1&page_size=2000"
+            url = f"{self._mh_domain}/api/v1/subscription/list?page=1&page_size={page_size}"
+            if status:
+                url += f"&status={status}"
+            if search:
+                try:
+                    url += f"&search={quote(search)}"
+                except Exception:
+                    url += f"&search={search}"
             logger.info(f"mhnotify: 查询MH订阅列表 GET {url}")
             res = RequestUtils(headers=self.__auth_headers(access_token)).get_res(url)
             if res is None:

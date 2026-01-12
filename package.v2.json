@@ -3,11 +3,12 @@
     "name": "MediaHelper增强",
     "description": "配合MediaHelper使用的一些小功能",
     "labels": "开发",
-    "version": "1.5.6",
+    "version": "1.5.7",
     "icon": "mh.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "1.5.7": "优化刷新查询逻辑",
       "v1.5.6": "修复",
       "v1.5.5": "测试HDHive资源刷新功能",
       "v1.5.4": "阿里云盘秒传到115功能，使用/mhaly2115命令",
