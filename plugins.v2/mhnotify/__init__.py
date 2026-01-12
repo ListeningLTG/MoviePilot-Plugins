@@ -23,7 +23,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.9.3"
+    plugin_version = "1.5.9.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -1576,8 +1576,34 @@ class MHNotify(_PluginBase):
                                             'type': 'info',
                                             'variant': 'tonal',
                                             'density': 'comfortable',
-                                            'title': '支持的远程命令',
-                                            'text': '/mhol — 添加115云下载任务；传入磁力链接，保存到配置的云下载路径。\n/mhaly2115 — 阿里云盘分享秒传到115；需已配置阿里云盘Refresh Token。\n/mhrefresh [订阅名称] — HDHive资源刷新；不带参数刷新所有启用的115订阅（受“最多订阅条数”限制）。'
+                                            'title': '支持的远程命令'
+                                        }
+                                    },
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'density': 'comfortable',
+                                            'text': '/mhol — 添加115云下载任务；传入磁力链接，保存到配置的云下载路径。支持多个链接，用英文逗号、空格或换行分隔。'
+                                        }
+                                    },
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'density': 'comfortable',
+                                            'text': '/mhaly2115 — 阿里云盘分享秒传到115；需已配置阿里云盘Refresh Token。'
+                                        }
+                                    },
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'density': 'comfortable',
+                                            'text': '/mhrefresh [订阅1,订阅2,...] — HDHive资源刷新；支持多个订阅名称用英文逗号分隔。不带参数时刷新前N个启用的115订阅（N为“最多订阅条数”）。'
                                         }
                                     }
                                 ]
@@ -1901,11 +1927,18 @@ class MHNotify(_PluginBase):
             subs = (lst.get("data") or {}).get("subscriptions") or []
             subs = [x for x in subs if (x.get("enabled", True) is not False)]
             if not subs:
-                logger.info("mhnotify: MH订阅列表为空，跳过刷新")
-                if channel:
-                    self.post_message(channel=channel, title="ℹ️ HDHive资源刷新", text="MH订阅列表为空", userid=userid, mtype=NotificationType.Plugin)
+                if subscription_name:
+                    logger.info(f"mhnotify: 未找到指定订阅: {subscription_name}")
+                    if channel:
+                        self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid, mtype=NotificationType.Plugin)
+                    else:
+                        self.post_message(title="未找到相应订阅", text=f"名称: {subscription_name}", mtype=NotificationType.Plugin)
                 else:
-                    self.post_message(title="ℹ️ HDHive资源刷新", text="MH订阅列表为空", mtype=NotificationType.Plugin)
+                    logger.info("mhnotify: MH订阅列表为空，跳过刷新")
+                    if channel:
+                        self.post_message(channel=channel, title="ℹ️ HDHive资源刷新", text="MH订阅列表为空", userid=userid, mtype=NotificationType.Plugin)
+                    else:
+                        self.post_message(title="ℹ️ HDHive资源刷新", text="MH订阅列表为空", mtype=NotificationType.Plugin)
                 return
             # 目标筛选
             targets = []
@@ -2038,25 +2071,51 @@ class MHNotify(_PluginBase):
         event_data = event.event_data
         if not event_data or event_data.get("action") != "mh_hdhive_refresh":
             return
-        name = (event_data.get("arg_str") or "").strip()
+        arg_raw = (event_data.get("arg_str") or "").strip()
+        names = [x.strip() for x in arg_raw.split(",") if x.strip()] if arg_raw else []
         # 异步执行，避免阻塞消息通道
         try:
             import threading
+            limit_val = 0
+            try:
+                limit_val = int(self._hdhive_max_subscriptions or 0)
+            except Exception:
+                limit_val = 0
+            if names:
+                start_text = "刷新指定订阅: " + ", ".join(names)
+            else:
+                start_text = f"刷新前{limit_val}个115订阅" if limit_val > 0 else "刷新所有115订阅"
             self.post_message(
                 channel=event_data.get("channel"),
                 title="⏳ HDHive资源刷新开始",
-                text=("目标订阅: " + name) if name else "刷新所有115订阅",
+                text=start_text,
                 userid=event_data.get("user"),
                 mtype=NotificationType.Plugin
             )
-            threading.Thread(
-                target=self._execute_hdhive_refresh,
-                kwargs={"subscription_name": (name or None), "channel": event_data.get("channel"), "userid": event_data.get("user")},
-                daemon=True
-            ).start()
+            if names:
+                threading.Thread(
+                    target=self._execute_hdhive_refresh_multi,
+                    kwargs={"names": names, "channel": event_data.get("channel"), "userid": event_data.get("user")},
+                    daemon=True
+                ).start()
+            else:
+                threading.Thread(
+                    target=self._execute_hdhive_refresh,
+                    kwargs={"subscription_name": None, "channel": event_data.get("channel"), "userid": event_data.get("user")},
+                    daemon=True
+                ).start()
         except Exception:
             logger.warning("mhnotify: 启动HDHive资源刷新后台线程失败，改为同步执行")
-            self._execute_hdhive_refresh(subscription_name=(name or None), channel=event_data.get("channel"), userid=event_data.get("user"))
+            if names:
+                self._execute_hdhive_refresh_multi(names=names, channel=event_data.get("channel"), userid=event_data.get("user"))
+            else:
+                self._execute_hdhive_refresh(subscription_name=None, channel=event_data.get("channel"), userid=event_data.get("user"))
+    def _execute_hdhive_refresh_multi(self, names: List[str], channel: Optional[str] = None, userid: Optional[Union[str, int]] = None):
+        try:
+            for nm in names:
+                self._execute_hdhive_refresh(subscription_name=nm, channel=channel, userid=userid)
+        except Exception:
+            logger.error("mhnotify: 执行多订阅HDHive资源刷新异常", exc_info=True)
     def __watch_115_life(self):
         """监听 115 生活事件，满足筛选时触发待通知计数"""
         try:
