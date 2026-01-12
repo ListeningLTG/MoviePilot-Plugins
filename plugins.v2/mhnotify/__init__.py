@@ -1559,6 +1559,29 @@ class MHNotify(_PluginBase):
                                 ]
                             }
                         ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'density': 'comfortable',
+                                            'title': '支持的远程命令',
+                                            'text': '/mhol — 添加115云下载任务；传入磁力链接，保存到配置的云下载路径。\n/mhaly2115 — 阿里云盘分享秒传到115；需已配置阿里云盘Refresh Token。\n/mhrefresh [订阅名称] — HDHive资源刷新；不带参数刷新所有启用的115订阅（受“最多订阅条数”限制）。'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
                     }
                 ]
             }
