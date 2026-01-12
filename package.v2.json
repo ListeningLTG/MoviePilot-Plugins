@@ -3,11 +3,12 @@
     "name": "MediaHelper增强",
     "description": "监听115生活事件和MP整理/刮削事件后，通知MediaHelper执行strm生成任务；提供mh订阅辅助；支持115云下载（/mhol命令）、阿里云盘分享秒传到115（/mhaly2115命令。",
     "labels": "开发",
-    "version": "1.5.4",
+    "version": "1.5.5",
     "icon": "mh.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.5.5": "测试HDHive资源刷新功能",
       "v1.5.4": "阿里云盘秒传到115功能，使用/mhaly2115命令",
       "v1.5.3": "修复多季订阅，没有触发订阅查询的问题",
       "v1.5.2": "修复多季订阅，自定义分享链接被清空的问题",

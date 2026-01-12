@@ -1,7 +1,7 @@
 import time
 import re
 
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, Union
 from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
@@ -22,7 +22,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.4"
+    plugin_version = "1.5.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -63,6 +63,10 @@ class MHNotify(_PluginBase):
     _hdhive_cookie: str = ""
     _hdhive_auto_refresh: bool = False
     _hdhive_refresh_before: int = 3600
+    # HDHive 定时资源刷新
+    _hdhive_refresh_enabled: bool = False
+    _hdhive_refresh_cron: str = "0 */6 * * *"
+    _hdhive_refresh_once: bool = False
     # MH登录缓存
     _mh_token: Optional[str] = None
     _mh_token_expire_ts: int = 0
@@ -140,7 +144,29 @@ class MHNotify(_PluginBase):
                 self._hdhive_refresh_before = int(config.get("hdhive_refresh_before", 3600) or 3600)
             except Exception:
                 self._hdhive_refresh_before = 3600
-
+            # HDHive 资源刷新配置
+            self._hdhive_refresh_enabled = bool(config.get("hdhive_refresh_enabled", False))
+            self._hdhive_refresh_cron = (config.get("hdhive_refresh_cron") or "0 */6 * * *").strip() or "0 */6 * * *"
+            # 运行一次（保存后立即触发一次刷新并复位）
+            try:
+                if bool(config.get("hdhive_refresh_once", False)):
+                    logger.info("mhnotify: 检测到运行一次HDHive资源刷新开关，开始执行...")
+                    try:
+                        # 在后台线程中执行，避免阻塞保存流程
+                        import threading
+                        threading.Thread(target=self._execute_hdhive_refresh, kwargs={"subscription_name": None}, daemon=True).start()
+                        logger.info("mhnotify: HDHive资源刷新已在后台启动")
+                    except Exception:
+                        # 回退为同步执行
+                        logger.warning("mhnotify: 启动后台刷新失败，改为同步执行")
+                        self._execute_hdhive_refresh(subscription_name=None)
+                    # 复位为关闭，并更新配置
+                    config["hdhive_refresh_once"] = False
+                    self.update_config(config)
+                    logger.info("mhnotify: HDHive资源刷新一次性任务执行完成，已自动复位为关闭")
+            except Exception:
+                logger.error("mhnotify: 运行一次HDHive资源刷新失败", exc_info=True)
+            
             # 清理助手订阅记录（运行一次）
             try:
                 if bool(config.get("clear_once", False)):
@@ -333,6 +359,24 @@ class MHNotify(_PluginBase):
                     "func": self.__watch_115_life,
                     "kwargs": {}
                 })
+        # HDHive 定时资源刷新
+        if self._hdhive_refresh_enabled:
+            try:
+                services.append({
+                    "id": "HDHiveRefresh",
+                    "name": "HDHive资源定时刷新",
+                    "trigger": CronTrigger.from_crontab(self._hdhive_refresh_cron),
+                    "func": self.hdhive_refresh_job,
+                    "kwargs": {}
+                })
+            except Exception:
+                services.append({
+                    "id": "HDHiveRefresh",
+                    "name": "HDHive资源定时刷新",
+                    "trigger": CronTrigger.from_crontab("0 */6 * * *"),
+                    "func": self.hdhive_refresh_job,
+                    "kwargs": {}
+                })
         return services
 
     @staticmethod
@@ -355,6 +399,15 @@ class MHNotify(_PluginBase):
                 "category": "下载",
                 "data": {
                     "action": "mh_ali_to_115"
+                }
+            },
+            {
+                "cmd": "/mhrefresh",
+                "event": EventType.PluginAction,
+                "desc": "HDHive资源刷新（可指定订阅名称）",
+                "category": "下载",
+                "data": {
+                    "action": "mh_hdhive_refresh"
                 }
             }
         ]
@@ -594,6 +647,9 @@ class MHNotify(_PluginBase):
             "hdhive_cookie": "",
             "hdhive_auto_refresh": False,
             "hdhive_refresh_before": 3600,
+            "hdhive_refresh_enabled": False,
+            "hdhive_refresh_cron": "0 */6 * * *",
+            "hdhive_refresh_once": False,
             "p115_life_enabled": False,
             "p115_cookie": "",
             "p115_life_events": [],
@@ -1262,6 +1318,59 @@ class MHNotify(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
+                                'props': {'cols': 12, 'md': 3},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'hdhive_refresh_enabled',
+                                            'label': '启用HDHive资源定时刷新',
+                                            'hint': '开启后按Cron周期刷新MH订阅的自定义链接'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 9},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'hdhive_refresh_cron',
+                                            'label': '刷新计划 Cron',
+                                            'placeholder': '例如：0 */6 * * *（每6小时）',
+                                            'hint': '使用标准Crontab表达式'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'hdhive_refresh_once',
+                                            'label': '运行一次HDHive资源刷新（保存后立即执行）',
+                                            'hint': '开启后保存将立即执行一次刷新任务，执行后自动复位为关闭'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
                                 'props': {
                                     'cols': 12
                                 },
@@ -1705,6 +1814,144 @@ class MHNotify(_PluginBase):
         """
         pass
 
+    def hdhive_refresh_job(self):
+        """定时任务入口：HDHive资源刷新"""
+        try:
+            logger.info("mhnotify: 定时HDHive资源刷新触发")
+            self._execute_hdhive_refresh(subscription_name=None)
+        except Exception:
+            logger.error("mhnotify: 定时HDHive资源刷新异常", exc_info=True)
+
+    def _execute_hdhive_refresh(self, subscription_name: Optional[str] = None, channel: Optional[str] = None, userid: Optional[Union[str, int]] = None):
+        """
+        执行HDHive资源刷新：
+        - 读取MH订阅列表
+        - 仅处理 cloud_type=drive115 的订阅
+        - 查询HDHive免费115链接，和 user_custom_links 比较并追加新增
+        - 更新订阅并触发立即执行查询
+        """
+        try:
+            access_token = self.__mh_login()
+            if not access_token:
+                logger.error("mhnotify: HDHive刷新失败，无法登录MH")
+                if channel:
+                    self.post_message(channel=channel, title="❌ HDHive资源刷新失败", text="登录MediaHelper失败", userid=userid)
+                return
+            lst = self.__mh_list_subscriptions(access_token)
+            subs = (lst.get("data") or {}).get("subscriptions") or []
+            if not subs:
+                logger.info("mhnotify: MH订阅列表为空，跳过刷新")
+                if channel:
+                    self.post_message(channel=channel, title="ℹ️ HDHive资源刷新", text="MH订阅列表为空", userid=userid)
+                return
+            # 目标筛选
+            targets = []
+            if subscription_name:
+                name_norm = subscription_name.strip().lower()
+                for rec in subs:
+                    # 兼容不同字段
+                    params = rec.get("params") or {}
+                    rec_name = (rec.get("name") or rec.get("task", {}).get("name") or params.get("custom_name") or params.get("title") or "").strip().lower()
+                    if rec_name and (rec_name == name_norm or name_norm in rec_name):
+                        targets.append(rec)
+                if not targets:
+                    logger.info(f"mhnotify: 未找到指定订阅: {subscription_name}")
+                    if channel:
+                        self.post_message(channel=channel, title="未找到相应订阅", text=f"名称: {subscription_name}", userid=userid)
+                    return
+            else:
+                targets = subs
+            updated = 0
+            checked = 0
+            updated_names: List[str] = []
+            for rec in targets:
+                try:
+                    params = rec.get("params") or {}
+                    cloud_type = (params.get("cloud_type") or "").lower()
+                    if cloud_type != "drive115":
+                        continue
+                    tmdb_id = params.get("tmdb_id")
+                    media_type = (params.get("media_type") or "movie").lower()
+                    existing_links: List[str] = params.get("user_custom_links") or []
+                    links = self.__fetch_hdhive_links(tmdb_id=tmdb_id, media_type=media_type)
+                    checked += 1
+                    if not links:
+                        continue
+                    # 去重合并
+                    def extract_key(link: str) -> str:
+                        key = link.replace("https://", "").replace("http://", "").rstrip("& ").lower()
+                        return key
+                    keys = set(extract_key(l) for l in existing_links)
+                    merged = list(existing_links)
+                    for l in links:
+                        k = extract_key(l)
+                        if k not in keys:
+                            merged.append(l)
+                            keys.add(k)
+                    if len(merged) > len(existing_links):
+                        uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
+                        name = rec.get("name") or rec.get("task", {}).get("name") or (params.get("custom_name") or params.get("title"))
+                        try:
+                            upd = self.__mh_update_subscription(access_token, uuid, {"user_custom_links": merged})
+                            if upd:
+                                updated += 1
+                                updated_names.append(str(name or uuid))
+                                # 触发立即执行
+                                try:
+                                    self.__mh_execute_subscription(access_token, uuid)
+                                except Exception:
+                                    logger.warning(f"mhnotify: 触发订阅立即执行失败 uuid={uuid}")
+                        except Exception:
+                            logger.warning(f"mhnotify: 更新订阅链接失败 uuid={uuid}", exc_info=True)
+                except Exception:
+                    logger.debug("mhnotify: 刷新单条订阅异常", exc_info=True)
+                    continue
+            # 通知
+            if channel:
+                if subscription_name:
+                    if updated > 0:
+                        self.post_message(channel=channel, title="✅ HDHive资源刷新完成", text=f"订阅: {subscription_name}\n新增链接: {updated}", userid=userid)
+                    else:
+                        self.post_message(channel=channel, title="未找到新的资源链接", text=f"订阅: {subscription_name}", userid=userid)
+                else:
+                    text = f"检查订阅: {checked}\n有更新: {updated}"
+                    if updated_names:
+                        text += f"\n更新订阅: {', '.join(updated_names[:10])}" + (" ..." if len(updated_names) > 10 else "")
+                    self.post_message(channel=channel, title="✅ HDHive资源刷新完成", text=text, userid=userid)
+            else:
+                if updated > 0:
+                    logger.info(f"mhnotify: HDHive资源刷新完成，检查 {checked}，更新 {updated}")
+                else:
+                    logger.info(f"mhnotify: HDHive资源刷新完成，无更新，检查 {checked}")
+        except Exception:
+            logger.error("mhnotify: 执行HDHive资源刷新异常", exc_info=True)
+
+    @eventmanager.register(EventType.PluginAction)
+    def handle_hdhive_refresh(self, event: Event):
+        """远程命令触发：HDHive资源刷新（可指定订阅名称）"""
+        if not event:
+            return
+        event_data = event.event_data
+        if not event_data or event_data.get("action") != "mh_hdhive_refresh":
+            return
+        name = (event_data.get("arg_str") or "").strip()
+        # 异步执行，避免阻塞消息通道
+        try:
+            import threading
+            self.post_message(
+                channel=event_data.get("channel"),
+                title="⏳ HDHive资源刷新开始",
+                text=("目标订阅: " + name) if name else "刷新所有115订阅",
+                userid=event_data.get("user")
+            )
+            threading.Thread(
+                target=self._execute_hdhive_refresh,
+                kwargs={"subscription_name": (name or None), "channel": event_data.get("channel"), "userid": event_data.get("user")},
+                daemon=True
+            ).start()
+        except Exception:
+            logger.warning("mhnotify: 启动HDHive资源刷新后台线程失败，改为同步执行")
+            self._execute_hdhive_refresh(subscription_name=(name or None), channel=event_data.get("channel"), userid=event_data.get("user"))
     def __watch_115_life(self):
         """监听 115 生活事件，满足筛选时触发待通知计数"""
         try:
