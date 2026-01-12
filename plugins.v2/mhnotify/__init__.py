@@ -23,7 +23,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.9.4"
+    plugin_version = "1.5.9.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2503,7 +2503,8 @@ class MHNotify(_PluginBase):
                 mid = (event_data.get("mediainfo") or {}).get("tmdb_id") or (event_data.get("mediainfo") or {}).get("tmdbid")
                 mtitle = (event_data.get("mediainfo") or {}).get("title") or (event_data.get("mediainfo") or {}).get("name")
                 mseason = (event_data.get("mediainfo") or {}).get("season")
-                logger.info(f"mhnotify: SubscribeAdded 事件: sub_id={event_data.get('subscribe_id')} tmdb_id={mid} title={mtitle} event.season={mseason}")
+                mdouban = (event_data.get("mediainfo") or {}).get("douban_id") or (event_data.get("mediainfo") or {}).get("doubanid")
+                logger.info(f"mhnotify: SubscribeAdded 事件: sub_id={event_data.get('subscribe_id')} tmdb_id={mid} douban_id={mdouban} title={mtitle} event.season={mseason}")
             except Exception:
                 pass
             sub_id = event_data.get("subscribe_id")
@@ -2593,6 +2594,8 @@ class MHNotify(_PluginBase):
                 subs = (lst.get("data") or {}).get("subscriptions") or []
                 for rec in subs:
                     params = rec.get("params") or {}
+                    if (params.get("cloud_type") or "").strip().lower() != "drive115":
+                        continue
                     if params.get("tmdb_id") == create_payload.get("tmdb_id") and (params.get("media_type") or '').lower() == (create_payload.get("media_type") or '').lower():
                         existing_uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
                         try:
@@ -2622,8 +2625,11 @@ class MHNotify(_PluginBase):
                             self.__mh_delete_subscription(access_token, existing_uuid)
                             existing_uuid = None
                     else:
-                        # 完全一致：直接复用
-                        logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，季集合一致，复用该订阅")
+                        # 完全一致：直接复用（按媒体类型输出提示）
+                        if is_tv:
+                            logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，季集合一致，复用该订阅")
+                        else:
+                            logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，电影信息一致，复用该订阅")
             except Exception:
                 logger.warning("mhnotify: 检查现有MH订阅失败", exc_info=True)
             # HDHive 查询自定义链接
@@ -2708,7 +2714,8 @@ class MHNotify(_PluginBase):
             pending[str(sub_id)] = {
                 "mh_uuid": mh_uuid,
                 "created_at": int(time.time()),
-                "type": (create_payload.get("media_type") or mediainfo_dict.get("type") or "movie")
+                "type": (create_payload.get("media_type") or mediainfo_dict.get("type") or "movie"),
+                "douban_id": (mediainfo_dict.get("douban_id") or mediainfo_dict.get("doubanid") or getattr(subscribe, 'doubanid', None))
             }
             self.save_data(self._ASSIST_PENDING_KEY, pending)
         except Exception as e:

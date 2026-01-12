@@ -3,11 +3,12 @@
     "name": "MediaHelper增强",
     "description": "配合MediaHelper使用的一些小功能",
     "labels": "开发",
-    "version": "1.5.9.4",
+    "version": "1.5.9.5",
     "icon": "mh.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.5.9.5": "优化新增订阅的处理逻辑",
       "v1.5.9.4": "mhrefresh命令支持多个订阅名称",
       "v1.5.9.3": "添加重试下载模块",
       "v1.5.9.2": "还原测试2",
