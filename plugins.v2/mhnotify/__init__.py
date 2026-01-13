@@ -23,7 +23,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.0"
+    plugin_version = "1.6.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2865,6 +2865,7 @@ class MHNotify(_PluginBase):
             data = (defaults or {}).get("data") or {}
             quality_pref = data.get("quality_preference") or "auto"
             target_dir = data.get("target_directory") or "/影视"
+            logger.info(f"m1hnotify: 目标目录: {target_dir}")
             cron = data.get("cron") or "0 */6 * * *"
             cloud_type = data.get("cloud_type") or "drive115"
             account_identifier = data.get("account_identifier") or ""
@@ -3221,39 +3222,42 @@ class MHNotify(_PluginBase):
                 "identity": "23734adac0301bccdcb107c4aa21f96c"
             }
             logger.info(f"111mhnotify: 获取BTL视频详情 GET {base} id={douban_id} app_id={params['app_id']} identity={params['identity'][:8]}***")
-            import requests
-            resp = requests.get(base, params=params, headers={
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "zh_CN",
-                "Content-Type": "application/json;charset=UTF-8",
-                "Referer": "https://web5.mukaku.com/search",
-                "User-Agent": "Mozilla/5.0"
-            }, timeout=20)
-            try:
-                text = resp.text or ""
-                logger.info(f"mhnotify: BTL详情响应 status={resp.status_code} len={len(text)}")
-                logger.info(f"mhnotify: BTL详情响应内容: {text[:1000]}")
-            except Exception:
-                pass
-            if resp.status_code != 200:
-                logger.info(f"mhnotify: BTL详情请求失败 status={resp.status_code}")
-                return []
-            data = resp.json() or {}
-            if not isinstance(data, dict) or str(data.get("code")) != "200":
-                logger.info(f"mhnotify: BTL详情返回错误 code={data.get('code')} message={data.get('message')}")
-                return []
-            # 优先使用 all_seeds 作为资源数组
+            import requests, time
             seeds = []
-            if isinstance(data, dict):
-                core = data.get("data") if isinstance(data.get("data"), dict) else {}
-                if core and "all_seeds" in core and isinstance(core["all_seeds"], list):
-                    seeds = core["all_seeds"]
-                    logger.info(f"mhnotify: BTL详情使用 all_seeds 资源条数={len(seeds)}")
-                else:
-                    # 兼容其它字段：resources/list
-                    seeds = (core.get("resources") or core.get("list") or
-                             data.get("resources") or data.get("list") or [])
-                    logger.info(f"mhnotify: BTL详情使用兼容资源字段，条数={len(seeds) if isinstance(seeds, list) else 0}")
+            for i in range(3):
+                try:
+                    resp = requests.get(base, params=params, headers={
+                        "Accept": "application/json, text/plain, */*",
+                        "Accept-Language": "zh_CN",
+                        "Content-Type": "application/json;charset=UTF-8",
+                        "Referer": "https://web5.mukaku.com/search",
+                        "User-Agent": "Mozilla/5.0"
+                    }, timeout=20)
+                    try:
+                        text = resp.text or ""
+                        logger.info(f"mhnotify: BTL详情响应 status={resp.status_code} len={len(text)}")
+                        logger.info(f"mhnotify: BTL详情响应内容: {text[:1000]}")
+                    except Exception:
+                        pass
+                    if resp.status_code != 200:
+                        time.sleep(1 + i)
+                        continue
+                    data = resp.json() or {}
+                    if not isinstance(data, dict) or str(data.get("code")) != "200":
+                        logger.info(f"mhnotify: BTL详情返回错误 code={data.get('code')} message={data.get('message')}")
+                        time.sleep(1 + i)
+                        continue
+                    core = data.get("data") if isinstance(data.get("data"), dict) else {}
+                    if core and "all_seeds" in core and isinstance(core["all_seeds"], list):
+                        seeds = core["all_seeds"]
+                        logger.info(f"mhnotify: BTL详情使用 all_seeds 资源条数={len(seeds)}")
+                    else:
+                        seeds = (core.get("resources") or core.get("list") or
+                                 data.get("resources") or data.get("list") or [])
+                        logger.info(f"mhnotify: BTL详情使用兼容资源字段，条数={len(seeds) if isinstance(seeds, list) else 0}")
+                    break
+                except Exception:
+                    time.sleep(1 + i)
             return seeds if isinstance(seeds, list) else []
         except Exception:
             logger.info("mhnotify: BTL详情调用异常")
@@ -3272,23 +3276,30 @@ class MHNotify(_PluginBase):
             # params["app_id"] = (app_id or self._btl_app_id or "").strip()
             # params["identity"] = (identity or self._btl_identity or "").strip()
             logger.info(f"mhnotify: BTL getVideoList GET {base} sb={title} page={page} limit={limit} app_id={params['app_id']} identity={params['identity'][:8]}***")
-            import requests
-            resp = requests.get(base, params=params, headers={
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "zh_CN",
-                "Content-Type": "application/json;charset=UTF-8",
-                "Referer": "https://web5.mukaku.com/search",
-                "User-Agent": "Mozilla/5.0"
-            }, timeout=20)
-            if resp.status_code != 200:
-                logger.info(f"mhnotify: BTL getVideoList 请求失败 status={resp.status_code}")
-                return []
-            data = resp.json() or {}
-            if not isinstance(data, dict) or str(data.get("code")) != "200":
-                logger.info(f"mhnotify: BTL getVideoList 返回错误 code={data.get('code')} message={data.get('message')}")
-                return []
-            inner = (data.get("data") or {}).get("data") or []
-            logger.info(f"mhnotify: BTL getVideoList 返回条目数={len(inner) if isinstance(inner, list) else 0}")
+            import requests, time
+            inner = []
+            for i in range(3):
+                try:
+                    resp = requests.get(base, params=params, headers={
+                        "Accept": "application/json, text/plain, */*",
+                        "Accept-Language": "zh_CN",
+                        "Content-Type": "application/json;charset=UTF-8",
+                        "Referer": "https://web5.mukaku.com/search",
+                        "User-Agent": "Mozilla/5.0"
+                    }, timeout=20)
+                    if resp.status_code != 200:
+                        time.sleep(1 + i)
+                        continue
+                    data = resp.json() or {}
+                    if not isinstance(data, dict) or str(data.get("code")) != "200":
+                        logger.info(f"mhnotify: BTL getVideoList 返回错误 code={data.get('code')} message={data.get('message')}")
+                        time.sleep(1 + i)
+                        continue
+                    inner = (data.get("data") or {}).get("data") or []
+                    logger.info(f"mhnotify: BTL getVideoList 返回条目数={len(inner) if isinstance(inner, list) else 0}")
+                    break
+                except Exception:
+                    time.sleep(1 + i)
             return inner if isinstance(inner, list) else []
         except Exception:
             logger.info("mhnotify: BTL getVideoList 调用异常")
@@ -3488,6 +3499,8 @@ class MHNotify(_PluginBase):
         def excluded(x: Dict[str, Any]) -> bool:
             g = str(x.get("definition_group") or "")
             n = str(x.get("zname") or x.get("name") or "")
+            if ("无字" in n) or ("無字" in n) or ("无字片源" in n):
+                return True
             if g.strip().lower() == "3d" or "3D" in g:
                 return True
             if ("蓝光原盘" in g) and ("REMUX" not in n.upper()):
@@ -4509,19 +4522,14 @@ class MHNotify(_PluginBase):
                             if info:
                                 sid = info.get("sid")
                                 mh_uuid = info.get("mh_uuid")
-                                try:
-                                    del_token = self.__mh_login()
-                                except Exception:
-                                    del_token = None
-                                if del_token and mh_uuid:
-                                    self.__mh_delete_subscription(del_token, mh_uuid)
+                                # 不在此处删除MH，改为完成MP订阅后由 SubscribeComplete 事件删除MH
                                 with SessionFactory() as db:
                                     sub = SubscribeOper(db=db).get(int(sid))
                                 if sub:
                                     self.__finish_mp_subscribe(sub)
                                 mapping.pop(info_hash, None)
                                 self.save_data(self._ASSIST_CLOUD_MAP_KEY, mapping)
-                                logger.info(f"mhnotify: 云下载辅助完成，已删除MH订阅并完成MP订阅 sid={sid}")
+                                logger.info(f"mhnotify: 云下载辅助完成，已完成MP订阅，MH删除由事件触发 sid={sid}")
                         except Exception:
                             pass
                         
@@ -5096,8 +5104,9 @@ class MHNotify(_PluginBase):
             account_configs = defaults_data.get("data", {}).get("account_configs", {})
             account_config = account_configs.get(account_identifier, {})
             default_directory = account_config.get("default_directory", "/影视")
+
             
-            logger.info(f"mhnotify: 获取到默认目录: {default_directory}")
+            logger.info(f"m2hnotify: 获取到默认目录: {default_directory}")
             logger.debug(f"mhnotify: 账户配置: {account_config}")
             
             # 5. 提交文件整理任务
