@@ -23,7 +23,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.5.9.5"
+    plugin_version = "1.6.0"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -56,6 +56,8 @@ class MHNotify(_PluginBase):
     _ASSIST_PENDING_KEY = "mhnotify_assist_pending"
     # 助手：等待MP完成后删除mh订阅的监听映射（mp_sub_id -> {mh_uuid}）
     _ASSIST_WATCH_KEY = "mhnotify_assist_watch"
+    # 助手：云下载辅助映射（info_hash -> {sid, mh_uuid}）
+    _ASSIST_CLOUD_MAP_KEY = "mhnotify_assist_cloud_map"
     # HDHive 配置
     _hdhive_enabled: bool = False
     _hdhive_query_mode: str = "playwright"  # playwright/api
@@ -107,6 +109,8 @@ class MHNotify(_PluginBase):
     _cloud_download_remove_small_files: bool = False
     # 云下载移动整理开关
     _cloud_download_organize: bool = False
+    # 云下载辅助订阅开关（仅新电影订阅）
+    _cloud_download_assist: bool = False
     # 阿里云盘秒传开关
     _ali2115_enabled: bool = False
     # 阿里云盘 Refresh Token
@@ -117,6 +121,9 @@ class MHNotify(_PluginBase):
     _ali2115_115_folder: str = "/秒传接收"
     # 阿里云盘秒传后移动整理开关
     _ali2115_organize: bool = False
+    # BTL鉴权参数
+    _btl_app_id: str = "83768d9ad4"
+    _btl_identity: str = "23734adac0301bccdcb107c4aa21f96c"
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -306,6 +313,9 @@ class MHNotify(_PluginBase):
             self._cloud_download_path = config.get("cloud_download_path", "/云下载") or "/云下载"
             self._cloud_download_remove_small_files = bool(config.get("cloud_download_remove_small_files", False))
             self._cloud_download_organize = bool(config.get("cloud_download_organize", False))
+            self._cloud_download_assist = bool(config.get("cloud_download_assist", False))
+            if self._cloud_download_assist:
+                logger.info("mhnotify: 云下载辅助订阅功能已开启（仅新电影订阅生效）")
             
             # 阿里云盘秒传配置
             self._ali2115_enabled = bool(config.get("ali2115_enabled", False))
@@ -342,7 +352,7 @@ class MHNotify(_PluginBase):
             services.append({
                 "id": "MHAssist",
                 "name": "mh订阅辅助",
-                "trigger": CronTrigger.from_crontab("* * * * *"),
+                "trigger": CronTrigger.from_crontab("*/5 * * * *"),
                 "func": self.__assist_scheduler,
                 "kwargs": {}
             })
@@ -671,6 +681,7 @@ class MHNotify(_PluginBase):
             "mp_event_storages": [],
             "cloud_download_enabled": False,
             "cloud_download_path": "/云下载",
+            "cloud_download_assist": False,
             "ali2115_enabled": False,
             "ali2115_token": "",
             "ali2115_ali_folder": "/秒传转存",
@@ -731,6 +742,25 @@ class MHNotify(_PluginBase):
                             }
                         ]
                     },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'cloud_download_assist',
+                                            'label': '云下载辅助订阅（仅新电影订阅）',
+                                            'hint': '新订阅电影未完成时按质量优先级自动匹配资源并触发云下载；失败则恢复订阅启用'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
                     # MP完成后删除MH订阅
                     {
                         'component': 'VRow',
@@ -746,8 +776,8 @@ class MHNotify(_PluginBase):
                                         'component': 'VSwitch',
                                         'props': {
                                             'model': 'mh_assist_auto_delete',
-                                            'label': 'MP订阅完成后自动删除MH订阅',
-                                            'hint': '开启后，当MP订阅完成或取消时，自动删除或更新对应的MH订阅。关闭则保留MH订阅'
+                                            'label': '取消或完成订阅后自动删除MH订阅',
+                                            'hint': '开启后，当MP订阅完成或取消时，自动删除或更新对应的MH115订阅。关闭则保留MH订阅'
                                         }
                                     }
                                 ]
@@ -2718,6 +2748,24 @@ class MHNotify(_PluginBase):
                 "douban_id": (mediainfo_dict.get("douban_id") or mediainfo_dict.get("doubanid") or getattr(subscribe, 'doubanid', None))
             }
             self.save_data(self._ASSIST_PENDING_KEY, pending)
+            try:
+                import threading
+                def _delayed_check():
+                    try:
+                        p = self.get_data(self._ASSIST_PENDING_KEY) or {}
+                        info = p.get(str(sub_id))
+                        if not info:
+                            return
+                        info["created_at"] = int(time.time()) - self._assist_initial_delay_seconds - 1
+                        p[str(sub_id)] = info
+                        self.save_data(self._ASSIST_PENDING_KEY, p)
+                        self.__assist_scheduler()
+                    except Exception:
+                        logger.warning("mhnotify: 新订阅延迟检查异常", exc_info=True)
+                threading.Timer(self._assist_initial_delay_seconds, _delayed_check).start()
+                logger.info(f"mhnotify: 已安排新订阅在 {int(self._assist_initial_delay_seconds/60)} 分钟后立即检查进度（不受全局调度频率影响）")
+            except Exception:
+                logger.warning("mhnotify: 安排新订阅延迟检查失败", exc_info=True)
         except Exception as e:
             logger.error(f"mhnotify: 处理新增订阅事件失败: {e}")
 
@@ -3061,6 +3109,52 @@ class MHNotify(_PluginBase):
             logger.error("mhnotify: 删除MH订阅异常", exc_info=True)
             return False
 
+    def __mh_delete_by_title(self, access_token: str, title: str) -> int:
+        try:
+            if not title:
+                return 0
+            lst = self.__mh_list_subscriptions(access_token, status="active", search=title, page_size=2000)
+            subs = (lst.get("data") or {}).get("subscriptions") or []
+            count = 0
+            t_norm = str(title).strip().lower()
+            for rec in subs:
+                params = rec.get("params") or {}
+                cloud = str(params.get("cloud_type") or "").strip().lower()
+                name = (rec.get("name") or rec.get("task", {}).get("name") or params.get("title") or "").strip().lower()
+                if cloud == "drive115" and name and name == t_norm:
+                    uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
+                    if uuid and self.__mh_delete_subscription(access_token, uuid):
+                        count += 1
+            logger.info(f"mhnotify: 按标题删除MH订阅 title={title} 已删除数量={count}")
+            return count
+        except Exception:
+            logger.error("mhnotify: 按标题删除MH订阅异常", exc_info=True)
+            return 0
+
+    def __mh_delete_by_tmdb(self, access_token: str, tmdb_id: Union[str, int], media_type: Optional[str] = None) -> int:
+        try:
+            if not tmdb_id:
+                return 0
+            lst = self.__mh_list_subscriptions(access_token, status="active", page_size=2000)
+            subs = (lst.get("data") or {}).get("subscriptions") or []
+            count = 0
+            tmdb_norm = str(tmdb_id)
+            mtype_norm = (str(media_type or "").lower().strip() or None)
+            for rec in subs:
+                params = rec.get("params") or {}
+                cloud = str(params.get("cloud_type") or "").strip().lower()
+                ptmdb = str(params.get("tmdb_id") or "")
+                pmtype = str(params.get("media_type") or "").lower().strip()
+                if cloud == "drive115" and ptmdb == tmdb_norm and (not mtype_norm or pmtype == mtype_norm):
+                    uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
+                    if uuid and self.__mh_delete_subscription(access_token, uuid):
+                        count += 1
+            logger.info(f"mhnotify: 按tmdb_id删除MH订阅 tmdb_id={tmdb_norm} type={mtype_norm or '*'} 已删除数量={count}")
+            return count
+        except Exception:
+            logger.error("mhnotify: 按tmdb_id删除MH订阅异常", exc_info=True)
+            return 0
+
     def __mh_update_subscription(self, access_token: str, uuid: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """更新MH订阅（修改季集合等参数）
         兼容示例：PUT /api/v1/subscription/{uuid}，body 包含 name/cron/params
@@ -3118,6 +3212,344 @@ class MHNotify(_PluginBase):
             logger.error("mhnotify: 触发MH订阅执行异常", exc_info=True)
         return False
 
+    def __btl_get_video_detail(self, access_token: str, douban_id: Union[str, int]) -> List[Dict[str, Any]]:
+        try:
+            base = "https://web5.mukaku.com/prod/api/v1/getVideoDetail"
+            params = {
+                "id": str(douban_id),
+                "app_id": "83768d9ad4",
+                "identity": "23734adac0301bccdcb107c4aa21f96c"
+            }
+            logger.info(f"111mhnotify: 获取BTL视频详情 GET {base} id={douban_id} app_id={params['app_id']} identity={params['identity'][:8]}***")
+            import requests
+            resp = requests.get(base, params=params, headers={
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh_CN",
+                "Content-Type": "application/json;charset=UTF-8",
+                "Referer": "https://web5.mukaku.com/search",
+                "User-Agent": "Mozilla/5.0"
+            }, timeout=20)
+            try:
+                text = resp.text or ""
+                logger.info(f"mhnotify: BTL详情响应 status={resp.status_code} len={len(text)}")
+                logger.info(f"mhnotify: BTL详情响应内容: {text[:1000]}")
+            except Exception:
+                pass
+            if resp.status_code != 200:
+                logger.info(f"mhnotify: BTL详情请求失败 status={resp.status_code}")
+                return []
+            data = resp.json() or {}
+            if not isinstance(data, dict) or str(data.get("code")) != "200":
+                logger.info(f"mhnotify: BTL详情返回错误 code={data.get('code')} message={data.get('message')}")
+                return []
+            # 优先使用 all_seeds 作为资源数组
+            seeds = []
+            if isinstance(data, dict):
+                core = data.get("data") if isinstance(data.get("data"), dict) else {}
+                if core and "all_seeds" in core and isinstance(core["all_seeds"], list):
+                    seeds = core["all_seeds"]
+                    logger.info(f"mhnotify: BTL详情使用 all_seeds 资源条数={len(seeds)}")
+                else:
+                    # 兼容其它字段：resources/list
+                    seeds = (core.get("resources") or core.get("list") or
+                             data.get("resources") or data.get("list") or [])
+                    logger.info(f"mhnotify: BTL详情使用兼容资源字段，条数={len(seeds) if isinstance(seeds, list) else 0}")
+            return seeds if isinstance(seeds, list) else []
+        except Exception:
+            logger.info("mhnotify: BTL详情调用异常")
+            return []
+
+    def __btl_get_video_list(self, title: str, page: int = 1, limit: int = 24, app_id:str= "83768d9ad4" , identity: str="23734adac0301bccdcb107c4aa21f96c") -> List[Dict[str, Any]]:
+        try:
+            base = "https://web5.mukaku.com/prod/api/v1/getVideoList"
+            params = {
+                "sb": title,
+                "page": page,
+                "limit": limit,
+                "app_id": app_id,
+                "identity": identity
+            }
+            # params["app_id"] = (app_id or self._btl_app_id or "").strip()
+            # params["identity"] = (identity or self._btl_identity or "").strip()
+            logger.info(f"mhnotify: BTL getVideoList GET {base} sb={title} page={page} limit={limit} app_id={params['app_id']} identity={params['identity'][:8]}***")
+            import requests
+            resp = requests.get(base, params=params, headers={
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh_CN",
+                "Content-Type": "application/json;charset=UTF-8",
+                "Referer": "https://web5.mukaku.com/search",
+                "User-Agent": "Mozilla/5.0"
+            }, timeout=20)
+            if resp.status_code != 200:
+                logger.info(f"mhnotify: BTL getVideoList 请求失败 status={resp.status_code}")
+                return []
+            data = resp.json() or {}
+            if not isinstance(data, dict) or str(data.get("code")) != "200":
+                logger.info(f"mhnotify: BTL getVideoList 返回错误 code={data.get('code')} message={data.get('message')}")
+                return []
+            inner = (data.get("data") or {}).get("data") or []
+            logger.info(f"mhnotify: BTL getVideoList 返回条目数={len(inner) if isinstance(inner, list) else 0}")
+            return inner if isinstance(inner, list) else []
+        except Exception:
+            logger.info("mhnotify: BTL getVideoList 调用异常")
+            return []
+
+    def __get_quality_priority(self, access_token: str) -> Dict[str, Any]:
+        try:
+            url = f"{self._mh_domain}/api/v1/task_rules/subscription"
+            headers = self.__auth_headers(access_token)
+            logger.info(f"mhnotify: 获取质量优先级配置 GET {url}")
+            res = RequestUtils(headers=headers).get_res(url)
+            if not res or res.status_code != 200:
+                logger.error(f"mhnotify: 获取质量优先级失败 status={getattr(res, 'status_code', 'N/A')} body={getattr(res, 'text', '')[:200]}")
+                return {}
+            data = res.json() or {}
+            qp = (data.get("data") or {}).get("quality_priority") or {}
+            rp = qp.get("resolution_priority") or []
+            hp = qp.get("hdr_priority") or []
+            cp = qp.get("codec_priority") or []
+            logger.info(f"mhnotify: 质量优先级摘要 resolution={rp} hdr={hp} codec={cp}")
+            return qp
+        except Exception:
+            logger.error("mhnotify: 获取质量优先级异常", exc_info=True)
+            return {}
+
+    def __select_btl_resources_by_priority(self, resources: List[Dict[str, Any]], quality_pref: Optional[str]) -> List[Dict[str, Any]]:
+        def get_group(x: Dict[str, Any]) -> str:
+            g = str(x.get("definition_group") or "").lower()
+            n = str(x.get("zname") or x.get("name") or "").lower()
+            if not g and n:
+                if "remux" in n:
+                    return "remux"
+                if "web-dl" in n or "webdl" in n or "webrip" in n:
+                    return "web-dl"
+                if "hdtv" in n:
+                    return "hdtv"
+                if "blu" in n or "蓝光" in n:
+                    return "blu-ray"
+            if "3d" in g:
+                return "3d"
+            if "remux" in n or "remux" in g:
+                return "remux"
+            if "蓝光原盘" in g or "blu" in g or "蓝光" in g:
+                return "blu-ray"
+            if "web-dl" in g or "webdl" in g or "webrip" in g:
+                return "web-dl"
+            if "hdtv" in g:
+                return "hdtv"
+            return g or "other"
+        def is_valid(x: Dict[str, Any]) -> bool:
+            g = str(x.get("definition_group") or "")
+            n = str(x.get("zname") or x.get("name") or "")
+            if g.strip().lower() == "3d" or "3D" in g:
+                return False
+            if ("蓝光原盘" in g) and ("REMUX" not in n.upper()):
+                return False
+            return True
+        filtered = [r for r in resources if is_valid(r)]
+        pref = str(quality_pref or "").lower()
+        if not pref or pref == "auto":
+            order = ["remux", "blu-ray", "web-dl", "hdtv", "other"]
+        else:
+            order = []
+            p = pref.replace(">", ",").replace("|", ",").replace("/", ",")
+            for seg in [s.strip().lower() for s in p.split(",") if s.strip()]:
+                if "remux" in seg:
+                    order.append("remux")
+                elif "blu" in seg or "蓝光" in seg:
+                    order.append("blu-ray")
+                elif "web" in seg:
+                    order.append("web-dl")
+                elif "hdtv" in seg:
+                    order.append("hdtv")
+            order += [x for x in ["remux", "blu-ray", "web-dl", "hdtv", "other"] if x not in order]
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for r in filtered:
+            k = get_group(r)
+            grouped.setdefault(k, []).append(r)
+        def parse_size_bytes(v: Any) -> int:
+            try:
+                # 优先 zsize，如 "39.76 GB"
+                s = str(v or "").strip()
+                if not s:
+                    return 0
+                # 若传入的是资源项字典，提取 zsize 或其他字段
+                if isinstance(v, dict):
+                    s = str(v.get("zsize") or v.get("size") or v.get("file_size") or v.get("filesize") or "").strip()
+                    if not s:
+                        return 0
+                # 纯数字（字节）
+                if s.isdigit():
+                    return int(s)
+                import re
+                m = re.match(r"^\s*([\d\.]+)\s*([a-zA-Z]+)\s*$", s)
+                if not m:
+                    # 尝试从中文单位中解析
+                    m2 = re.match(r"^\s*([\d\.]+)\s*(字节|KB|MB|GB|TB)\s*$", s, re.IGNORECASE)
+                    if not m2:
+                        return 0
+                    num = float(m2.group(1))
+                    unit = m2.group(2).upper()
+                else:
+                    num = float(m.group(1))
+                    unit = m.group(2).upper()
+                # 标准单位换算（按 1024）
+                if unit in ("B", "BYTE", "BYTES", "字节"):
+                    factor = 1
+                elif unit in ("KB", "K", "KIB"):
+                    factor = 1024
+                elif unit in ("MB", "M", "MIB"):
+                    factor = 1024 ** 2
+                elif unit in ("GB", "G", "GIB"):
+                    factor = 1024 ** 3
+                elif unit in ("TB", "T", "TIB"):
+                    factor = 1024 ** 4
+                else:
+                    factor = 1
+                return int(num * factor)
+            except Exception:
+                return 0
+        result: List[Dict[str, Any]] = []
+        for k in order:
+            group_list = grouped.get(k, [])
+            if group_list:
+                try:
+                    group_list = sorted(group_list, key=lambda x: parse_size_bytes(x), reverse=True)
+                except Exception:
+                    pass
+                result += group_list
+        return result
+
+    def __select_btl_resources_by_quality_priority(self, resources: List[Dict[str, Any]], qp: Dict[str, Any]) -> List[Dict[str, Any]]:
+        try:
+            res_pri: List[str] = [str(x).lower() for x in (qp.get("resolution_priority") or [])]
+            hdr_pri: List[str] = [str(x).upper() for x in (qp.get("hdr_priority") or [])]
+            codec_pri: List[str] = [str(x).upper() for x in (qp.get("codec_priority") or [])]
+            exclude_res = set([str(x).lower() for x in (qp.get("exclude_resolutions") or [])])
+            exclude_hdr = set([str(x).upper() for x in (qp.get("exclude_hdr_types") or [])])
+            exclude_codec = set([str(x).upper() for x in (qp.get("exclude_codecs") or [])])
+        except Exception:
+            res_pri, hdr_pri, codec_pri = [], [], []
+            exclude_res, exclude_hdr, exclude_codec = set(), set(), set()
+        def parse_size_bytes(v: Dict[str, Any]) -> int:
+            s = str(v.get("zsize") or v.get("size") or v.get("file_size") or v.get("filesize") or "").strip()
+            if not s:
+                return 0
+            if s.isdigit():
+                try:
+                    return int(s)
+                except Exception:
+                    return 0
+            try:
+                import re
+                m = re.match(r"^\s*([\d\.]+)\s*([a-zA-Z]+)\s*$", s)
+                if not m:
+                    return 0
+                num = float(m.group(1)); unit = m.group(2).upper()
+                if unit in ("B", "BYTE", "BYTES", "字节"):
+                    factor = 1
+                elif unit in ("KB", "K", "KIB"):
+                    factor = 1024
+                elif unit in ("MB", "M", "MIB"):
+                    factor = 1024 ** 2
+                elif unit in ("GB", "G", "GIB"):
+                    factor = 1024 ** 3
+                elif unit in ("TB", "T", "TIB"):
+                    factor = 1024 ** 4
+                else:
+                    factor = 1
+                return int(num * factor)
+            except Exception:
+                return 0
+        def extract_features(x: Dict[str, Any]) -> Tuple[str, str, str]:
+            name = str(x.get("zname") or x.get("name") or "")
+            name_u = name.upper()
+            # resolution
+            res = ""
+            for r in ["2160P", "1080P", "720P", "480P"]:
+                if r in name_u:
+                    res = r.lower()
+                    break
+            # hdr
+            hdr = ""
+            for h in ["DV", "HDR10+", "HDR10", "HDR", "HDR VIVID"]:
+                if h in name_u:
+                    hdr = h
+                    break
+            # codec
+            codec = ""
+            if any(k in name_u for k in ["H265", "X265", "HEVC"]):
+                codec = "H265"
+            elif any(k in name_u for k in ["H264", "X264", "AVC"]):
+                codec = "H264"
+            elif "AV1" in name_u:
+                codec = "AV1"
+            return res, hdr, codec
+        def excluded(x: Dict[str, Any]) -> bool:
+            g = str(x.get("definition_group") or "")
+            n = str(x.get("zname") or x.get("name") or "")
+            if g.strip().lower() == "3d" or "3D" in g:
+                return True
+            if ("蓝光原盘" in g) and ("REMUX" not in n.upper()):
+                return True
+            res, hdr, codec = extract_features(x)
+            if res and res in exclude_res:
+                return True
+            if hdr and hdr in exclude_hdr:
+                return True
+            if codec and codec in exclude_codec:
+                return True
+            return False
+        # 过滤
+        filtered = [r for r in resources if not excluded(r)]
+        # 打分：各维度按列表下标值，越小越优；缺失视为末位
+        def pri_index(value: str, lst: List[str], normalize_upper: bool = False) -> int:
+            if not value:
+                return len(lst) + 1
+            val = value.upper() if normalize_upper else value
+            try:
+                return lst.index(val) if not normalize_upper else lst.index(val)
+            except ValueError:
+                return len(lst) + 1
+        def sort_key(x: Dict[str, Any]) -> Tuple[int, int, int, int]:
+            res, hdr, codec = extract_features(x)
+            ri = pri_index(res, res_pri)  # res_pri 已为小写
+            hi = pri_index(hdr, hdr_pri, normalize_upper=True)
+            ci = pri_index(codec, codec_pri, normalize_upper=True)
+            size = parse_size_bytes(x)
+            return (ri, hi, ci, -size)
+        try:
+            sorted_list = sorted(filtered, key=sort_key)
+        except Exception:
+            # 兜底：仅按大小
+            sorted_list = sorted(filtered, key=lambda x: parse_size_bytes(x), reverse=True)
+        logger.info(f"mhnotify: 质量优先级排序完成，候选={len(sorted_list)}")
+        if sorted_list:
+            top = sorted_list[0]
+            logger.info(f"mhnotify: 首选资源 name={str(top.get('zname') or top.get('name') or '')[:80]} size={str(top.get('zsize') or '')}")
+        return sorted_list
+
+    def __try_cloud_download_with_candidates(self, candidates: List[Dict[str, Any]], sid: Union[str, int], mh_uuid: str) -> bool:
+        total = len(candidates or [])
+        for idx, item in enumerate(candidates or [], start=1):
+            url = str(item.get("zlink") or item.get("link") or "")
+            if not url:
+                continue
+            name = str(item.get("zname") or item.get("name") or "")
+            size = str(item.get("zsize") or "")
+            logger.info(f"mhnotify: 尝试云下载候选 {idx}/{total} name={name[:80]} size={size}")
+            ok, msg, info = self._add_offline_download(url, start_monitor=True)
+            if ok:
+                ih = info.get("info_hash")
+                if ih:
+                    mapping = self.get_data(self._ASSIST_CLOUD_MAP_KEY) or {}
+                    mapping[ih] = {"sid": int(sid), "mh_uuid": mh_uuid}
+                    self.save_data(self._ASSIST_CLOUD_MAP_KEY, mapping)
+                    logger.info(f"mhnotify: 云下载任务已提交，info_hash={str(ih)[:16]}... 已建立回调映射 sid={sid}")
+                return True
+            else:
+                logger.info(f"mhnotify: 云下载失败，继续尝试下一候选。原因={msg}")
+        return False
     def __compute_progress(self, sub_rec: Dict[str, Any]) -> Tuple[str, int, int]:
         """返回 (media_type, saved, expected_total)"""
         params = (sub_rec or {}).get("params") or {}
@@ -3149,6 +3581,7 @@ class MHNotify(_PluginBase):
                 # 收集已到查询时间的条目（首次查询延迟）
                 matured_items = {sid: info for sid, info in pending.items() if now_ts - int(info.get("created_at") or 0) >= self._assist_initial_delay_seconds}
                 if matured_items:
+                    logger.info(f"mhnotify: 助手到期查询条目数={len(matured_items)}")
                     token = self.__mh_login()
                     if not token:
                         logger.error("mhnotify: 登录MH失败，无法查询订阅进度")
@@ -3162,6 +3595,7 @@ class MHNotify(_PluginBase):
                                 subs_map[uid] = rec
                         for sid, info in list(matured_items.items()):
                             mh_uuid = info.get("mh_uuid")
+                            logger.info(f"mhnotify: 到期处理 sid={sid} mh_uuid={mh_uuid} type={info.get('type')} douban_id={info.get('douban_id')}")
                             target = subs_map.get(mh_uuid)
                             if not target:
                                 # 未找到，记录重试次数，超过30次则移除记录
@@ -3255,27 +3689,104 @@ class MHNotify(_PluginBase):
                                 continue
                             if mtype == 'movie':
                                 if expected <= 1 and saved >= 1:
-                                    # 完成：删除MH，完成MP订阅
-                                    if token:
-                                        self.__mh_delete_subscription(token, mh_uuid)
+                                    # 完成：直接完成MP订阅，MH删除交由 SubscribeComplete 事件处理
                                     self.__finish_mp_subscribe(subscribe)
                                     pending.pop(sid, None)
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
                                 else:
-                                    # 未完成：恢复MP订阅并监听MP完成后删除MH
-                                    with SessionFactory() as db:
-                                        SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
-                                    watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
-                                    watch[sid] = {"mh_uuid": mh_uuid}
-                                    self.save_data(self._ASSIST_WATCH_KEY, watch)
-                                    pending.pop(sid, None)
-                                    self.save_data(self._ASSIST_PENDING_KEY, pending)
+                                    if self._cloud_download_assist:
+                                        try:
+                                            logger.info(f"mhnotify: 进入云下载辅助分支 sid={sid} mh_uuid={mh_uuid}")
+                                            qp_dict = self.__get_quality_priority(token)
+                                        except Exception:
+                                            qp_dict = {}
+                                        douban_id = info.get("douban_id")
+                                        # 若缺少豆瓣ID，先按标题搜索回退
+                                        search_douban_id = douban_id
+                                        if not search_douban_id:
+                                            try:
+                                                title_src = subscribe.name or mediainfo_dict.get("title") or ""
+                                                search_list = self.__btl_get_video_list(title_src)
+                                                pick = None
+                                                for rec in search_list or []:
+                                                    r_type = int(rec.get("type") or 0)
+                                                    r_title = str(rec.get("title") or "").strip()
+                                                    if r_type == 1 and r_title and r_title == title_src:
+                                                        pick = rec
+                                                        break
+                                                if pick:
+                                                    search_douban_id = pick.get("doub_id") or pick.get("douban_id") or pick.get("id") or pick.get("db_id")
+                                                    logger.info(f"mhnotify: BTL getVideoList 匹配到豆瓣ID={search_douban_id}")
+                                                else:
+                                                    logger.info("mhnotify: BTL getVideoList 未匹配到电影条目或标题不一致")
+                                            except Exception:
+                                                search_douban_id = None
+                                        if search_douban_id:
+                                            details = self.__btl_get_video_detail(token, search_douban_id)
+                                            logger.info(f"mhnotify: 云下载辅助：质量优先级已获取 keys={list(qp_dict.keys()) if isinstance(qp_dict, dict) else []}")
+                                            logger.info(f"mhnotify: 云下载辅助：BTL资源条数={len(details) if isinstance(details, list) else 0}")
+                                            if not details:
+                                                logger.info("mhnotify: BTL详情查询失败或无资源，恢复订阅启用")
+                                                with SessionFactory() as db:
+                                                    SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                                pending.pop(sid, None)
+                                                self.save_data(self._ASSIST_PENDING_KEY, pending)
+                                            else:
+                                                candidates = self.__select_btl_resources_by_quality_priority(details, qp_dict)
+                                                logger.info(f"mhnotify: 云下载辅助：候选条数（排序后）={len(candidates)}")
+                                                started = self.__try_cloud_download_with_candidates(candidates, sid, mh_uuid)
+                                                if started:
+                                                    logger.info(f"mhnotify: 已触发云下载（优先级首选），等待下载完成后回调处理订阅 sid={sid}")
+                                                    # 为后续取消事件提供映射
+                                                    watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+                                                    try:
+                                                        tmdb_id = getattr(subscribe, 'tmdbid', None)
+                                                        sub_type = (getattr(subscribe, 'type', '') or '').lower()
+                                                    except Exception:
+                                                        tmdb_id = None
+                                                        sub_type = ''
+                                                    watch[str(sid)] = {"mh_uuid": mh_uuid, "tmdb_id": tmdb_id, "type": sub_type or 'movie'}
+                                                    self.save_data(self._ASSIST_WATCH_KEY, watch)
+                                                    pending.pop(sid, None)
+                                                    self.save_data(self._ASSIST_PENDING_KEY, pending)
+                                                else:
+                                                    logger.info("mhnotify: 云下载辅助未匹配到可用资源或全部失败，恢复订阅启用")
+                                                    with SessionFactory() as db:
+                                                        SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                                    # 恢复启用后，加入watch映射，用于取消事件快速删除MH
+                                                    watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+                                                    watch[str(sid)] = {"mh_uuid": mh_uuid}
+                                                    self.save_data(self._ASSIST_WATCH_KEY, watch)
+                                                    pending.pop(sid, None)
+                                                    self.save_data(self._ASSIST_PENDING_KEY, pending)
+                                        else:
+                                            logger.info("mhnotify: 云下载辅助跳过：缺少豆瓣ID")
+                                            with SessionFactory() as db:
+                                                SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                            # 加入watch映射，用于取消事件快速删除MH
+                                            watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+                                            watch[str(sid)] = {"mh_uuid": mh_uuid}
+                                            self.save_data(self._ASSIST_WATCH_KEY, watch)
+                                            pending.pop(sid, None)
+                                            self.save_data(self._ASSIST_PENDING_KEY, pending)
+                                    else:
+                                        with SessionFactory() as db:
+                                            SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                        watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+                                        try:
+                                            tmdb_id = getattr(subscribe, 'tmdbid', None)
+                                            sub_type = (getattr(subscribe, 'type', '') or '').lower()
+                                        except Exception:
+                                            tmdb_id = None
+                                            sub_type = ''
+                                        watch[str(sid)] = {"mh_uuid": mh_uuid, "tmdb_id": tmdb_id, "type": sub_type or 'movie'}
+                                        self.save_data(self._ASSIST_WATCH_KEY, watch)
+                                        pending.pop(sid, None)
+                                        self.save_data(self._ASSIST_PENDING_KEY, pending)
                             else:
                                 # TV
                                 if expected > 0 and saved >= expected:
-                                    # 完成：删除MH，完成MP订阅
-                                    if token:
-                                        self.__mh_delete_subscription(token, mh_uuid)
+                                    # 完成：直接完成MP订阅，MH删除交由 SubscribeComplete 事件处理
                                     self.__finish_mp_subscribe(subscribe)
                                     pending.pop(sid, None)
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
@@ -3284,7 +3795,13 @@ class MHNotify(_PluginBase):
                                     with SessionFactory() as db:
                                         SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
                                     watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
-                                    watch[sid] = {"mh_uuid": mh_uuid}
+                                    try:
+                                        tmdb_id = getattr(subscribe, 'tmdbid', None)
+                                        sub_type = (getattr(subscribe, 'type', '') or '').lower()
+                                    except Exception:
+                                        tmdb_id = None
+                                        sub_type = ''
+                                    watch[str(sid)] = {"mh_uuid": mh_uuid, "tmdb_id": tmdb_id, "type": sub_type or 'movie'}
                                     self.save_data(self._ASSIST_WATCH_KEY, watch)
                                     pending.pop(sid, None)
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
@@ -3921,9 +4438,14 @@ class MHNotify(_PluginBase):
                         logger.warning(f"mhnotify: 未找到已完成任务 {info_hash[:16]}... (尝试 {consecutive_failures}/{max_consecutive_failures})")
                         
                         if consecutive_failures >= max_consecutive_failures:
-                            # 连续多次未找到，可能被删除了
-                            logger.error(f"mhnotify: 任务 {info_hash[:16]}... 可能已被删除")
-                            self._send_cloud_download_deleted_notification(task_name)
+                            # 连续多次未找到，进一步检查失败列表
+                            failed_task = self._query_offline_failed_task_by_hash(client, info_hash)
+                            if failed_task:
+                                logger.error(f"mhnotify: 任务 {info_hash[:16]}... 在失败列表中存在，发送失败通知")
+                                self._send_cloud_download_failed_notification(task_name)
+                            else:
+                                logger.error(f"mhnotify: 未找到云下载任务，可能已被删除")
+                                self._send_cloud_download_deleted_notification(task_name)
                             break
                         
                         time.sleep(completed_check_interval)
@@ -3981,10 +4503,44 @@ class MHNotify(_PluginBase):
                         # 发送云下载完成通知
                         self._send_cloud_download_notification(task_name, removed_count, removed_size_mb)
                         
+                        try:
+                            mapping = self.get_data(self._ASSIST_CLOUD_MAP_KEY) or {}
+                            info = mapping.get(info_hash)
+                            if info:
+                                sid = info.get("sid")
+                                mh_uuid = info.get("mh_uuid")
+                                try:
+                                    del_token = self.__mh_login()
+                                except Exception:
+                                    del_token = None
+                                if del_token and mh_uuid:
+                                    self.__mh_delete_subscription(del_token, mh_uuid)
+                                with SessionFactory() as db:
+                                    sub = SubscribeOper(db=db).get(int(sid))
+                                if sub:
+                                    self.__finish_mp_subscribe(sub)
+                                mapping.pop(info_hash, None)
+                                self.save_data(self._ASSIST_CLOUD_MAP_KEY, mapping)
+                                logger.info(f"mhnotify: 云下载辅助完成，已删除MH订阅并完成MP订阅 sid={sid}")
+                        except Exception:
+                            pass
+                        
                         break
                     elif status == 1:
                         logger.warning(f"mhnotify: 离线下载任务失败: {task_name}")
                         self._send_cloud_download_failed_notification(task_name)
+                        try:
+                            mapping = self.get_data(self._ASSIST_CLOUD_MAP_KEY) or {}
+                            info = mapping.get(info_hash)
+                            if info:
+                                sid = info.get("sid")
+                                with SessionFactory() as db:
+                                    SubscribeOper(db=db).update(int(sid), {"state": "R", "sites": []})
+                                mapping.pop(info_hash, None)
+                                self.save_data(self._ASSIST_CLOUD_MAP_KEY, mapping)
+                                logger.info(f"mhnotify: 云下载辅助失败，已恢复MP订阅启用 sid={sid}")
+                        except Exception:
+                            pass
                         break
                     else:
                         # status 不为 2 也不为 1，继续等待
@@ -4086,9 +4642,49 @@ class MHNotify(_PluginBase):
                     return task
             
             return None
-            
+        
         except Exception as e:
             logger.debug(f"mhnotify: 查询离线任务异常: {e}")
+            return None
+
+    def _query_offline_failed_task_by_hash(self, client, info_hash: str) -> Optional[Dict[str, Any]]:
+        try:
+            import time as time_module
+            import hashlib
+            uid = self._get_115_uid()
+            if not uid:
+                logger.warning(f"mhnotify: 无法获取115用户ID")
+                return None
+            timestamp = int(time_module.time())
+            sign = hashlib.md5(f"{uid}{timestamp}".encode()).hexdigest()
+            url = "https://115.com/web/lixian/?ct=lixian&ac=task_lists"
+            params = {
+                'page': 1,
+                'stat': 1,
+                'uid': uid,
+                'sign': sign,
+                'time': timestamp
+            }
+            headers = {
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Cookie": self._p115_cookie,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            response = RequestUtils(headers=headers).post_res(url, data=params)
+            if not response or response.status_code != 200:
+                logger.debug(f"mhnotify: 查询失败任务列表失败: {response.status_code if response else 'No response'}")
+                return None
+            result = response.json()
+            if not result or not result.get('state'):
+                logger.debug(f"mhnotify: 失败任务列表响应异常: {result}")
+                return None
+            tasks = result.get('tasks', [])
+            for task in tasks:
+                if task.get('info_hash', '').lower() == info_hash.lower():
+                    return task
+            return None
+        except Exception as e:
+            logger.debug(f"mhnotify: 查询失败任务异常: {e}")
             return None
 
     def _remove_small_files_in_directory(self, client, cid: int) -> Tuple[int, int]:
@@ -4689,8 +5285,8 @@ class MHNotify(_PluginBase):
         :param task_name: 任务名称
         """
         try:
-            title = "⚠️ 115云下载任务已被删除"
-            text = f"📦 任务: {task_name}\n\n任务在监控期间被删除，已停止监控。"
+            title = "⚠️ 未找到云下载任务"
+            text = f"📦 任务: {task_name}\n\n未找到云下载任务，可能已被删除。"
             
             self.post_message(
                 mtype=None,
@@ -4719,6 +5315,120 @@ class MHNotify(_PluginBase):
         except Exception as e:
             logger.error(f"mhnotify: 发送云下载失败通知失败: {e}", exc_info=True)
 
+    @eventmanager.register(EventType.SubscribeDeleted)
+    def _on_subscribe_deleted(self, event: Event):
+        """
+        监听 MP 订阅取消事件，按 tmdb_id 删除对应的 MH 订阅（drive115）
+        """
+        try:
+            if not event or not event.event_data:
+                return
+            if not self._mh_assist_auto_delete:
+                return
+            data = event.event_data
+            sid = str(data.get("subscribe_id") or data.get("id") or "")
+            if not sid:
+                return
+            logger.info(f"mhnotify: SubscribeDeleted 事件收到 sid={sid}")
+            try:
+                import json
+                logger.info(f"mhnotify: SubscribeDeleted 全量事件 event_data={str(json.dumps(data, ensure_ascii=False, default=str))[:2000]}")
+            except Exception:
+                try:
+                    logger.info(f"mhnotify: SubscribeDeleted 全量事件（fallback） event_data={str(data)[:2000]}")
+                except Exception:
+                    pass
+            # 获取 tmdb_id 与媒体类型
+            tmdb_id = None
+            mtype = None
+            # 优先从事件 subscribe_info 读取
+            try:
+                si = (data.get("subscribe_info") or data.get("subscribe") or {}) or {}
+                tmdb_id = si.get("tmdbid") or si.get("tmdb_id")
+                mtype = self.__normalize_media_type(si.get("type"), si.get("type"))
+                logger.info(f"mhnotify: SubscribeDeleted subscribe_info 提取 name={si.get('name')} tmdbid={tmdb_id} type={si.get('type')}")
+            except Exception:
+                pass
+            try:
+                with SessionFactory() as db:
+                    sub = SubscribeOper(db=db).get(int(sid))
+                if tmdb_id is None:
+                    tmdb_id = getattr(sub, 'tmdbid', None)
+                if not mtype:
+                    mtype = (getattr(sub, 'type', '') or '').lower()
+            except Exception:
+                pass
+            if not tmdb_id:
+                tmdb_id = (data.get("mediainfo") or {}).get("tmdb_id") or (data.get("mediainfo") or {}).get("tmdbid")
+            if not mtype:
+                mtype = (data.get("mediainfo") or {}).get("type")
+            if not tmdb_id:
+                logger.info("mhnotify: SubscribeDeleted 未获取到tmdb_id，跳过删除")
+                return
+            token = self.__mh_login()
+            if not token:
+                logger.warning("mhnotify: 登录MH失败，无法按tmdb_id删除订阅")
+                return
+            deleted = self.__mh_delete_by_tmdb(token, tmdb_id, media_type=mtype)
+            if deleted <= 0:
+                logger.info("mhnotify: 未按tmdb_id删除到任何MH订阅（drive115），可能未创建或类型不一致")
+        except Exception:
+            logger.error("mhnotify: 处理SubscribeDeleted事件异常", exc_info=True)
+
+    @eventmanager.register(EventType.SubscribeComplete)
+    def _on_subscribe_complete(self, event: Event):
+        try:
+            if not event or not event.event_data:
+                return
+            if not self._mh_assist_auto_delete:
+                return
+            data = event.event_data
+            sid = str(data.get("subscribe_id") or data.get("id") or "")
+            if not sid:
+                return
+            logger.info(f"mhnotify: SubscribeComplete 事件收到 sid={sid}")
+            try:
+                import json
+                logger.info(f"mhnotify: SubscribeComplete 全量事件 event_data={str(json.dumps(data, ensure_ascii=False, default=str))[:2000]}")
+            except Exception:
+                try:
+                    logger.info(f"mhnotify: SubscribeComplete 全量事件（fallback） event_data={str(data)[:2000]}")
+                except Exception:
+                    pass
+            tmdb_id = None
+            mtype = None
+            try:
+                si = (data.get("subscribe_info") or data.get("subscribe") or {}) or {}
+                tmdb_id = si.get("tmdbid") or si.get("tmdb_id")
+                mtype = self.__normalize_media_type(si.get("type"), si.get("type"))
+                logger.info(f"mhnotify: SubscribeComplete subscribe_info 提取 name={si.get('name')} tmdbid={tmdb_id} type={si.get('type')}")
+            except Exception:
+                pass
+            try:
+                with SessionFactory() as db:
+                    sub = SubscribeOper(db=db).get(int(sid))
+                if tmdb_id is None:
+                    tmdb_id = getattr(sub, 'tmdbid', None)
+                if not mtype:
+                    mtype = (getattr(sub, 'type', '') or '').lower()
+            except Exception:
+                pass
+            if not tmdb_id:
+                tmdb_id = (data.get("mediainfo") or {}).get("tmdb_id") or (data.get("mediainfo") or {}).get("tmdbid")
+            if not mtype:
+                mtype = (data.get("mediainfo") or {}).get("type")
+            if not tmdb_id:
+                logger.info("mhnotify: SubscribeComplete 未获取到tmdb_id，跳过删除")
+                return
+            token = self.__mh_login()
+            if not token:
+                logger.warning("mhnotify: 登录MH失败，无法按tmdb_id删除订阅")
+                return
+            deleted = self.__mh_delete_by_tmdb(token, tmdb_id, media_type=mtype)
+            if deleted <= 0:
+                logger.info("mhnotify: 未按tmdb_id删除到任何MH订阅（drive115），可能未创建或类型不一致")
+        except Exception:
+            logger.error("mhnotify: 处理SubscribeComplete事件异常", exc_info=True)
     @eventmanager.register(EventType.PluginAction)
     def handle_cloud_download(self, event: Event):
         """远程命令触发：添加115云下载任务"""
