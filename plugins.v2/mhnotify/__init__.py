@@ -23,7 +23,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.1"
+    plugin_version = "1.6.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -4459,6 +4459,18 @@ class MHNotify(_PluginBase):
                             else:
                                 logger.error(f"mhnotify: 未找到云下载任务，可能已被删除")
                                 self._send_cloud_download_deleted_notification(task_name)
+                                try:
+                                    mapping = self.get_data(self._ASSIST_CLOUD_MAP_KEY) or {}
+                                    info = mapping.get(info_hash)
+                                    if info:
+                                        sid = info.get("sid")
+                                        with SessionFactory() as db:
+                                            SubscribeOper(db=db).update(int(sid), {"state": "R", "sites": []})
+                                        mapping.pop(info_hash, None)
+                                        self.save_data(self._ASSIST_CLOUD_MAP_KEY, mapping)
+                                        logger.info(f"mhnotify: 云下载任务已删除，已恢复MP订阅启用 sid={sid}")
+                                except Exception:
+                                    pass
                             break
                         
                         time.sleep(completed_check_interval)
