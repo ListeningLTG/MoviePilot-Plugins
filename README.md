@@ -5,6 +5,7 @@ MoviePilot 三方插件市场：https://github.com/imaliang/MoviePilot-Plugins/
 ## 插件合集
 
 - MediaHelper增强
+- 115网盘签到
 
 ## 感谢
 
