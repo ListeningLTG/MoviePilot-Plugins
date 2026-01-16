@@ -22,7 +22,7 @@ class p115sign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
     # 插件版本
-    plugin_version = "1.0"
+    plugin_version = "1.0.1"
      # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -158,10 +158,10 @@ class p115sign(_PluginBase):
                             if state and code == 0:
                                 if first_require_sign == 1:
                                     status = "签到成功"
-                                    msg = f"已连续签到{continuous_day}天，当前枫叶值为{points_num}"
+                                    msg = f"已连续签到{continuous_day}天，获得枫叶值为{points_num}"
                                 else:
                                     status = "已经签到过了"
-                                    msg = f"无需再签到，已连续签到{continuous_day}天，当前枫叶值为{points_num}"
+                                    msg = f"无需再签到，已连续签到{continuous_day}天，获得枫叶值为{points_num}"
                             else:
                                 status = "签到失败"
                                 msg = str(resp)
@@ -408,7 +408,7 @@ class p115sign(_PluginBase):
                                 {'component': 'thead', 'content': [{'component': 'tr', 'content': [
                                     {'component': 'th', 'text': '时间'},
                                     {'component': 'th', 'text': '状态'},
-                                    {'component': 'th', 'text': '枫叶'},
+                                    {'component': 'th', 'text': '获得枫叶'},
                                     {'component': 'th', 'text': '连续签到'}
                                 ]}]},
                                 {'component': 'tbody', 'content': history_rows}
