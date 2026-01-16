@@ -23,7 +23,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.2"
+    plugin_version = "1.6.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -5692,7 +5692,7 @@ class MHNotify(_PluginBase):
                 return
             
             # 提取分享码
-            share_id = self._extract_ali_share_code(share_url)
+            share_id, share_pwd = self._extract_ali_share_code(share_url)
             if not share_id:
                 logger.error(f"mhnotify: 无法从链接中提取分享码: {share_url}")
                 self.post_message(
@@ -5735,7 +5735,9 @@ class MHNotify(_PluginBase):
             
             # 获取分享 Token
             try:
-                share_token = ali_client.get_share_token(share_id)
+                share_token = ali_client.get_share_token(share_id, share_pwd=share_pwd)
+                if not getattr(share_token, 'share_token', None):
+                     raise Exception(f"获取Token异常，请检查提取码或链接是否有效: {share_token}")
                 logger.info(f"mhnotify: 获取分享 Token 成功")
             except Exception as e:
                 logger.error(f"mhnotify: 获取分享 Token 失败: {e}")
@@ -5867,39 +5869,63 @@ class MHNotify(_PluginBase):
             
             def collect_file_info(file):
                 nonlocal file_name_list
+                # 记录所有遍历到的文件ID，以便后续删除
                 if file.file_id not in remove_list:
                     remove_list.append(file.file_id)
                 
-                if file.type == "file" and file.name in file_name_list:
-                    try:
-                        url_info = ali_client.get_download_url(file_id=file.file_id)
-                        if url_info and url_info.url:
-                            info = {
-                                "url": url_info.url,
-                                "size": url_info.size,
-                                "name": file.name,
-                                "sha1": str(url_info.content_hash).upper(),
-                                "file_id": file.file_id  # 保存file_id用于重新获取下载链接
-                            }
-                            download_url_list.append(info)
-                            file_name_list = [n for n in file_name_list if n != file.name]
-                    except Exception as e:
-                        logger.warning(f"mhnotify: 获取文件 {file.name} 下载链接失败: {e}")
+                # 检查是否是我们需要的目标文件
+                if file.type == "file":
+                    # 尝试匹配文件名（不区分大小写，且忽略扩展名差异）
+                    matched_name = None
+                    for name in file_name_list:
+                        if name == file.name:
+                            matched_name = name
+                            break
+                    
+                    if matched_name:
+                        try:
+                            url_info = ali_client.get_download_url(file_id=file.file_id)
+                            if url_info and url_info.url:
+                                info = {
+                                    "url": url_info.url,
+                                    "size": url_info.size,
+                                    "name": matched_name,
+                                    "sha1": str(url_info.content_hash).upper(),
+                                    "file_id": file.file_id
+                                }
+                                download_url_list.append(info)
+                                file_name_list = [n for n in file_name_list if n != matched_name]
+                        except Exception as e:
+                            logger.warning(f"mhnotify: 获取文件 {file.name} 下载链接失败: {e}")
+
+            # 第一次全量刷新目录缓存，确保能获取到最新转存的文件
+            # 注意：ali_client.get_file_list 默认可能有缓存，尝试强制遍历
+            logger.info("mhnotify: 正在获取转存文件列表...")
             
-            # 最多尝试5次获取所有文件信息
-            for attempt in range(5):
+            # 最多尝试10次获取所有文件信息 (增加重试次数)
+            for attempt in range(10):
                 if not file_name_list:
                     break
                 walk_files(ali_folder_id, collect_file_info)
                 if file_name_list:
-                    sleep(2)
+                    logger.info(f"mhnotify: 尚有 {len(file_name_list)} 个文件未获取到下载信息，等待重试 ({attempt+1}/10)...")
+                    sleep(3)
             
             if not download_url_list:
                 logger.error("mhnotify: 未能获取任何文件的下载信息")
+                # 尝试列出当前目录下的文件，辅助排查
+                try:
+                    logger.info("mhnotify: 当前阿里云盘临时目录下的文件列表:")
+                    def log_file(f):
+                        logger.info(f"  - {f.name} ({f.type})")
+                    walk_files(ali_folder_id, log_file)
+                except:
+                    pass
+                
                 self.post_message(
                     channel=channel,
                     title="❌ 阿里云盘秒传失败",
-                    text="未能获取文件下载信息，请重试",
+                    text="未能获取文件下载信息，可能是阿里云盘转存尚未完成同步，请重试",
                     userid=userid
                 )
                 return
@@ -6044,29 +6070,55 @@ class MHNotify(_PluginBase):
             )
 
     @staticmethod
-    def _extract_ali_share_code(url: str) -> Optional[str]:
+    def _extract_ali_share_code(url: str) -> Tuple[Optional[str], Optional[str]]:
         """
-        从阿里云盘分享链接中提取分享码
+        从阿里云盘分享链接中提取分享码和提取码
         支持格式:
         - https://www.alipan.com/s/xxxxx
         - https://www.aliyundrive.com/s/xxxxx
+        - 链接后跟提取码/pwd/password
+        - 链接后直接跟4位提取码（空格分隔）
         """
-        from urllib.parse import urlparse
+        import re
+
+        share_code = None
+        share_pwd = None
+
         try:
-            parsed_url = urlparse(url)
-            path_parts = parsed_url.path.split("/")
-            if len(path_parts) >= 3 and path_parts[-2] == "s":
-                share_code = path_parts[-1]
-                if share_code:
-                    return share_code
-            # 尝试直接匹配 /s/ 后面的部分
-            if "/s/" in url:
-                share_code = url.split("/s/")[-1].split("/")[0].split("?")[0]
-                if share_code:
-                    return share_code
+            # 1. 提取分享ID (优先使用正则匹配)
+            match_id = re.search(r'/s/([a-zA-Z0-9]+)', url)
+            if match_id:
+                share_code = match_id.group(1)
+            else:
+                # 尝试简单分割（兼容性保留）
+                clean_url = url.split()[0].strip()
+                if "/s/" in clean_url:
+                    parts = clean_url.split("/s/")[-1].split("/")
+                    if parts:
+                        share_code = parts[0].split("?")[0]
+
+            # 2. 提取提取码
+            # 2.1 显式提取码 (提取码: xxxx, pwd=xxxx)
+            match_pwd_explicit = re.search(r'(?:提取码|pwd|password|code)[:=：\s]*([a-zA-Z0-9]{4})', url, re.IGNORECASE)
+            if match_pwd_explicit:
+                share_pwd = match_pwd_explicit.group(1)
+            
+            # 2.2 隐式提取码 (紧跟在链接后的4位字符)
+            # 仅当未找到显式提取码，且找到了share_code时尝试
+            if not share_pwd and share_code:
+                # 构造正则：匹配链接(包含share_code) + 可能的尾部字符 + 空白 + 4位字符 + (分隔符或结尾)
+                # 排除 http 开头以防匹配到下一个链接
+                pattern_implicit = rf'/s/{re.escape(share_code)}[/?]*[\s\u3000]+([a-zA-Z0-9]{{4}})(?:[;\s\n，。]|$)'
+                match_pwd_implicit = re.search(pattern_implicit, url)
+                if match_pwd_implicit:
+                    candidate = match_pwd_implicit.group(1)
+                    # 简单过滤：不能是 http 或 www 开头，不能纯数字(通常提取码含字母，但也可能是纯数字，这里不做强限制，只防常见单词)
+                    if not candidate.lower().startswith(('http', 'www', 'com', 'org', 'net')):
+                        share_pwd = candidate
+
         except Exception as e:
             logger.warning(f"mhnotify: 提取分享码异常: {e}")
-        return None
+        return share_code, share_pwd
 
     def __finish_mp_subscribe(self, subscribe):
         try:
