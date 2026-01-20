@@ -23,7 +23,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.3"
+    plugin_version = "1.6.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -180,30 +180,6 @@ class MHNotify(_PluginBase):
             except Exception:
                 self._hdhive_max_subscriptions = 20
             
-            # 清理助手订阅记录（运行一次）
-            try:
-                if bool(config.get("clear_once", False)):
-                    logger.info("mhnotify: 检测到清理助手订阅记录（运行一次）开关已开启，开始清理...")
-                    self._clear_all_records()
-                    # 复位为关闭，并更新配置
-                    config["clear_once"] = False
-                    self.update_config(config)
-                    logger.info("mhnotify: 助手订阅记录清理完成，已自动复位为关闭")
-            except Exception:
-                logger.error("mhnotify: 执行清理助手订阅记录失败", exc_info=True)
-            
-            # 清理助手云下载记录（运行一次）
-            try:
-                if bool(config.get("clear_cloud_download_once", False)):
-                    logger.info("mhnotify: 检测到清理助手云下载记录（运行一次）开关已开启，开始清理...")
-                    self._clear_cloud_download_records()
-                    # 复位为关闭，并更新配置
-                    config["clear_cloud_download_once"] = False
-                    self.update_config(config)
-                    logger.info("mhnotify: 助手云下载记录清理完成，已自动复位为关闭")
-            except Exception:
-                logger.error("mhnotify: 执行清理助手云下载记录失败", exc_info=True)
-
             # 115 生活事件
             self._p115_life_enabled = bool(config.get("p115_life_enabled", False))
             self._p115_cookie = config.get("p115_cookie", "") or ""
@@ -646,6 +622,7 @@ class MHNotify(_PluginBase):
         
         # 构建默认值字典，包含现有规则
         defaults = {
+            "_tabs": "tab_basic",
             "enabled": False,
             "mh_username": "",
             "mh_password": "",
@@ -654,8 +631,6 @@ class MHNotify(_PluginBase):
             "wait_minutes": 5,
             "mh_assist": False,
             "mh_assist_auto_delete": False,
-            "clear_once": False,
-            "clear_cloud_download_once": False,
             "hdhive_enabled": False,
             "hdhive_query_mode": "api",
             "hdhive_username": "",
@@ -682,6 +657,8 @@ class MHNotify(_PluginBase):
             "cloud_download_enabled": False,
             "cloud_download_path": "/云下载",
             "cloud_download_assist": False,
+            "cloud_download_remove_small_files": False,
+            "cloud_download_organize": False,
             "ali2115_enabled": False,
             "ali2115_token": "",
             "ali2115_ali_folder": "/秒传转存",
@@ -703,939 +680,96 @@ class MHNotify(_PluginBase):
             {
                 'component': 'VForm',
                 'content': [
-                    # 启用插件
                     {
-                        'component': 'VRow',
+                        'component': 'VTabs',
+                        'props': {
+                            'model': '_tabs',
+                            'fixed-tabs': True,
+                            'show-arrows': True,
+                            'slider-color': 'primary'
+                        },
                         'content': [
+                            {'component': 'VTab', 'props': {'value': 'tab_basic'}, 'text': '基础配置'},
+                            {'component': 'VTab', 'props': {'value': 'tab_monitor'}, 'text': '订阅辅助'},
+                            {'component': 'VTab', 'props': {'value': 'tab_life'}, 'text': '生活事件'},
+                            {'component': 'VTab', 'props': {'value': 'tab_cloud'}, 'text': '云下载'},
+                            {'component': 'VTab', 'props': {'value': 'tab_ali'}, 'text': '阿里云盘秒传'},
+                            {'component': 'VTab', 'props': {'value': 'tab_query'}, 'text': '资源查询'}
+                        ]
+                    },
+                    {
+                        'component': 'VWindow',
+                        'props': {
+                            'model': '_tabs'
+                        },
+                        'content': [
+                            # Tab 0: 基础配置
                             {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'component': 'VWindowItem',
+                                'props': {'value': 'tab_basic'},
                                 'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'enabled',
-                                            'label': '启用插件',
-                                        }
-                                    }
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'mh_domain', 'label': 'MediaHelper地址'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'mh_username', 'label': 'MediaHelper_用户名'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'mh_password', 'label': 'MediaHelper_密码', 'type': 'password'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'mh_job_names', 'label': 'strm任务名称（英文逗号分隔）', 'placeholder': '例如：115网盘1,115网盘2', 'hint': '填写strm生成任务名称；留空则默认匹配名称含“115网盘”'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VTextField', 'props': {'model': 'p115_cookie', 'label': '115 Cookie', 'type': 'password', 'placeholder': 'UID=...; CID=...; SEID=...（粘贴完整 Cookie）', 'hint': '从 115 网页版复制完整 Cookie；仅本地使用，不会对外发送'}}]}]}
                                 ]
                             },
+                            # Tab 1: 订阅辅助
                             {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'component': 'VWindowItem',
+                                'props': {'value': 'tab_monitor'},
                                 'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'mh_assist',
-                                            'label': 'mh订阅辅助（仅新订阅生效）',
-                                            'hint': '开启后，新添加的订阅将默认在MP中暂停，并由插件在MH创建订阅、延时查询进度、按规则删除或恢复MP订阅；不影响已有订阅'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'cloud_download_assist',
-                                            'label': '云下载辅助订阅（仅新电影订阅）',
-                                            'hint': '新订阅电影未完成时按质量优先级自动匹配资源并触发云下载；失败则恢复订阅启用'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    # MP完成后删除MH订阅
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'mh_assist_auto_delete',
-                                            'label': '取消或完成订阅后自动删除MH订阅',
-                                            'hint': '开启后，当MP订阅完成或取消时，自动删除或更新对应的MH115订阅。关闭则保留MH订阅'
-                                        }
-                                    }
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'mh_assist', 'label': 'mh订阅辅助（仅新订阅生效）', 'hint': '开启后，新添加的订阅将默认在MP中暂停，并由插件在MH创建订阅、延时查询进度、按规则删除或恢复MP订阅；不影响已有订阅'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'mh_assist_auto_delete', 'label': '取消或完成订阅后自动删除MH订阅', 'hint': '开启后，当MP订阅完成或取消时，自动删除或更新对应的MH115订阅。关闭则保留MH订阅'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'mp_event_enabled', 'label': 'MP事件触发（整理/刮削完成）', 'hint': '开启后，当MP整理或刮削媒体完成时，自动通知MH执行strm生成任务（无运行任务则立即触发）'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'mp_event_wait_minutes', 'label': 'MP事件等待分钟数', 'type': 'number', 'placeholder': '默认 5', 'hint': 'MP整理完成后，等待该分钟数以确保所有整理任务完成后再触发MH任务'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VSelect', 'props': {'model': 'mp_event_storages', 'label': '监听的存储类型', 'items': self._available_storages or [{'title': '本地', 'value': 'local'}, {'title': '115网盘', 'value': 'u115'}, {'title': '阿里云盘', 'value': 'alipan'}, {'title': 'RClone', 'value': 'rclone'}, {'title': 'OpenList', 'value': 'alist'}], 'multiple': True, 'chips': True, 'closable-chips': True, 'clearable': True, 'density': 'compact', 'hint': '留空则监听所有存储类型的整理/刮削事件'}}]}]}
                                 ]
                             },
+                            # Tab 2: 生活事件
                             {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'component': 'VWindowItem',
+                                'props': {'value': 'tab_life'},
                                 'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'mp_event_enabled',
-                                            'label': 'MP事件触发（整理/刮削完成）',
-                                            'hint': '开启后，当MP整理或刮削媒体完成时，自动通知MH执行strm生成任务（无运行任务则立即触发）'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'mp_event_wait_minutes',
-                                            'label': 'MP事件等待分钟数',
-                                            'type': 'number',
-                                            'placeholder': '默认 5',
-                                            'hint': 'MP整理完成后，等待该分钟数以确保所有整理任务完成后再触发MH任务'
-                                        }
-                                    }
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '可选：监听 115 生活事件（上传/移动/接收/新建/复制/删除）以触发 MH 的 strm 任务。'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'p115_life_enabled', 'label': '监听 115 生活事件'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 9}, 'content': [{'component': 'VAlert', 'props': {'type': 'warning', 'variant': 'tonal', 'density': 'compact', 'text': '下方可配置最多10条目录规则，每条规则包含目录路径和要监听的事件类型。事件留空表示监听该目录的所有事件。'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'span', 'props': {'class': 'text-subtitle-1 font-weight-bold'}, 'text': '📁 目录监听规则'}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'rule_count', 'label': '规则行数', 'type': 'number', 'min': 1, 'max': 10, 'density': 'compact', 'hint': '修改后保存即可增减规则行（1-10）'}}]}]},
+                                    *rule_rows,
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'p115_wait_minutes', 'label': '115 事件等待分钟数', 'type': 'number', 'placeholder': '默认 5', 'hint': '检测到 115 生活事件后，等待该分钟数；等待期间如有新生活事件将滚动延长，静默后才触发生成任务'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '当检测到匹配的 115 生活事件后，将在静默期结束时触发 MediaHelper 的 strm 任务'}}]}]}
                                 ]
                             },
+                            # Tab 3: 云下载
                             {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'component': 'VWindowItem',
+                                'props': {'value': 'tab_cloud'},
                                 'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'model': 'mp_event_storages',
-                                            'label': '监听的存储类型',
-                                            'items': self._available_storages or [
-                                                {'title': '本地', 'value': 'local'},
-                                                {'title': '115网盘', 'value': 'u115'},
-                                                {'title': '阿里云盘', 'value': 'alipan'},
-                                                {'title': 'RClone', 'value': 'rclone'},
-                                                {'title': 'OpenList', 'value': 'alist'}
-                                            ],
-                                            'multiple': True,
-                                            'chips': True,
-                                            'closable-chips': True,
-                                            'clearable': True,
-                                            'density': 'compact',
-                                            'hint': '留空则监听所有存储类型的整理/刮削事件'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    # 云下载配置
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'cloud_download_enabled',
-                                            'label': '启用115云下载功能',
-                                            'hint': '开启后，可使用 /mhol 命令添加115离线下载任务'
-                                        }
-                                    }
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'cloud_download_enabled', 'label': '启用115云下载功能', 'hint': '开启后，可使用 /mhol 命令添加115离线下载任务'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'cloud_download_path', 'label': '115云下载保存路径', 'placeholder': '/云下载', 'hint': '115网盘中保存离线下载文件的目录路径'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'cloud_download_remove_small_files', 'label': '剔除小文件', 'hint': '云下载完成后自动删除小于10MB的文件', 'persistent-hint': True}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'cloud_download_organize', 'label': '移动整理', 'hint': '云下载完成后自动移动到MH默认目录并整理', 'persistent-hint': True}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'cloud_download_assist', 'label': '云下载辅助订阅（仅新电影订阅）', 'hint': '新订阅电影未完成时按质量优先级自动匹配资源并触发云下载；失败则恢复订阅启用'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VSwitch', 'props': {'model': 'clear_cloud_download_once', 'label': '清理助手云下载记录（运行一次）', 'hint': '⚠️ 开启后点保存立即清除本助手里的云下载监控记录，清理后将无法再监听之前添加的云下载任务记录。当前版本云下载使用实时线程监控（预留接口），操作后自动复位为关闭'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'density': 'comfortable', 'text': '/mhol — 添加115云下载任务；传入磁力链接，保存到配置的云下载路径。支持多个链接，用英文逗号、空格或换行分隔。'}}]}]}
                                 ]
                             },
+                            # Tab 4: 阿里云盘秒传
                             {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'component': 'VWindowItem',
+                                'props': {'value': 'tab_ali'},
                                 'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'cloud_download_path',
-                                            'label': '115云下载保存路径',
-                                            'placeholder': '/云下载',
-                                            'hint': '115网盘中保存离线下载文件的目录路径'
-                                        }
-                                    }
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'ali2115_enabled', 'label': '启用阿里云盘秒传', 'hint': '开启后，可使用 /mhaly2115 命令将阿里云盘分享秒传到115'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'ali2115_organize', 'label': '秒传后移动整理', 'hint': '秒传完成后自动移动到MH默认目录并整理', 'persistent-hint': True}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'ali2115_ali_folder', 'label': '阿里云盘临时文件夹', 'placeholder': '/秒传转存', 'hint': '阿里云盘中用于临时转存分享文件的目录'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'ali2115_115_folder', 'label': '115云盘秒传接收文件夹', 'placeholder': '/秒传接收', 'hint': '115网盘中接收秒传文件的目录'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VTextField', 'props': {'model': 'ali2115_token', 'label': '阿里云盘 Refresh Token', 'type': 'password', 'placeholder': '输入阿里云盘的 refresh_token', 'hint': '从阿里云盘客户端或浏览器获取的 refresh_token，用于认证阿里云盘API'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'density': 'comfortable', 'text': '/mhaly2115 — 阿里云盘分享秒传到115；需已配置阿里云盘Refresh Token。'}}]}]}
                                 ]
                             },
+                            # Tab 5: 资源查询
                             {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 4},
+                                'component': 'VWindowItem',
+                                'props': {'value': 'tab_query'},
                                 'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'cloud_download_remove_small_files',
-                                            'label': '剔除小文件',
-                                            'hint': '云下载完成后自动删除小于10MB的文件',
-                                            'persistent-hint': True
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 4},
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'cloud_download_organize',
-                                            'label': '移动整理',
-                                            'hint': '云下载完成后自动移动到MH默认目录并整理',
-                                            'persistent-hint': True
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    # 阿里云盘秒传配置
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 4},
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'ali2115_enabled',
-                                            'label': '启用阿里云盘秒传',
-                                            'hint': '开启后，可使用 /mhaly2115 命令将阿里云盘分享秒传到115'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 4},
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'ali2115_organize',
-                                            'label': '秒传后移动整理',
-                                            'hint': '秒传完成后自动移动到MH默认目录并整理',
-                                            'persistent-hint': True
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'ali2115_ali_folder',
-                                            'label': '阿里云盘临时文件夹',
-                                            'placeholder': '/秒传转存',
-                                            'hint': '阿里云盘中用于临时转存分享文件的目录'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'ali2115_115_folder',
-                                            'label': '115云盘秒传接收文件夹',
-                                            'placeholder': '/秒传接收',
-                                            'hint': '115网盘中接收秒传文件的目录'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12},
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'ali2115_token',
-                                            'label': '阿里云盘 Refresh Token',
-                                            'type': 'password',
-                                            'placeholder': '输入阿里云盘的 refresh_token',
-                                            'hint': '从阿里云盘客户端或浏览器获取的 refresh_token，用于认证阿里云盘API'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    # 115 Cookie
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'p115_cookie',
-                                            'label': '115 Cookie',
-                                            'type': 'password',
-                                            'placeholder': 'UID=...; CID=...; SEID=...（粘贴完整 Cookie）',
-                                            'hint': '从 115 网页版复制完整 Cookie；仅本地使用，不会对外发送'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    # 分隔线
-                    {
-                        'component': 'VRow',
-                        'props': {'class': 'mt-4'},
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12},
-                                'content': [
-                                    {
-                                        'component': 'VDivider'
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'text': '可选：监听 115 生活事件（上传/移动/接收/新建/复制/删除）以触发 MH 的 strm 任务。'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'p115_life_enabled',
-                                            'label': '监听 115 生活事件'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 9
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'warning',
-                                            'variant': 'tonal',
-                                            'density': 'compact',
-                                            'text': '下方可配置最多10条目录规则，每条规则包含目录路径和要监听的事件类型。事件留空表示监听该目录的所有事件。'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    # 目录规则标题
-                    {
-                        'component': 'VRow',
-                        'props': {'class': 'mt-4'},
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12},
-                                'content': [
-                                    {
-                                        'component': 'VDivider'
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
-                                'content': [
-                                    {
-                                        'component': 'span',
-                                        'props': {'class': 'text-subtitle-1 font-weight-bold'},
-                                        'text': '📁 目录监听规则'
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'rule_count',
-                                            'label': '规则行数',
-                                            'type': 'number',
-                                            'min': 1,
-                                            'max': 10,
-                                            'density': 'compact',
-                                            'hint': '修改后保存即可增减规则行（1-10）'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    # 规则行
-                    *rule_rows,
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'p115_wait_minutes',
-                                            'label': '115 事件等待分钟数',
-                                            'type': 'number',
-                                            'placeholder': '默认 5',
-                                            'hint': '检测到 115 生活事件后，等待该分钟数；等待期间如有新生活事件将滚动延长，静默后才触发生成任务'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'text': 'HDHive资源查询：支持 Playwright/API 两种模式，获取免费 115 分享链接并自动作为自定义链接随订阅传入'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'hdhive_enabled',
-                                            'label': '启用 HDHive'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSelect',
-                                        'props': {
-                                            'model': 'hdhive_query_mode',
-                                            'label': 'HDHive 查询模式',
-                                            'items': [
-                                                { 'title': 'Playwright', 'value': 'playwright' },
-                                                { 'title': 'API', 'value': 'api' }
-                                            ],
-                                            'clearable': False
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'hdhive_username',
-                                            'label': 'HDHive 用户名'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'hdhive_password',
-                                            'label': 'HDHive 密码',
-                                            'type': 'password'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'hdhive_cookie',
-                                            'label': 'HDHive Cookie（API 模式）',
-                                            'type': 'password'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'hdhive_auto_refresh',
-                                            'label': '自动刷新 Cookie'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'hdhive_refresh_before',
-                                            'label': 'Cookie提前刷新秒数',
-                                            'type': 'number',
-                                            'placeholder': '默认 3600'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'hdhive_refresh_enabled',
-                                            'label': '启用HDHive资源定时刷新',
-                                            'hint': '开启后按Cron周期刷新MH订阅的自定义链接'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 9},
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'hdhive_refresh_cron',
-                                            'label': '刷新计划 Cron',
-                                            'placeholder': '例如：0 */6 * * *（每6小时）',
-                                            'hint': '使用标准Crontab表达式'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'hdhive_max_subscriptions',
-                                            'label': '最多订阅条数',
-                                            'type': 'number',
-                                            'placeholder': '默认 20',
-                                            'hint': '仅处理启用且为115的前 N 条订阅'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12},
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'hdhive_refresh_once',
-                                            'label': '运行一次HDHive资源刷新（保存后立即执行）',
-                                            'hint': '开启后保存将立即执行一次刷新任务，执行后自动复位为关闭'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'clear_once',
-                                            'label': '清理助手订阅记录（运行一次）',
-                                            'hint': '⚠️ 开启后点保存立即清除本助手里的MH订阅监听记录（pending/watch），清理后将无法再监听之前添加的MH订阅记录。用于移除脏数据或重置助手状态，操作后自动复位为关闭'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'clear_cloud_download_once',
-                                            'label': '清理助手云下载记录（运行一次）',
-                                            'hint': '⚠️ 开启后点保存立即清除本助手里的云下载监控记录，清理后将无法再监听之前添加的云下载任务记录。当前版本云下载使用实时线程监控（预留接口），操作后自动复位为关闭'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'mh_domain',
-                                            'label': 'MediaHelper地址'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'mh_username',
-                                            'label': 'MediaHelper_用户名'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'mh_password',
-                                            'label': 'MediaHelper_密码',
-                                            'type': 'password'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 12
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'mh_job_names',
-                                            'label': 'strm任务名称（英文逗号分隔）',
-                                            'placeholder': '例如：115网盘1,115网盘2',
-                                            'hint': '填写strm生成任务名称；留空则默认匹配名称含“115网盘”'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'text': '当检测到匹配的 115 生活事件后，将在静默期结束时触发 MediaHelper 的 strm 任务'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'text': '为避免频繁触发：启用生活事件静默窗口（默认5分钟）；窗口期间如有新事件将滚动延长，静默结束后再触发'
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'density': 'comfortable',
-                                            'title': '支持的远程命令'
-                                        }
-                                    },
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'density': 'comfortable',
-                                            'text': '/mhol — 添加115云下载任务；传入磁力链接，保存到配置的云下载路径。支持多个链接，用英文逗号、空格或换行分隔。'
-                                        }
-                                    },
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'density': 'comfortable',
-                                            'text': '/mhaly2115 — 阿里云盘分享秒传到115；需已配置阿里云盘Refresh Token。'
-                                        }
-                                    },
-                                    {
-                                        'component': 'VAlert',
-                                        'props': {
-                                            'type': 'info',
-                                            'variant': 'tonal',
-                                            'density': 'comfortable',
-                                            'text': '/mhrefresh [订阅1,订阅2,...] — HDHive资源刷新；支持多个订阅名称用英文逗号分隔。不带参数时刷新前N个启用的115订阅（N为“最多订阅条数”）。'
-                                        }
-                                    }
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': 'HDHive资源查询：支持 Playwright/API 两种模式，获取免费 115 分享链接并自动作为自定义链接随订阅传入'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_enabled', 'label': '启用 HDHive'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSelect', 'props': {'model': 'hdhive_query_mode', 'label': 'HDHive 查询模式', 'items': [{'title': 'Playwright', 'value': 'playwright'}, {'title': 'API', 'value': 'api'}], 'clearable': False}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_username', 'label': 'HDHive 用户名'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_password', 'label': 'HDHive 密码', 'type': 'password'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_cookie', 'label': 'HDHive Cookie（API 模式）', 'type': 'password'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_auto_refresh', 'label': '自动刷新 Cookie'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_refresh_before', 'label': 'Cookie提前刷新秒数', 'type': 'number', 'placeholder': '默认 3600'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_enabled', 'label': '启用HDHive资源定时刷新', 'hint': '开启后按Cron周期刷新MH订阅的自定义链接'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 9}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_refresh_cron', 'label': '刷新计划 Cron', 'placeholder': '例如：0 */6 * * *（每6小时）', 'hint': '使用标准Crontab表达式'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_max_subscriptions', 'label': '最多订阅条数', 'type': 'number', 'placeholder': '默认 20', 'hint': '仅处理启用且为115的前 N 条订阅'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_once', 'label': '运行一次HDHive资源刷新', 'hint': '开启后保存将立即执行一次刷新任务，执行后自动复位为关闭'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'density': 'comfortable', 'text': '/mhrefresh [订阅1,订阅2,...] — HDHive资源刷新；支持多个订阅名称用英文逗号分隔。不带参数时刷新前N个启用的115订阅（N为“最多订阅条数”）。'}}]}]}
                                 ]
                             }
                         ]
@@ -3895,28 +3029,7 @@ class MHNotify(_PluginBase):
         except Exception as e:
             logger.error(f"mhnotify: 助手调度异常: {e}")
 
-    def _clear_all_records(self) -> Dict[str, Any]:
-        """清理助手订阅记录（pending/watch），移除脏数据"""
-        try:
-            self.save_data(self._ASSIST_PENDING_KEY, {})
-            self.save_data(self._ASSIST_WATCH_KEY, {})
-            logger.info("mhnotify: 已清理助手订阅记录（pending/watch）")
-            return {"success": True}
-        except Exception as e:
-            logger.error(f"mhnotify: 清理助手订阅记录失败: {e}")
-            return {"success": False, "error": str(e)}
     
-    def _clear_cloud_download_records(self) -> Dict[str, Any]:
-        """清理助手云下载记录（预留接口）"""
-        try:
-            # 当前版本云下载使用daemon线程，无持久化数据需要清理
-            # 此方法为将来可能的云下载记录功能预留接口
-            logger.info("mhnotify: 云下载记录清理完成（当前版本无需清理）")
-            return {"success": True}
-        except Exception as e:
-            logger.error(f"mhnotify: 清理云下载记录失败: {e}")
-            return {"success": False, "error": str(e)}
-
     def _add_offline_download(self, url: str, start_monitor: bool = True) -> Tuple[bool, str, Dict[str, Any]]:
         """
         添加115离线下载任务
@@ -5816,7 +4929,7 @@ class MHNotify(_PluginBase):
                 return
             
             # 获取分享文件列表（递归）
-            media_exts = ['.mp4', '.mkv', '.avi', '.wmv', '.mov', '.flv', '.rmvb', '.rm', '.ts', '.m2ts', '.webm', '.mpg', '.mpeg', '.m4v', '.3gp']
+            media_exts = ['.mp4', '.mkv', '.avi', '.wmv', '.mov', '.flv', '.rmvb', '.rm', '.ts', '.m2ts', '.webm', '.mpg', '.mpeg', '.m4v', '.3gp', '.iso']
             
             def get_share_files(share_token, parent_file_id="root"):
                 """递归获取分享文件列表"""
