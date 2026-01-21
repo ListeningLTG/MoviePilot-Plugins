@@ -1,5 +1,6 @@
 import time
 import re
+import threading
 from urllib.parse import quote
 
 from typing import List, Tuple, Dict, Any, Optional, Union
@@ -23,7 +24,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.4"
+    plugin_version = "1.6.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -34,6 +35,10 @@ class MHNotify(_PluginBase):
     plugin_order = 1
     # 可使用的用户级别
     auth_level = 1
+
+    # 线程锁
+    _tmdb_locks: Dict[int, threading.Lock] = {}
+    _locks_lock = threading.Lock()
 
     # 私有属性
     _mh_domain = None
@@ -1694,185 +1699,191 @@ class MHNotify(_PluginBase):
                 return
             # 读取默认配置
             defaults = self.__mh_get_defaults(access_token)
-            # 若为剧集，聚合同一 TMDB 的多季订阅（电影不需要聚合季）
-            aggregate_seasons: Optional[List[int]] = None
-            # 判断媒体类型
-            sub_type = (getattr(subscribe, 'type', '') or '').strip().lower()
-            is_tv = sub_type in ('tv', '电视剧')
-            aggregate_seasons = []  # 初始化，电影时为空
-            
-            # 只有电视剧才进行聚合季逻辑
-            if is_tv:
-                try:
-                    # 取 tmdb_id
-                    tmdb_id = getattr(subscribe, 'tmdbid', None) or mediainfo_dict.get('tmdb_id') or mediainfo_dict.get('tmdbid')
-                    # 查询 MP 内相同 tmdb 的订阅，聚合季
-                    if tmdb_id:
-                        logger.info(f"mhnotify: 聚合季开始，tmdb_id={tmdb_id}")
-                        with SessionFactory() as db:
-                            all_subs = SubscribeOper(db=db).list_by_tmdbid(tmdb_id)
-                            logger.info(f"mhnotify: MP内同tmdb订阅数={len(all_subs or [])}")
-                            seasons = []
-                            for s in all_subs or []:
-                                try:
-                                    stype = (getattr(s, 'type', '') or '').strip()
-                                    stype_lower = (stype or '').lower()
-                                    if stype_lower == 'tv' or stype in {'电视剧'}:
-                                        # 优先使用订阅中的 season，其次从标题解析
-                                        s_season = getattr(s, 'season', None)
-                                        if s_season is None:
-                                            s_season = self.__extract_season_from_text(getattr(s, 'name', '') or '')
-                                        seasons.append(s_season)
-                                        logger.info(f"mhnotify: 订阅聚合候选 id={getattr(s,'id',None)} type={stype} season={getattr(s,'season',None)} parsed={s_season}")
-                                except Exception:
-                                    pass
-                        # 转换季为整数（支持字符串数字）
-                        for x in seasons:
-                            if isinstance(x, int):
-                                aggregate_seasons.append(x)
-                            elif isinstance(x, str) and x.isdigit():
-                                aggregate_seasons.append(int(x))
-                        # 过滤无效季号（None/0/负数）并去重排序
-                        aggregate_seasons = sorted({s for s in aggregate_seasons if isinstance(s, int) and s > 0})
-                        logger.info(f"mhnotify: 聚合季（转换后）={aggregate_seasons}")
-                        if aggregate_seasons:
-                            logger.info(f"mhnotify: 检测到该剧存在多季订阅，聚合季：{aggregate_seasons}")
-                        else:
-                            logger.info("mhnotify: 未聚合到季信息，将回退使用事件或订阅中的季")
-                except Exception:
-                    logger.warning("mhnotify: 聚合季信息失败", exc_info=True)
-            else:
-                # 电影类型不需要聚合季
-                logger.debug(f"mhnotify: 媒体类型为电影，跳过聚合季逻辑")
-            # 构建创建参数（若为TV将带入聚合季）
-            create_payload = self.__build_mh_create_payload(subscribe, mediainfo_dict, defaults, aggregate_seasons=aggregate_seasons)
-            if not create_payload:
-                logger.error("mhnotify: 构建MH订阅创建参数失败")
-                return
-            # 若已存在相同 tmdb_id 的 MH 订阅，则复用或重建（以聚合季为准）
-            existing_uuid: Optional[str] = None
-            existing_selected: List[int] = []
-            existing_custom_links: List[str] = []  # 保留现有订阅的自定义链接
-            try:
-                lst = self.__mh_list_subscriptions(access_token)
-                subs = (lst.get("data") or {}).get("subscriptions") or []
-                for rec in subs:
-                    params = rec.get("params") or {}
-                    if (params.get("cloud_type") or "").strip().lower() != "drive115":
-                        continue
-                    if params.get("tmdb_id") == create_payload.get("tmdb_id") and (params.get("media_type") or '').lower() == (create_payload.get("media_type") or '').lower():
-                        existing_uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
-                        try:
-                            existing_selected = [int(x) for x in (params.get("selected_seasons") or [])]
-                        except Exception:
-                            existing_selected = []
-                        # 获取现有订阅的自定义链接
-                        existing_custom_links = params.get("user_custom_links") or []
-                        if existing_custom_links:
-                            logger.info(f"mhnotify: 现有MH订阅已有 {len(existing_custom_links)} 个自定义链接")
-                        logger.info(f"mhnotify: 现有MH订阅命中 tmdb_id={params.get('tmdb_id')} uuid={existing_uuid} seasons={existing_selected}")
-                        break
-                if existing_uuid:
-                    agg_set = set(create_payload.get("selected_seasons") or [])
-                    exist_set = set(existing_selected or [])
-                    if agg_set and agg_set != exist_set:
-                        # 需要包含更多季：优先尝试更新订阅季集合；失败则重建
-                        # 更新时保留现有的自定义链接
-                        if existing_custom_links:
-                            create_payload["user_custom_links"] = existing_custom_links
-                        logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，季集合不一致，尝试更新为 {sorted(agg_set)}")
-                        upd = self.__mh_update_subscription(access_token, existing_uuid, create_payload)
-                        if upd:
-                            logger.info(f"mhnotify: 已更新现有订阅 {existing_uuid} 为聚合季 {sorted(agg_set)}")
-                        else:
-                            logger.info(f"mhnotify: 更新失败，改为重建订阅为聚合季 {sorted(agg_set)}")
-                            self.__mh_delete_subscription(access_token, existing_uuid)
-                            existing_uuid = None
-                    else:
-                        # 完全一致：直接复用（按媒体类型输出提示）
-                        if is_tv:
-                            logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，季集合一致，复用该订阅")
-                        else:
-                            logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，电影信息一致，复用该订阅")
-            except Exception:
-                logger.warning("mhnotify: 检查现有MH订阅失败", exc_info=True)
-            # HDHive 查询自定义链接
-            links: List[str] = []
-            try:
-                links = self.__fetch_hdhive_links(
-                    tmdb_id=create_payload.get("tmdb_id"),
-                    media_type=create_payload.get("media_type")
-                )
-                if links:
-                    logger.info(f"mhnotify: HDHive 获取到 {len(links)} 个免费115链接")
-            except Exception:
-                logger.error("mhnotify: HDHive 查询链接失败", exc_info=True)
-            
-            # 合并现有自定义链接与新查询的 HDHive 链接（去重）
-            merged_links: List[str] = list(existing_custom_links)  # 保留现有链接
-            if links:
-                # 提取链接的核心标识用于去重（去除协议前缀和尾部参数差异）
-                def extract_link_key(link: str) -> str:
-                    """提取链接的核心部分用于去重比较"""
-                    # 移除协议前缀
-                    key = link.replace("https://", "").replace("http://", "")
-                    # 移除尾部的 & 或 空格
-                    key = key.rstrip("& ")
-                    return key.lower()
+
+            # 提取 tmdb_id 并加锁，防止多季并发添加导致重复创建 MH 订阅
+            tmdb_id = getattr(subscribe, 'tmdbid', None) or mediainfo_dict.get('tmdb_id') or mediainfo_dict.get('tmdbid')
+
+            with self._get_tmdb_lock(tmdb_id):
+                # 若为剧集，聚合同一 TMDB 的多季订阅（电影不需要聚合季）
+                aggregate_seasons: Optional[List[int]] = None
+                # 判断媒体类型
+                sub_type = (getattr(subscribe, 'type', '') or '').strip().lower()
+                is_tv = sub_type in ('tv', '电视剧')
+                aggregate_seasons = []  # 初始化，电影时为空
                 
-                existing_keys = set(extract_link_key(l) for l in existing_custom_links)
-                new_count = 0
-                for link in links:
-                    link_key = extract_link_key(link)
-                    if link_key not in existing_keys:
-                        merged_links.append(link)
-                        existing_keys.add(link_key)
-                        new_count += 1
-                if new_count > 0:
-                    logger.info(f"mhnotify: 合并后共 {len(merged_links)} 个自定义链接（新增 {new_count} 个）")
-                else:
-                    logger.info(f"mhnotify: HDHive 链接已存在于现有自定义链接中，无需添加")
-            
-            # 设置 create_payload 的自定义链接（用于新建订阅）
-            if merged_links:
-                create_payload["user_custom_links"] = merged_links
-            
-            # 创建订阅（或复用现有）
-            mh_uuid = None
-            if existing_uuid:
-                mh_uuid = existing_uuid
-                # 如果有新的 HDHive 链接需要添加，更新现有订阅
-                if links and len(merged_links) > len(existing_custom_links):
+                # 只有电视剧才进行聚合季逻辑
+                if is_tv:
                     try:
-                        update_payload = {"user_custom_links": merged_links}
-                        upd_resp = self.__mh_update_subscription(access_token, existing_uuid, update_payload)
-                        if upd_resp:
-                            logger.info(f"mhnotify: 已将自定义链接更新到现有订阅 {existing_uuid}（共 {len(merged_links)} 个）")
-                        else:
-                            logger.warning(f"mhnotify: 更新现有订阅的自定义链接失败")
-                    except Exception as e:
-                        logger.warning(f"mhnotify: 更新现有订阅的自定义链接异常: {e}")
-            else:
-                resp = self.__mh_create_subscription(access_token, create_payload)
-                mh_uuid = (resp or {}).get("data", {}).get("subscription_id") or (resp or {}).get("data", {}).get("task", {}).get("uuid")
-            if not mh_uuid:
-                logger.error(f"mhnotify: MH订阅创建失败：{resp}")
-                return
-            # 与调度保持一致：首次查询延迟（默认2分钟）
-            delay_mins = max(1, int(self._assist_initial_delay_seconds / 60))
-            if existing_uuid:
-                logger.info(f"mhnotify: 复用现有MH订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
-                # 复用现有订阅时，触发立即执行查询（MH不会自动触发）
+                        # 取 tmdb_id (已在上方提取)
+                        # tmdb_id = getattr(subscribe, 'tmdbid', None) or mediainfo_dict.get('tmdb_id') or mediainfo_dict.get('tmdbid')
+                        # 查询 MP 内相同 tmdb 的订阅，聚合季
+                        if tmdb_id:
+                            logger.info(f"mhnotify: 聚合季开始，tmdb_id={tmdb_id}")
+                            with SessionFactory() as db:
+                                all_subs = SubscribeOper(db=db).list_by_tmdbid(tmdb_id)
+                                logger.info(f"mhnotify: MP内同tmdb订阅数={len(all_subs or [])}")
+                                seasons = []
+                                for s in all_subs or []:
+                                    try:
+                                        stype = (getattr(s, 'type', '') or '').strip()
+                                        stype_lower = (stype or '').lower()
+                                        if stype_lower == 'tv' or stype in {'电视剧'}:
+                                            # 优先使用订阅中的 season，其次从标题解析
+                                            s_season = getattr(s, 'season', None)
+                                            if s_season is None:
+                                                s_season = self.__extract_season_from_text(getattr(s, 'name', '') or '')
+                                            seasons.append(s_season)
+                                            logger.info(f"mhnotify: 订阅聚合候选 id={getattr(s,'id',None)} type={stype} season={getattr(s,'season',None)} parsed={s_season}")
+                                    except Exception:
+                                        pass
+                            # 转换季为整数（支持字符串数字）
+                            for x in seasons:
+                                if isinstance(x, int):
+                                    aggregate_seasons.append(x)
+                                elif isinstance(x, str) and x.isdigit():
+                                    aggregate_seasons.append(int(x))
+                            # 过滤无效季号（None/0/负数）并去重排序
+                            aggregate_seasons = sorted({s for s in aggregate_seasons if isinstance(s, int) and s > 0})
+                            logger.info(f"mhnotify: 聚合季（转换后）={aggregate_seasons}")
+                            if aggregate_seasons:
+                                logger.info(f"mhnotify: 检测到该剧存在多季订阅，聚合季：{aggregate_seasons}")
+                            else:
+                                logger.info("mhnotify: 未聚合到季信息，将回退使用事件或订阅中的季")
+                    except Exception:
+                        logger.warning("mhnotify: 聚合季信息失败", exc_info=True)
+                else:
+                    # 电影类型不需要聚合季
+                    logger.debug(f"mhnotify: 媒体类型为电影，跳过聚合季逻辑")
+                # 构建创建参数（若为TV将带入聚合季）
+                create_payload = self.__build_mh_create_payload(subscribe, mediainfo_dict, defaults, aggregate_seasons=aggregate_seasons)
+                if not create_payload:
+                    logger.error("mhnotify: 构建MH订阅创建参数失败")
+                    return
+                # 若已存在相同 tmdb_id 的 MH 订阅，则复用或重建（以聚合季为准）
+                existing_uuid: Optional[str] = None
+                existing_selected: List[int] = []
+                existing_custom_links: List[str] = []  # 保留现有订阅的自定义链接
                 try:
-                    access_token = self.__mh_login()
-                    if access_token and self.__mh_execute_subscription(access_token, mh_uuid):
-                        logger.info(f"mhnotify: 已触发复用订阅 {mh_uuid} 立即执行查询")
+                    lst = self.__mh_list_subscriptions(access_token)
+                    subs = (lst.get("data") or {}).get("subscriptions") or []
+                    for rec in subs:
+                        params = rec.get("params") or {}
+                        if (params.get("cloud_type") or "").strip().lower() != "drive115":
+                            continue
+                        if params.get("tmdb_id") == create_payload.get("tmdb_id") and (params.get("media_type") or '').lower() == (create_payload.get("media_type") or '').lower():
+                            existing_uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
+                            try:
+                                existing_selected = [int(x) for x in (params.get("selected_seasons") or [])]
+                            except Exception:
+                                existing_selected = []
+                            # 获取现有订阅的自定义链接
+                            existing_custom_links = params.get("user_custom_links") or []
+                            if existing_custom_links:
+                                logger.info(f"mhnotify: 现有MH订阅已有 {len(existing_custom_links)} 个自定义链接")
+                            logger.info(f"mhnotify: 现有MH订阅命中 tmdb_id={params.get('tmdb_id')} uuid={existing_uuid} seasons={existing_selected}")
+                            break
+                    if existing_uuid:
+                        agg_set = set(create_payload.get("selected_seasons") or [])
+                        exist_set = set(existing_selected or [])
+                        if agg_set and agg_set != exist_set:
+                            # 需要包含更多季：优先尝试更新订阅季集合；失败则重建
+                            # 更新时保留现有的自定义链接
+                            if existing_custom_links:
+                                create_payload["user_custom_links"] = existing_custom_links
+                            logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，季集合不一致，尝试更新为 {sorted(agg_set)}")
+                            upd = self.__mh_update_subscription(access_token, existing_uuid, create_payload)
+                            if upd:
+                                logger.info(f"mhnotify: 已更新现有订阅 {existing_uuid} 为聚合季 {sorted(agg_set)}")
+                            else:
+                                logger.info(f"mhnotify: 更新失败，改为重建订阅为聚合季 {sorted(agg_set)}")
+                                self.__mh_delete_subscription(access_token, existing_uuid)
+                                existing_uuid = None
+                        else:
+                            # 完全一致：直接复用（按媒体类型输出提示）
+                            if is_tv:
+                                logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，季集合一致，复用该订阅")
+                            else:
+                                logger.info(f"mhnotify: 发现现有MH订阅 {existing_uuid}，电影信息一致，复用该订阅")
+                except Exception:
+                    logger.warning("mhnotify: 检查现有MH订阅失败", exc_info=True)
+                # HDHive 查询自定义链接
+                links: List[str] = []
+                try:
+                    links = self.__fetch_hdhive_links(
+                        tmdb_id=create_payload.get("tmdb_id"),
+                        media_type=create_payload.get("media_type")
+                    )
+                    if links:
+                        logger.info(f"mhnotify: HDHive 获取到 {len(links)} 个免费115链接")
+                except Exception:
+                    logger.error("mhnotify: HDHive 查询链接失败", exc_info=True)
+                
+                # 合并现有自定义链接与新查询的 HDHive 链接（去重）
+                merged_links: List[str] = list(existing_custom_links)  # 保留现有链接
+                if links:
+                    # 提取链接的核心标识用于去重（去除协议前缀和尾部参数差异）
+                    def extract_link_key(link: str) -> str:
+                        """提取链接的核心部分用于去重比较"""
+                        # 移除协议前缀
+                        key = link.replace("https://", "").replace("http://", "")
+                        # 移除尾部的 & 或 空格
+                        key = key.rstrip("& ")
+                        return key.lower()
+                    
+                    existing_keys = set(extract_link_key(l) for l in existing_custom_links)
+                    new_count = 0
+                    for link in links:
+                        link_key = extract_link_key(link)
+                        if link_key not in existing_keys:
+                            merged_links.append(link)
+                            existing_keys.add(link_key)
+                            new_count += 1
+                    if new_count > 0:
+                        logger.info(f"mhnotify: 合并后共 {len(merged_links)} 个自定义链接（新增 {new_count} 个）")
                     else:
-                        logger.warning(f"mhnotify: 触发复用订阅执行失败")
-                except Exception as e:
-                    logger.warning(f"mhnotify: 触发复用订阅执行异常: {e}")
-            else:
-                logger.info(f"mhnotify: 已在MH创建订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
+                        logger.info(f"mhnotify: HDHive 链接已存在于现有自定义链接中，无需添加")
+                
+                # 设置 create_payload 的自定义链接（用于新建订阅）
+                if merged_links:
+                    create_payload["user_custom_links"] = merged_links
+                
+                # 创建订阅（或复用现有）
+                mh_uuid = None
+                if existing_uuid:
+                    mh_uuid = existing_uuid
+                    # 如果有新的 HDHive 链接需要添加，更新现有订阅
+                    if links and len(merged_links) > len(existing_custom_links):
+                        try:
+                            update_payload = {"user_custom_links": merged_links}
+                            upd_resp = self.__mh_update_subscription(access_token, existing_uuid, update_payload)
+                            if upd_resp:
+                                logger.info(f"mhnotify: 已将自定义链接更新到现有订阅 {existing_uuid}（共 {len(merged_links)} 个）")
+                            else:
+                                logger.warning(f"mhnotify: 更新现有订阅的自定义链接失败")
+                        except Exception as e:
+                            logger.warning(f"mhnotify: 更新现有订阅的自定义链接异常: {e}")
+                else:
+                    resp = self.__mh_create_subscription(access_token, create_payload)
+                    mh_uuid = (resp or {}).get("data", {}).get("subscription_id") or (resp or {}).get("data", {}).get("task", {}).get("uuid")
+                if not mh_uuid:
+                    logger.error(f"mhnotify: MH订阅创建失败：{resp}")
+                    return
+                # 与调度保持一致：首次查询延迟（默认2分钟）
+                delay_mins = max(1, int(self._assist_initial_delay_seconds / 60))
+                if existing_uuid:
+                    logger.info(f"mhnotify: 复用现有MH订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
+                    # 复用现有订阅时，触发立即执行查询（MH不会自动触发）
+                    try:
+                        access_token = self.__mh_login()
+                        if access_token and self.__mh_execute_subscription(access_token, mh_uuid):
+                            logger.info(f"mhnotify: 已触发复用订阅 {mh_uuid} 立即执行查询")
+                        else:
+                            logger.warning(f"mhnotify: 触发复用订阅执行失败")
+                    except Exception as e:
+                        logger.warning(f"mhnotify: 触发复用订阅执行异常: {e}")
+                else:
+                    logger.info(f"mhnotify: 已在MH创建订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
+            
             # 记录待检查项
             pending: Dict[str, dict] = self.get_data(self._ASSIST_PENDING_KEY) or {}
             pending[str(sub_id)] = {
@@ -1906,6 +1917,20 @@ class MHNotify(_PluginBase):
     # 旧屏蔽逻辑移除
 
     # 旧屏蔽逻辑移除
+
+    def _get_tmdb_lock(self, tmdb_id: Union[int, str]) -> threading.Lock:
+        """获取指定tmdb_id的锁"""
+        if not tmdb_id:
+            return self._locks_lock
+        try:
+            tid = int(tmdb_id)
+        except:
+            return self._locks_lock
+            
+        with self._locks_lock:
+            if tid not in self._tmdb_locks:
+                self._tmdb_locks[tid] = threading.Lock()
+            return self._tmdb_locks[tid]
 
     def __mh_login(self) -> Optional[str]:
         """登录 MH 获取 access_token"""
@@ -2266,7 +2291,7 @@ class MHNotify(_PluginBase):
             logger.error("mhnotify: 按标题删除MH订阅异常", exc_info=True)
             return 0
 
-    def __mh_delete_by_tmdb(self, access_token: str, tmdb_id: Union[str, int], media_type: Optional[str] = None) -> int:
+    def __mh_delete_by_tmdb(self, access_token: str, tmdb_id: Union[str, int], media_type: Optional[str] = None, season: Optional[int] = None) -> int:
         try:
             if not tmdb_id:
                 return 0
@@ -2282,9 +2307,42 @@ class MHNotify(_PluginBase):
                 pmtype = str(params.get("media_type") or "").lower().strip()
                 if cloud == "drive115" and ptmdb == tmdb_norm and (not mtype_norm or pmtype == mtype_norm):
                     uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
-                    if uuid and self.__mh_delete_subscription(access_token, uuid):
-                        count += 1
-            logger.info(f"mhnotify: 按tmdb_id删除MH订阅 tmdb_id={tmdb_norm} type={mtype_norm or '*'} 已删除数量={count}")
+                    if not uuid:
+                        continue
+                    
+                    # 检查是否指定了删除特定季
+                    if season is not None:
+                        # 获取MH订阅当前的季列表
+                        current_seasons = params.get("selected_seasons") or []
+                        # 转换为int列表以便比较
+                        try:
+                            current_seasons_int = [int(s) for s in current_seasons]
+                        except:
+                            current_seasons_int = []
+                        
+                        target_season = int(season)
+                        
+                        if target_season in current_seasons_int:
+                            # 如果包含该季，则移除
+                            new_seasons = [s for s in current_seasons_int if s != target_season]
+                            
+                            if not new_seasons:
+                                # 如果移除后为空，则删除整个订阅
+                                logger.info(f"mhnotify: 订阅 {rec.get('name')} 移除季 {target_season} 后为空，执行删除")
+                                if self.__mh_delete_subscription(access_token, uuid):
+                                    count += 1
+                            else:
+                                # 如果还有其他季，则更新订阅
+                                logger.info(f"mhnotify: 订阅 {rec.get('name')} 移除季 {target_season}，剩余 {new_seasons}")
+                                update_payload = {"selected_seasons": new_seasons}
+                                self.__mh_update_subscription(access_token, uuid, update_payload)
+                                # 这里不算作删除数量，但已经处理了
+                        else:
+                            logger.info(f"mhnotify: 订阅 {rec.get('name')} 不包含季 {target_season}，跳过处理")
+                    else:
+                        if self.__mh_delete_subscription(access_token, uuid):
+                            count += 1
+            logger.info(f"mhnotify: 按tmdb_id删除MH订阅 tmdb_id={tmdb_norm} type={mtype_norm or '*'} season={season} 已删除数量={count}")
             return count
         except Exception:
             logger.error("mhnotify: 按tmdb_id删除MH订阅异常", exc_info=True)
@@ -4475,12 +4533,14 @@ class MHNotify(_PluginBase):
             # 获取 tmdb_id 与媒体类型
             tmdb_id = None
             mtype = None
+            season = None
             # 优先从事件 subscribe_info 读取
             try:
                 si = (data.get("subscribe_info") or data.get("subscribe") or {}) or {}
                 tmdb_id = si.get("tmdbid") or si.get("tmdb_id")
                 mtype = self.__normalize_media_type(si.get("type"), si.get("type"))
-                logger.info(f"mhnotify: SubscribeDeleted subscribe_info 提取 name={si.get('name')} tmdbid={tmdb_id} type={si.get('type')}")
+                season = si.get("season")
+                logger.info(f"mhnotify: SubscribeDeleted subscribe_info 提取 name={si.get('name')} tmdbid={tmdb_id} type={si.get('type')} season={season}")
             except Exception:
                 pass
             try:
@@ -4490,6 +4550,8 @@ class MHNotify(_PluginBase):
                     tmdb_id = getattr(sub, 'tmdbid', None)
                 if not mtype:
                     mtype = (getattr(sub, 'type', '') or '').lower()
+                if season is None:
+                    season = getattr(sub, 'season', None)
             except Exception:
                 pass
             if not tmdb_id:
@@ -4503,7 +4565,7 @@ class MHNotify(_PluginBase):
             if not token:
                 logger.warning("mhnotify: 登录MH失败，无法按tmdb_id删除订阅")
                 return
-            deleted = self.__mh_delete_by_tmdb(token, tmdb_id, media_type=mtype)
+            deleted = self.__mh_delete_by_tmdb(token, tmdb_id, media_type=mtype, season=season)
             if deleted <= 0:
                 logger.info("mhnotify: 未按tmdb_id删除到任何MH订阅（drive115），可能未创建或类型不一致")
         except Exception:
@@ -4531,11 +4593,13 @@ class MHNotify(_PluginBase):
                     pass
             tmdb_id = None
             mtype = None
+            season = None
             try:
                 si = (data.get("subscribe_info") or data.get("subscribe") or {}) or {}
                 tmdb_id = si.get("tmdbid") or si.get("tmdb_id")
                 mtype = self.__normalize_media_type(si.get("type"), si.get("type"))
-                logger.info(f"mhnotify: SubscribeComplete subscribe_info 提取 name={si.get('name')} tmdbid={tmdb_id} type={si.get('type')}")
+                season = si.get("season")
+                logger.info(f"mhnotify: SubscribeComplete subscribe_info 提取 name={si.get('name')} tmdbid={tmdb_id} type={si.get('type')} season={season}")
             except Exception:
                 pass
             try:
@@ -4545,6 +4609,8 @@ class MHNotify(_PluginBase):
                     tmdb_id = getattr(sub, 'tmdbid', None)
                 if not mtype:
                     mtype = (getattr(sub, 'type', '') or '').lower()
+                if season is None:
+                    season = getattr(sub, 'season', None)
             except Exception:
                 pass
             if not tmdb_id:
@@ -4558,7 +4624,7 @@ class MHNotify(_PluginBase):
             if not token:
                 logger.warning("mhnotify: 登录MH失败，无法按tmdb_id删除订阅")
                 return
-            deleted = self.__mh_delete_by_tmdb(token, tmdb_id, media_type=mtype)
+            deleted = self.__mh_delete_by_tmdb(token, tmdb_id, media_type=mtype, season=season)
             if deleted <= 0:
                 logger.info("mhnotify: 未按tmdb_id删除到任何MH订阅（drive115），可能未创建或类型不一致")
         except Exception:
