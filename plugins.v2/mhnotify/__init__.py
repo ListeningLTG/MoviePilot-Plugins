@@ -24,7 +24,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.7"
+    plugin_version = "1.6.7.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2336,55 +2336,58 @@ class MHNotify(_PluginBase):
         try:
             if not tmdb_id:
                 return 0
-            lst = self.__mh_list_subscriptions(access_token, status="active", page_size=2000)
-            subs = (lst.get("data") or {}).get("subscriptions") or []
-            count = 0
-            tmdb_norm = str(tmdb_id)
-            mtype_norm = (str(media_type or "").lower().strip() or None)
-            for rec in subs:
-                params = rec.get("params") or {}
-                cloud = str(params.get("cloud_type") or "").strip().lower()
-                ptmdb = str(params.get("tmdb_id") or "")
-                pmtype = str(params.get("media_type") or "").lower().strip()
-                if cloud == "drive115" and ptmdb == tmdb_norm and (not mtype_norm or pmtype == mtype_norm):
-                    uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
-                    if not uuid:
-                        continue
-                    
-                    # 检查是否指定了删除特定季
-                    if season is not None:
-                        # 获取MH订阅当前的季列表
-                        current_seasons = params.get("selected_seasons") or []
-                        # 转换为int列表以便比较
-                        try:
-                            current_seasons_int = [int(s) for s in current_seasons]
-                        except:
-                            current_seasons_int = []
+            
+            # 使用 TMDB ID 锁，防止并发操作同一订阅
+            with self._get_tmdb_lock(tmdb_id):
+                lst = self.__mh_list_subscriptions(access_token, status="active", page_size=2000)
+                subs = (lst.get("data") or {}).get("subscriptions") or []
+                count = 0
+                tmdb_norm = str(tmdb_id)
+                mtype_norm = (str(media_type or "").lower().strip() or None)
+                for rec in subs:
+                    params = rec.get("params") or {}
+                    cloud = str(params.get("cloud_type") or "").strip().lower()
+                    ptmdb = str(params.get("tmdb_id") or "")
+                    pmtype = str(params.get("media_type") or "").lower().strip()
+                    if cloud == "drive115" and ptmdb == tmdb_norm and (not mtype_norm or pmtype == mtype_norm):
+                        uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
+                        if not uuid:
+                            continue
                         
-                        target_season = int(season)
-                        
-                        if target_season in current_seasons_int:
-                            # 如果包含该季，则移除
-                            new_seasons = [s for s in current_seasons_int if s != target_season]
+                        # 检查是否指定了删除特定季
+                        if season is not None:
+                            # 获取MH订阅当前的季列表
+                            current_seasons = params.get("selected_seasons") or []
+                            # 转换为int列表以便比较
+                            try:
+                                current_seasons_int = [int(s) for s in current_seasons]
+                            except:
+                                current_seasons_int = []
                             
-                            if not new_seasons:
-                                # 如果移除后为空，则删除整个订阅
-                                logger.info(f"mhnotify: 订阅 {rec.get('name')} 移除季 {target_season} 后为空，执行删除")
-                                if self.__mh_delete_subscription(access_token, uuid):
-                                    count += 1
+                            target_season = int(season)
+                            
+                            if target_season in current_seasons_int:
+                                # 如果包含该季，则移除
+                                new_seasons = [s for s in current_seasons_int if s != target_season]
+                                
+                                if not new_seasons:
+                                    # 如果移除后为空，则删除整个订阅
+                                    logger.info(f"mhnotify: 订阅 {rec.get('name')} 移除季 {target_season} 后为空，执行删除")
+                                    if self.__mh_delete_subscription(access_token, uuid):
+                                        count += 1
+                                else:
+                                    # 如果还有其他季，则更新订阅
+                                    logger.info(f"mhnotify: 订阅 {rec.get('name')} 移除季 {target_season}，剩余 {new_seasons}")
+                                    update_payload = {"selected_seasons": new_seasons}
+                                    self.__mh_update_subscription(access_token, uuid, update_payload)
+                                    # 这里不算作删除数量，但已经处理了
                             else:
-                                # 如果还有其他季，则更新订阅
-                                logger.info(f"mhnotify: 订阅 {rec.get('name')} 移除季 {target_season}，剩余 {new_seasons}")
-                                update_payload = {"selected_seasons": new_seasons}
-                                self.__mh_update_subscription(access_token, uuid, update_payload)
-                                # 这里不算作删除数量，但已经处理了
+                                logger.info(f"mhnotify: 订阅 {rec.get('name')} 不包含季 {target_season}，跳过处理")
                         else:
-                            logger.info(f"mhnotify: 订阅 {rec.get('name')} 不包含季 {target_season}，跳过处理")
-                    else:
-                        if self.__mh_delete_subscription(access_token, uuid):
-                            count += 1
-            logger.info(f"mhnotify: 按tmdb_id删除MH订阅 tmdb_id={tmdb_norm} type={mtype_norm or '*'} season={season} 已删除数量={count}")
-            return count
+                            if self.__mh_delete_subscription(access_token, uuid):
+                                count += 1
+                logger.info(f"mhnotify: 按tmdb_id删除MH订阅 tmdb_id={tmdb_norm} type={mtype_norm or '*'} season={season} 已删除数量={count}")
+                return count
         except Exception:
             logger.error("mhnotify: 按tmdb_id删除MH订阅异常", exc_info=True)
             return 0
@@ -2995,8 +2998,15 @@ class MHNotify(_PluginBase):
                                             logger.info(f"mhnotify: 云下载辅助：BTL资源条数={len(details) if isinstance(details, list) else 0}")
                                             if not details:
                                                 logger.info("mhnotify: BTL详情查询失败或无资源，恢复订阅启用")
+                                                # with SessionFactory() as db:
+                                                #     SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                                # 恢复订阅启用时，不应该将 sites 置空，否则无法洗版
                                                 with SessionFactory() as db:
-                                                    SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                                    # 获取原始订阅信息
+                                                    origin_sub = SubscribeOper(db=db).get(subscribe.id)
+                                                    if origin_sub:
+                                                        # 恢复订阅状态为 R，不修改 sites，保留原有的站点配置以便洗版
+                                                        SubscribeOper(db=db).update(subscribe.id, {"state": "R"})
                                                 pending.pop(sid, None)
                                                 self.save_data(self._ASSIST_PENDING_KEY, pending)
                                             else:
@@ -5400,6 +5410,10 @@ class MHNotify(_PluginBase):
 
     def __finish_mp_subscribe(self, subscribe):
         try:
+            # 恢复订阅状态为 R，不修改 sites，保留原有的站点配置以便洗版
+            with SessionFactory() as db:
+                SubscribeOper(db=db).update(subscribe.id, {"state": "R"})
+            
             # 生成元数据
             from app.core.metainfo import MetaInfo
             from app.schemas.types import MediaType
