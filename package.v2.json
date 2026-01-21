@@ -3,11 +3,12 @@
     "name": "MediaHelper增强",
     "description": "配合MediaHelper使用的一些小功能",
     "labels": "开发",
-    "version": "1.6.7.1",
+    "version": "1.6.8",
     "icon": "mh.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.6.8": "添加忽略MP洗版订阅",
       "v1.6.7.1": "优化批量删除订阅的逻辑",
       "v1.6.7": "优化日志显示",
       "v1.6.6": "优化电视剧的订阅进度查询",

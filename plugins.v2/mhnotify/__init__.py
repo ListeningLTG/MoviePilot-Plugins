@@ -24,7 +24,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.7.1"
+    plugin_version = "1.6.8"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -295,8 +295,13 @@ class MHNotify(_PluginBase):
             self._cloud_download_remove_small_files = bool(config.get("cloud_download_remove_small_files", False))
             self._cloud_download_organize = bool(config.get("cloud_download_organize", False))
             self._cloud_download_assist = bool(config.get("cloud_download_assist", False))
+            # 忽略MP洗版订阅开关
+            self._ignore_mp_wash = bool(config.get("ignore_mp_wash", False))
+            
             if self._cloud_download_assist:
                 logger.info("mhnotify: 云下载辅助订阅功能已开启（仅新电影订阅生效）")
+            if self._ignore_mp_wash:
+                logger.info("mhnotify: 忽略MP洗版订阅功能已开启")
             
             # 阿里云盘秒传配置
             self._ali2115_enabled = bool(config.get("ali2115_enabled", False))
@@ -677,6 +682,7 @@ class MHNotify(_PluginBase):
             "wait_minutes": 5,
             "mh_assist": False,
             "mh_assist_auto_delete": False,
+            "ignore_mp_wash": False,
             "hdhive_enabled": False,
             "hdhive_query_mode": "api",
             "hdhive_username": "",
@@ -766,6 +772,7 @@ class MHNotify(_PluginBase):
                                 'props': {'value': 'tab_monitor'},
                                 'content': [
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'mh_assist', 'label': 'mh订阅辅助（仅新订阅生效）', 'hint': '开启后，新添加的订阅将默认在MP中暂停，并由插件在MH创建订阅、延时查询进度、按规则删除或恢复MP订阅；不影响已有订阅'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'mh_assist_auto_delete', 'label': '取消或完成订阅后自动删除MH订阅', 'hint': '开启后，当MP订阅完成或取消时，自动删除或更新对应的MH115订阅。关闭则保留MH订阅'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'ignore_mp_wash', 'label': '忽略MP洗版订阅', 'hint': '开启后，当检测到MH订阅完成时，不进入洗版流程，直接完成MP订阅'}}]}]},
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'mp_event_enabled', 'label': 'MP事件触发（整理/刮削完成）', 'hint': '开启后，当MP整理或刮削媒体完成时，自动通知MH执行strm生成任务（无运行任务则立即触发）'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'mp_event_wait_minutes', 'label': 'MP事件等待分钟数', 'type': 'number', 'placeholder': '默认 5', 'hint': 'MP整理完成后，等待该分钟数以确保所有整理任务完成后再触发MH任务'}}]}]},
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VSelect', 'props': {'model': 'mp_event_storages', 'label': '监听的存储类型', 'items': self._available_storages or [{'title': '本地', 'value': 'local'}, {'title': '115网盘', 'value': 'u115'}, {'title': '阿里云盘', 'value': 'alipan'}, {'title': 'RClone', 'value': 'rclone'}, {'title': 'OpenList', 'value': 'alist'}], 'multiple': True, 'chips': True, 'closable-chips': True, 'clearable': True, 'density': 'compact', 'hint': '留空则监听所有存储类型的整理/刮削事件'}}]}]}
                                 ]
@@ -790,7 +797,6 @@ class MHNotify(_PluginBase):
                                 'content': [
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'cloud_download_enabled', 'label': '启用115云下载功能', 'hint': '开启后，可使用 /mhol 命令添加115离线下载任务'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'cloud_download_path', 'label': '115云下载保存路径', 'placeholder': '/云下载', 'hint': '115网盘中保存离线下载文件的目录路径'}}]}]},
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'cloud_download_remove_small_files', 'label': '剔除小文件', 'hint': '云下载完成后自动删除小于10MB的文件', 'persistent-hint': True}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'cloud_download_organize', 'label': '移动整理', 'hint': '云下载完成后自动移动到MH默认目录并整理', 'persistent-hint': True}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'cloud_download_assist', 'label': '云下载辅助订阅（仅新电影订阅）', 'hint': '新订阅电影未完成时按质量优先级自动匹配资源并触发云下载；失败则恢复订阅启用'}}]}]},
-                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VSwitch', 'props': {'model': 'clear_cloud_download_once', 'label': '清理助手云下载记录（运行一次）', 'hint': '⚠️ 开启后点保存立即清除本助手里的云下载监控记录，清理后将无法再监听之前添加的云下载任务记录。当前版本云下载使用实时线程监控（预留接口），操作后自动复位为关闭'}}]}]},
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'density': 'comfortable', 'text': '/mhol — 添加115云下载任务；传入磁力链接，保存到配置的云下载路径。支持多个链接，用英文逗号、空格或换行分隔。'}}]}]}
                                 ]
                             },
@@ -1726,7 +1732,7 @@ class MHNotify(_PluginBase):
                 subscribe = SubscribeOper(db=db).get(sub_id)
                 if not subscribe:
                     return
-                SubscribeOper(db=db).update(sub_id, {"state": "S", "sites": [-1]})
+                SubscribeOper(db=db).update(sub_id, {"state": "S"})
                 # 重新获取，确保季号等字段已正确加载
                 subscribe = SubscribeOper(db=db).get(sub_id)
                 try:
@@ -2999,13 +3005,12 @@ class MHNotify(_PluginBase):
                                             if not details:
                                                 logger.info("mhnotify: BTL详情查询失败或无资源，恢复订阅启用")
                                                 # with SessionFactory() as db:
-                                                #     SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
-                                                # 恢复订阅启用时，不应该将 sites 置空，否则无法洗版
+                                                
                                                 with SessionFactory() as db:
                                                     # 获取原始订阅信息
                                                     origin_sub = SubscribeOper(db=db).get(subscribe.id)
                                                     if origin_sub:
-                                                        # 恢复订阅状态为 R，不修改 sites，保留原有的站点配置以便洗版
+                                                        # 恢复订阅状态为 R
                                                         SubscribeOper(db=db).update(subscribe.id, {"state": "R"})
                                                 pending.pop(sid, None)
                                                 self.save_data(self._ASSIST_PENDING_KEY, pending)
@@ -3030,7 +3035,7 @@ class MHNotify(_PluginBase):
                                                 else:
                                                     logger.info("mhnotify: 云下载辅助未匹配到可用资源或全部失败，恢复订阅启用")
                                                     with SessionFactory() as db:
-                                                        SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                                        SubscribeOper(db=db).update(subscribe.id, {"state": "R"})
                                                     # 恢复启用后，加入watch映射，用于取消事件快速删除MH
                                                     watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
                                                     watch[str(sid)] = {"mh_uuid": mh_uuid}
@@ -3040,7 +3045,7 @@ class MHNotify(_PluginBase):
                                         else:
                                             logger.info("mhnotify: 云下载辅助跳过：缺少豆瓣ID")
                                             with SessionFactory() as db:
-                                                SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                                SubscribeOper(db=db).update(subscribe.id, {"state": "R"})
                                             # 加入watch映射，用于取消事件快速删除MH
                                             watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
                                             watch[str(sid)] = {"mh_uuid": mh_uuid}
@@ -3049,7 +3054,7 @@ class MHNotify(_PluginBase):
                                             self.save_data(self._ASSIST_PENDING_KEY, pending)
                                     else:
                                         with SessionFactory() as db:
-                                            SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                            SubscribeOper(db=db).update(subscribe.id, {"state": "R"})
                                         watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
                                         try:
                                             tmdb_id = getattr(subscribe, 'tmdbid', None)
@@ -3107,7 +3112,7 @@ class MHNotify(_PluginBase):
                                     else:
                                         # 确实未完成
                                         with SessionFactory() as db:
-                                            SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                            SubscribeOper(db=db).update(subscribe.id, {"state": "R"})
                                         watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
                                         try:
                                             tmdb_id = getattr(subscribe, 'tmdbid', None)
@@ -3745,7 +3750,7 @@ class MHNotify(_PluginBase):
                                     if info:
                                         sid = info.get("sid")
                                         with SessionFactory() as db:
-                                            SubscribeOper(db=db).update(int(sid), {"state": "R", "sites": []})
+                                            SubscribeOper(db=db).update(int(sid), {"state": "R"})
                                         mapping.pop(info_hash, None)
                                         self.save_data(self._ASSIST_CLOUD_MAP_KEY, mapping)
                                         logger.info(f"mhnotify: 云下载任务已删除，已恢复MP订阅启用 sid={sid}")
@@ -3835,7 +3840,7 @@ class MHNotify(_PluginBase):
                             if info:
                                 sid = info.get("sid")
                                 with SessionFactory() as db:
-                                    SubscribeOper(db=db).update(int(sid), {"state": "R", "sites": []})
+                                    SubscribeOper(db=db).update(int(sid), {"state": "R"})
                                 mapping.pop(info_hash, None)
                                 self.save_data(self._ASSIST_CLOUD_MAP_KEY, mapping)
                                 logger.info(f"mhnotify: 云下载辅助失败，已恢复MP订阅启用 sid={sid}")
@@ -5412,7 +5417,12 @@ class MHNotify(_PluginBase):
         try:
             # 恢复订阅状态为 R，不修改 sites，保留原有的站点配置以便洗版
             with SessionFactory() as db:
-                SubscribeOper(db=db).update(subscribe.id, {"state": "R"})
+                # 检查是否配置了忽略MP洗版订阅
+                if self._ignore_mp_wash:
+                    logger.info(f"mhnotify: MP订阅 {subscribe.name} 忽略洗版")
+                else:
+                    SubscribeOper(db=db).update(subscribe.id, {"state": "R"})
+                    logger.info(f"mhnotify: MP订阅 {subscribe.name} 已恢复为运行状态(R)")
             
             # 生成元数据
             from app.core.metainfo import MetaInfo
@@ -5447,7 +5457,14 @@ class MHNotify(_PluginBase):
             except Exception:
                 pass
             # 完成订阅
-            SubscribeChain().finish_subscribe_or_not(
+            chain = SubscribeChain()
+            if self._ignore_mp_wash:
+                try:
+                    original_best = getattr(subscribe, "best_version", False)
+                    setattr(subscribe, "best_version", False)
+                except Exception:
+                    pass
+            chain.finish_subscribe_or_not(
                 subscribe=subscribe,
                 meta=meta,
                 mediainfo=mediainfo,
