@@ -10,9 +10,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
+from app.core.event import eventmanager, Event
 from app.plugins import _PluginBase
 from app.log import logger
 from app.schemas import NotificationType
+from app.schemas.types import EventType
 
 class p115sign(_PluginBase):
     # 插件名称
@@ -22,7 +24,7 @@ class p115sign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
      # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -420,7 +422,35 @@ class p115sign(_PluginBase):
         ]
 
     def get_command(self) -> List[Dict[str, Any]]:
-        return []
+        return [{
+            "cmd": "/p115_sign",
+            "event": EventType.PluginAction,
+            "desc": "115网盘签到",
+            "category": "插件",
+            "data": {"plugin_id": "p115sign", "action": "sign"}
+        }]
+
+    @eventmanager.register(EventType.PluginAction)
+    def plugin_action(self, event: Event):
+        data = event.event_data or {}
+        if data.get("plugin_id") != "p115sign":
+            return
+        if data.get("action") != "sign":
+            return
+        channel = data.get("channel")
+        source = data.get("source")
+        userid = data.get("user")
+        results = self.sign() or []
+        if not self._notify:
+            if results:
+                first = results[0]
+                title = "115网盘签到"
+                text = f"{first.get('status')}\n{first.get('message')}"
+            else:
+                title = "115网盘签到"
+                text = "已触发签到"
+            self.post_message(channel=channel, mtype=NotificationType.Plugin,
+                              title=title, text=text, userid=userid, source=source)
 
     def get_api(self) -> List[Dict[str, Any]]:
         return []

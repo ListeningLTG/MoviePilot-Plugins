@@ -66,11 +66,12 @@
     "name": "115网盘签到",
     "description": "115网盘签到，支持失败重试和历史记录统计",
     "labels": "开发",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "u115.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.2": "添加远程命令，/p115_sign",
       "v1.0.1": "修复枫叶的显示",
       "v1.0.0": "115网盘签到，首次提交"
     }
