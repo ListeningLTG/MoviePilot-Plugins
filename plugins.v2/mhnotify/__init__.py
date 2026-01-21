@@ -24,7 +24,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.6"
+    plugin_version = "1.6.7"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -304,6 +304,47 @@ class MHNotify(_PluginBase):
             self._ali2115_ali_folder = config.get("ali2115_ali_folder", "/秒传转存") or "/秒传转存"
             self._ali2115_115_folder = config.get("ali2115_115_folder", "/秒传接收") or "/秒传接收"
             self._ali2115_organize = bool(config.get("ali2115_organize", False))
+
+            # 打印当前记录的sid信息
+            try:
+                pending = self.get_data(self._ASSIST_PENDING_KEY) or {}
+                watch = self.get_data(self._ASSIST_WATCH_KEY) or {}
+                
+                if pending:
+                    pending_details = []
+                    with SessionFactory() as db:
+                        for sid in pending.keys():
+                            try:
+                                sub = SubscribeOper(db=db).get(int(sid))
+                                if sub:
+                                    s_name = getattr(sub, 'name', '')
+                                    s_tmdb = getattr(sub, 'tmdbid', '')
+                                    s_season = getattr(sub, 'season', '')
+                                    pending_details.append(f"[{sid}]{s_name}({s_tmdb}) S{s_season}")
+                                else:
+                                    pending_details.append(f"[{sid}]未知(已删?)")
+                            except:
+                                pending_details.append(f"[{sid}]查询失败")
+                    logger.info(f"mhnotify: 当前待检查进度订阅数={len(pending)} 详情: {', '.join(pending_details)}")
+
+                if watch:
+                    watch_details = []
+                    with SessionFactory() as db:
+                        for sid in watch.keys():
+                            try:
+                                sub = SubscribeOper(db=db).get(int(sid))
+                                if sub:
+                                    s_name = getattr(sub, 'name', '')
+                                    s_tmdb = getattr(sub, 'tmdbid', '')
+                                    s_season = getattr(sub, 'season', '')
+                                    watch_details.append(f"[{sid}]{s_name}({s_tmdb}) S{s_season}")
+                                else:
+                                    watch_details.append(f"[{sid}]未知(已删?)")
+                            except:
+                                watch_details.append(f"[{sid}]查询失败")
+                    logger.info(f"mhnotify: 当前待完成/清理MH订阅数={len(watch)} 详情: {', '.join(watch_details)}")
+            except Exception as e:
+                logger.warning(f"mhnotify: 打印SID信息失败: {e}")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -3019,19 +3060,55 @@ class MHNotify(_PluginBase):
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
                                 else:
                                     # 未完成：不删除MH，启用MP订阅，并加入watch等待MP完成/取消后删除MH
-                                    with SessionFactory() as db:
-                                        SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
-                                    watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+                                    # 注意：对于多季订阅，如果部分季已完成，不应在此处标记整个订阅为完成
+                                    # 因为MH订阅是聚合的，这里的 saved 和 expected 是针对聚合后的所有季
+                                    # 如果当前MP订阅对应的季已经下载完了，但MH里还有其他季没下载完，这里也是 saved < expected
+                                    # 所以这里应该进一步检查：当前MP订阅对应的季是否已经全部保存了
+                                    
+                                    current_sub_completed = False
                                     try:
-                                        tmdb_id = getattr(subscribe, 'tmdbid', None)
-                                        sub_type = (getattr(subscribe, 'type', '') or '').lower()
+                                        # 获取当前MP订阅的季
+                                        mp_season = getattr(subscribe, 'season', None)
+                                        if mp_season is not None:
+                                            # 获取MH订阅中该季的保存情况
+                                            episodes = (target.get("episodes") or [])
+                                            if episodes:
+                                                counts = (episodes[0] or {}).get("episodes_count") or {}
+                                                episodes_arr = (episodes[0] or {}).get("episodes_arr") or {}
+                                                
+                                                season_str = str(mp_season)
+                                                
+                                                # 该季总集数
+                                                season_total = int((counts.get(season_str) or {}).get("count") or 0)
+                                                # 该季已保存集数
+                                                season_saved = len(episodes_arr.get(season_str) or [])
+                                                
+                                                if season_total > 0 and season_saved >= season_total:
+                                                    current_sub_completed = True
+                                                    logger.info(f"mhnotify: 订阅 {mh_uuid} 整体未完成({saved}/{expected})，但MP订阅对应的第{mp_season}季已完成({season_saved}/{season_total})")
                                     except Exception:
-                                        tmdb_id = None
-                                        sub_type = ''
-                                    watch[str(sid)] = {"mh_uuid": mh_uuid, "tmdb_id": tmdb_id, "type": sub_type or 'movie'}
-                                    self.save_data(self._ASSIST_WATCH_KEY, watch)
-                                    pending.pop(sid, None)
-                                    self.save_data(self._ASSIST_PENDING_KEY, pending)
+                                        pass
+                                    
+                                    if current_sub_completed:
+                                        # 仅完成当前MP订阅
+                                        self.__finish_mp_subscribe(subscribe)
+                                        pending.pop(sid, None)
+                                        self.save_data(self._ASSIST_PENDING_KEY, pending)
+                                    else:
+                                        # 确实未完成
+                                        with SessionFactory() as db:
+                                            SubscribeOper(db=db).update(subscribe.id, {"state": "R", "sites": []})
+                                        watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+                                        try:
+                                            tmdb_id = getattr(subscribe, 'tmdbid', None)
+                                            sub_type = (getattr(subscribe, 'type', '') or '').lower()
+                                        except Exception:
+                                            tmdb_id = None
+                                            sub_type = ''
+                                        watch[str(sid)] = {"mh_uuid": mh_uuid, "tmdb_id": tmdb_id, "type": sub_type or 'movie'}
+                                        self.save_data(self._ASSIST_WATCH_KEY, watch)
+                                        pending.pop(sid, None)
+                                        self.save_data(self._ASSIST_PENDING_KEY, pending)
             # 监听MP完成后删除MH（可选）
             watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
             if watch and self._mh_assist_auto_delete:
