@@ -24,7 +24,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.5"
+    plugin_version = "1.6.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2759,18 +2759,40 @@ class MHNotify(_PluginBase):
         """返回 (media_type, saved, expected_total)"""
         params = (sub_rec or {}).get("params") or {}
         mtype = (params.get("media_type") or (sub_rec.get("subscription_info") or {}).get("media_type") or "movie").lower()
-        saved = int(params.get("saved_resources") or (sub_rec.get("params") or {}).get("saved_resources") or (sub_rec.get("saved_resources") if isinstance(sub_rec.get("saved_resources"), int) else 0))
-        # episodes_count 在 episodes[0].episodes_count
+        
+        saved = 0
         expected_total = 1 if mtype == 'movie' else 0
+        
         try:
             episodes = (sub_rec.get("episodes") or [])
             if episodes:
+                # 1. 获取订阅的季
+                selected_seasons = params.get("selected_seasons") or []
+                selected_set = set(str(x) for x in selected_seasons)
+                
+                # 2. 获取已保存的集数 (episodes_arr)
+                # 结构: episodes[0].episodes_arr = {"1": [1,2,3], "2": [1,2]}
+                episodes_arr = (episodes[0] or {}).get("episodes_arr") or {}
+                
+                # 3. 获取所有季集数信息 (episodes_count)
                 counts = (episodes[0] or {}).get("episodes_count") or {}
+                
                 if mtype == 'tv':
-                    for s in counts.values():
-                        expected_total += int(s.get("count") or 0)
+                    for season_str, season_info in counts.items():
+                        # 如果指定了 selected_seasons，则只计算选中的季
+                        if selected_set and str(season_str) not in selected_set:
+                            continue
+                        
+                        # 计算总集数
+                        expected_total += int(season_info.get("count") or 0)
+                        
+                        # 计算已保存集数 (该季下已有的集数列表长度)
+                        saved_list = episodes_arr.get(str(season_str)) or []
+                        saved += len(saved_list)
                 else:
-                    # movie: 如果存在也按1处理
+                    # movie: 检查 episodes_arr 是否有内容，或者 params 里 saved_resources 是否 > 0
+                    if episodes_arr or int(params.get("saved_resources") or 0) > 0:
+                        saved = 1
                     expected_total = 1
         except Exception:
             pass
