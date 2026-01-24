@@ -24,7 +24,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.8"
+    plugin_version = "1.6.8.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -5989,7 +5989,7 @@ class MHNotify(_PluginBase):
         :return: 新的 Cookie 字符串，失败返回 None
         """
         try:
-            from playwright.sync_api import sync_playwright
+            from playwright.sync_api import sync_playwright, TimeoutError
         except ImportError:
             logger.error("Playwright 未安装，无法自动刷新 HDHive Cookie")
             logger.info("请运行: pip install playwright && playwright install chromium")
@@ -6003,6 +6003,11 @@ class MHNotify(_PluginBase):
             with sync_playwright() as pw:
                 launch_options = {"headless": True}
                 context_options = {}
+                try:
+                    import playwright as _pw
+                    logger.debug(f"HDHive: Playwright 版本={getattr(_pw, '__version__', 'unknown')}")
+                except Exception:
+                    logger.debug("HDHive: 无法获取 Playwright 版本")
                 
                 if proxy:
                     if isinstance(proxy, dict):
@@ -6010,15 +6015,57 @@ class MHNotify(_PluginBase):
                     else:
                         proxy_url = proxy
                     if proxy_url:
-                        context_options["proxy"] = {"server": proxy_url}
-                        logger.debug(f"HDHive Cookie 刷新使用代理: {proxy_url}")
+                        proxy_cfg = None
+                        try:
+                            from urllib.parse import urlparse, unquote
+                            parsed = urlparse(str(proxy_url))
+                            if parsed.scheme and parsed.hostname:
+                                server = f"{parsed.scheme}://{parsed.hostname}"
+                                if parsed.port:
+                                    server += f":{parsed.port}"
+                                proxy_cfg = {"server": server}
+                                if parsed.username:
+                                    proxy_cfg["username"] = unquote(parsed.username)
+                                if parsed.password:
+                                    proxy_cfg["password"] = unquote(parsed.password)
+                            else:
+                                proxy_cfg = {"server": str(proxy_url)}
+                        except Exception as e:
+                            logger.debug(f"HDHive: 解析代理配置失败: {type(e).__name__}: {e}")
+                            proxy_cfg = {"server": str(proxy_url)}
+                        context_options["proxy"] = proxy_cfg
+                        launch_options["proxy"] = proxy_cfg
+                        logger.debug(
+                            "HDHive Cookie 刷新使用代理: "
+                            f"server={proxy_cfg.get('server')} "
+                            f"auth={'yes' if proxy_cfg.get('username') else 'no'}"
+                        )
                 
                 browser = pw.chromium.launch(**launch_options)
                 context = browser.new_context(**context_options)
                 page = context.new_page()
+                network_events = []
+                console_logs = []
+                page.on("console", lambda m: console_logs.append(f"{m.type}: {m.text}"))
+                page.on("response", lambda r: network_events.append(f"RESP {r.status} {r.url}"))
+                page.on("requestfailed", lambda r: network_events.append(f"FAIL {r.url} {getattr(r.failure, 'error_text', '')}"))
                 
                 logger.info("HDHive: 访问登录页...")
-                page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+                try:
+                    import time as _t
+                    _ts = _t.time()
+                    resp = page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+                    _te = _t.time()
+                    if resp:
+                        logger.debug(f"HDHive: 登录页状态={resp.status} 用时={((_te-_ts)*1000):.0f}ms")
+                    else:
+                        logger.debug(f"HDHive: 登录页无响应对象 用时={((_te-_ts)*1000):.0f}ms")
+                except TimeoutError as e:
+                    logger.error(f"HDHive: 登录页超时: {type(e).__name__}: {e}")
+                    logger.debug(f"HDHive: 当前代理={context_options.get('proxy', {})}")
+                    page.wait_for_timeout(1000)
+                except Exception as e:
+                    logger.error(f"HDHive: 访问登录页异常: {type(e).__name__}: {e}")
                 page.wait_for_timeout(2000)
                 
                 # 填写用户名
@@ -6093,6 +6140,7 @@ class MHNotify(_PluginBase):
                 for c in cookies:
                     if c.get("domain", "").endswith("hdhive.com"):
                         cookie_parts.append(f"{c['name']}={c['value']}")
+                logger.debug(f"HDHive: Cookie 数量={len(cookies)} 目标域数量={len(cookie_parts)}")
                 
                 context.close()
                 browser.close()
@@ -6100,11 +6148,25 @@ class MHNotify(_PluginBase):
                 if cookie_parts:
                     cookie_str = "; ".join(cookie_parts)
                     logger.info(f"HDHive: 获取 Cookie 成功，长度={len(cookie_str)}")
+                    logger.debug(f"HDHive: 网络事件数={len(network_events)} 控制台日志数={len(console_logs)}")
+                    if network_events:
+                        logger.debug(f"HDHive: 关键网络事件示例: {network_events[-1]}")
                     return cookie_str
                 else:
                     logger.warning("HDHive: 未获取到有效 Cookie")
+                    logger.debug(f"HDHive: 网络事件数={len(network_events)} 控制台日志数={len(console_logs)}")
+                    if network_events:
+                        logger.debug(f"HDHive: 最后网络事件: {network_events[-1]}")
                     return None
                     
         except Exception as e:
-            logger.error(f"HDHive Playwright 登录失败: {type(e).__name__}: {e}", exc_info=True)
+            try:
+                _cur = None
+                try:
+                    _cur = page.url
+                except Exception:
+                    _cur = "unknown"
+                logger.error(f"HDHive Playwright 登录失败: {type(e).__name__}: {e} 当前URL={_cur}", exc_info=True)
+            except Exception:
+                logger.error(f"HDHive Playwright 登录失败: {type(e).__name__}: {e}", exc_info=True)
             return None
