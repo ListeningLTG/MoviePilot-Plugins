@@ -24,7 +24,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.8.1"
+    plugin_version = "1.6.9"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -76,6 +76,8 @@ class MHNotify(_PluginBase):
     _hdhive_refresh_cron: str = "0 */6 * * *"
     _hdhive_refresh_once: bool = False
     _hdhive_max_subscriptions: int = 20
+    _hdhive_refresh_newest_enabled: bool = False
+    _hdhive_refresh_newest_interval_minutes: int = 10
     # MH登录缓存
     _mh_token: Optional[str] = None
     _mh_token_expire_ts: int = 0
@@ -184,8 +186,26 @@ class MHNotify(_PluginBase):
                 self._hdhive_max_subscriptions = int(config.get("hdhive_max_subscriptions", 20) or 20)
             except Exception:
                 self._hdhive_max_subscriptions = 20
-            
-            # 115 生活事件
+            self._hdhive_refresh_newest_enabled = bool(config.get("hdhive_refresh_newest_enabled", False))
+            try:
+                self._hdhive_refresh_newest_interval_minutes = int(config.get("hdhive_refresh_newest_interval_minutes", 10) or 10)
+            except Exception:
+                self._hdhive_refresh_newest_interval_minutes = 10
+            try:
+                if bool(config.get("hdhive_refresh_newest_once", False)):
+                    logger.info("mhnotify: 检测到运行一次刷新最近订阅开关，开始执行...")
+                    try:
+                        import threading
+                        threading.Thread(target=self.hdhive_refresh_newest_job, daemon=True).start()
+                        logger.info("mhnotify: 刷新最近订阅已在后台启动")
+                    except Exception:
+                        logger.warning("mhnotify: 启动后台刷新最近订阅失败，改为同步执行")
+                        self.hdhive_refresh_newest_job()
+                    config["hdhive_refresh_newest_once"] = False
+                    self.update_config(config)
+                    logger.info("mhnotify: 刷新最近订阅一次性任务执行完成，已自动复位为关闭")
+            except Exception:
+                logger.error("mhnotify: 运行一次刷新最近订阅失败", exc_info=True)
             self._p115_life_enabled = bool(config.get("p115_life_enabled", False))
             self._p115_cookie = config.get("p115_cookie", "") or ""
             self._p115_events = config.get("p115_life_events", []) or []
@@ -420,6 +440,25 @@ class MHNotify(_PluginBase):
                     "func": self.hdhive_refresh_job,
                     "kwargs": {}
                 })
+        if self._hdhive_refresh_newest_enabled:
+            try:
+                interval = max(1, int(self._hdhive_refresh_newest_interval_minutes or 10))
+                cron = f"*/{interval} * * * *"
+                services.append({
+                    "id": "HDHiveRefreshNewest",
+                    "name": "HDHive最近订阅定时刷新",
+                    "trigger": CronTrigger.from_crontab(cron),
+                    "func": self.hdhive_refresh_newest_job,
+                    "kwargs": {}
+                })
+            except Exception:
+                services.append({
+                    "id": "HDHiveRefreshNewest",
+                    "name": "HDHive最近订阅定时刷新",
+                    "trigger": CronTrigger.from_crontab("*/10 * * * *"),
+                    "func": self.hdhive_refresh_newest_job,
+                    "kwargs": {}
+                })
         return services
 
     @staticmethod
@@ -451,6 +490,15 @@ class MHNotify(_PluginBase):
                 "category": "下载",
                 "data": {
                     "action": "mh_hdhive_refresh"
+                }
+            },
+            {
+                "cmd": "/mhrefreshnewest",
+                "event": EventType.PluginAction,
+                "desc": "刷新最近添加的MH订阅",
+                "category": "下载",
+                "data": {
+                    "action": "mh_hdhive_refresh_newest"
                 }
             }
         ]
@@ -694,6 +742,9 @@ class MHNotify(_PluginBase):
             "hdhive_refresh_cron": "0 */6 * * *",
             "hdhive_refresh_once": False,
             "hdhive_max_subscriptions": 20,
+            "hdhive_refresh_newest_enabled": False,
+            "hdhive_refresh_newest_interval_minutes": 10,
+            "hdhive_refresh_newest_once": False,
             "p115_life_enabled": False,
             "p115_cookie": "",
             "p115_life_events": [],
@@ -816,12 +867,14 @@ class MHNotify(_PluginBase):
                                 'component': 'VWindowItem',
                                 'props': {'value': 'tab_query'},
                                 'content': [
-                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': 'HDHive资源查询：支持 Playwright/API 两种模式，获取免费 115 分享链接并自动作为自定义链接随订阅传入'}}]}]},
-                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_enabled', 'label': '启用 HDHive'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSelect', 'props': {'model': 'hdhive_query_mode', 'label': 'HDHive 查询模式', 'items': [{'title': 'Playwright', 'value': 'playwright'}, {'title': 'API', 'value': 'api'}], 'clearable': False}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_username', 'label': 'HDHive 用户名'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_password', 'label': 'HDHive 密码', 'type': 'password'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': 'HDHive资源查询：新增订阅时，获取免费 115 分享链接，作为自定义链接随订阅传入mh订阅'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_enabled', 'label': 'HDHive资源查询'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSelect', 'props': {'model': 'hdhive_query_mode', 'label': 'HDHive 查询模式', 'items': [{'title': 'Playwright', 'value': 'playwright'}, {'title': 'API', 'value': 'api'}], 'clearable': False}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_username', 'label': 'HDHive 用户名'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_password', 'label': 'HDHive 密码', 'type': 'password'}}]}]},
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_cookie', 'label': 'HDHive Cookie（API 模式）', 'type': 'password'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_auto_refresh', 'label': '自动刷新 Cookie'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_refresh_before', 'label': 'Cookie提前刷新秒数', 'type': 'number', 'placeholder': '默认 3600'}}]}]},
-                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_enabled', 'label': '启用HDHive资源定时刷新', 'hint': '开启后按Cron周期刷新MH订阅的自定义链接'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 9}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_refresh_cron', 'label': '刷新计划 Cron', 'placeholder': '例如：0 */6 * * *（每6小时）', 'hint': '使用标准Crontab表达式'}}]}]},
-                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_max_subscriptions', 'label': '最多订阅条数', 'type': 'number', 'placeholder': '默认 20', 'hint': '仅处理启用且为115的前 N 条订阅'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_once', 'label': '运行一次HDHive资源刷新', 'hint': '开启后保存将立即执行一次刷新任务，执行后自动复位为关闭'}}]}]},
-                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'density': 'comfortable', 'text': '/mhrefresh [订阅1,订阅2,...] — HDHive资源刷新；支持多个订阅名称用英文逗号分隔。不带参数时刷新前N个启用的115订阅（N为“最多订阅条数”）。'}}]}]}
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_enabled', 'label': '定时刷新mh订阅', 'hint': '开启后按Cron周期刷新mh订阅的自定义链接'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 9}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_refresh_cron', 'label': '刷新计划 Cron', 'placeholder': '例如：0 */6 * * *（每6小时）', 'hint': '使用标准Crontab表达式'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_max_subscriptions', 'label': '最多订阅条数', 'type': 'number', 'placeholder': '默认 20', 'hint': '仅处理启用且为115的前 N 条订阅'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_once', 'label': '运行一次刷新mh订阅', 'hint': '开启后保存将立即执行一次刷新任务，执行后自动复位为关闭'}}]}]},
+                            {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_newest_enabled', 'label': '定时刷新最近订阅', 'hint': '开启后按间隔自动刷新最近窗口内的启用115订阅的自定义链接'}}]} , {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_refresh_newest_interval_minutes', 'label': '刷新间隔分钟', 'type': 'number', 'placeholder': '默认 10'}}]} , {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_newest_once', 'label': '运行一次刷新最近订阅'}}]} ]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'density': 'comfortable', 'text': '/mhrefresh [订阅1,订阅2,...] — 刷新mh订阅；支持多个订阅名称用英文逗号分隔。不带参数时刷新前N个启用的115订阅（N为“最多订阅条数”）。'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'density': 'comfortable', 'text': '/mhrefreshnewest — 刷新最近订阅；按“刷新间隔分钟”计算最近窗口并进行刷新。'}}]}]}
                                 ]
                             }
                         ]
@@ -1115,6 +1168,174 @@ class MHNotify(_PluginBase):
         except Exception:
             logger.error("mhnotify: 定时HDHive资源刷新异常", exc_info=True)
 
+    def hdhive_refresh_newest_job(self, channel: Optional[str] = None, userid: Optional[Union[str, int]] = None):
+        try:
+            access_token = self.__mh_login()
+            if not access_token:
+                logger.error("mhnotify: 刷新最近订阅失败，无法登录MH")
+                return
+            lst = self.__mh_list_subscriptions(access_token, status="active", page_size=2000)
+            subs = (lst.get("data") or {}).get("subscriptions") or []
+            subs = [x for x in subs if (x.get("enabled", True) is not False)]
+            if not subs:
+                logger.info("mhnotify: 刷新最近订阅时列表为空")
+                return
+            targets = []
+            for x in subs:
+                if not isinstance(x, dict):
+                    logger.debug("mhnotify: 订阅项类型非字典，已跳过")
+                    continue
+                params_x = x.get("params")
+                params_x = params_x if isinstance(params_x, dict) else {}
+                if (params_x.get("cloud_type") or "").strip().lower() == "drive115":
+                    targets.append(x)
+            now_ts = int(time.time())
+            try:
+                win_sec = max(60, int(self._hdhive_refresh_newest_interval_minutes or 10) * 60)
+            except Exception:
+                win_sec = 600
+            def _parse_ts(val) -> int:
+                try:
+                    if isinstance(val, (int, float)):
+                        return int(val)
+                    if isinstance(val, str):
+                        s = val.strip()
+                        if s.isdigit():
+                            return int(s)
+                        from datetime import datetime
+                        from datetime import timezone, timedelta
+                        s2 = s.replace('Z', '+00:00')
+                        try:
+                            dt = datetime.fromisoformat(s2)
+                        except Exception:
+                            try:
+                                dt = datetime.strptime(s2, "%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                return 0
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        return int(dt.timestamp())
+                except Exception:
+                    return 0
+                return 0
+            def _fmt(ts: int) -> str:
+                try:
+                    from datetime import datetime, timezone, timedelta
+                    return datetime.fromtimestamp(int(ts), tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    return str(ts)
+            logger.info(f"mhnotify: 最近订阅窗口 start={_fmt(now_ts - win_sec)} end={_fmt(now_ts)} 候选数={len(targets)}")
+            recent = []
+            for rec in targets:
+                src = ""
+                v = rec.get("created_at") if isinstance(rec, dict) else None
+                ts = _parse_ts(v)
+                if ts:
+                    src = "created_at"
+                if ts == 0:
+                    v = rec.get("updated_at") if isinstance(rec, dict) else None
+                    ts = _parse_ts(v)
+                    if ts:
+                        src = "updated_at"
+                if ts == 0 and isinstance(rec, dict):
+                    task_raw = rec.get("task")
+                    task = task_raw if isinstance(task_raw, dict) else {}
+                    v = task.get("created_at")
+                    ts = _parse_ts(v)
+                    if ts:
+                        src = "task.created_at"
+                task_raw = rec.get("task")
+                task = task_raw if isinstance(task_raw, dict) else {}
+                uuid = rec.get("uuid") or task.get("uuid")
+                name = rec.get("name") or task.get("name") or ((rec.get("params") or {}).get("custom_name") or (rec.get("params") or {}).get("title"))
+                include = bool(ts and ts >= now_ts - win_sec)
+                if include:
+                    logger.info(f"mhnotify: 最近候选 uuid={uuid} name={str(name or '')[:50]} ts_src={src} ts={ts} at={_fmt(ts)} include={'Y' if include else 'N'}")
+                    if self.__is_plugin_created_mh_subscription(rec):
+                        params = rec.get("params") or {}
+                        mh_tmdb_id = params.get("tmdb_id")
+                        logger.info(f"mhnotify: 最近候选排除（订阅辅助创建） uuid={uuid} name={str(name or '')[:50]} tmdb_id={mh_tmdb_id}")
+                    else:
+                        recent.append(rec)
+            logger.info(f"mhnotify: 最近订阅筛选 count={len(recent)} 窗口秒={win_sec}")
+            updated = 0
+            checked = 0
+            skipped_completed = 0
+            no_links = 0
+            errors = 0
+            for rec in recent:
+                try:
+                    if not isinstance(rec, dict):
+                        logger.debug("mhnotify: 最近订阅条目类型非字典，跳过")
+                        errors += 1
+                        continue
+                    params_raw = rec.get("params")
+                    params = params_raw if isinstance(params_raw, dict) else {}
+                    cloud_type = (params.get("cloud_type") or "").lower()
+                    if cloud_type != "drive115":
+                        continue
+                    completed, saved, expected, mtype = self.__is_mh_subscription_completed(rec)
+                    task_raw = rec.get("task")
+                    task = task_raw if isinstance(task_raw, dict) else {}
+                    uuid = rec.get("uuid") or task.get("uuid")
+                    name = rec.get("name") or task.get("name") or (params.get("custom_name") or params.get("title"))
+                    if completed:
+                        logger.info(f"mhnotify: 最近订阅跳过 uuid={uuid} name={str(name or '')[:50]} type={mtype} saved={saved}/{expected}")
+                        skipped_completed += 1
+                        continue
+                    tmdb_id = params.get("tmdb_id")
+                    media_type = (params.get("media_type") or "movie").lower()
+                    existing_links: List[str] = params.get("user_custom_links") or []
+                    links = self.__fetch_hdhive_links(tmdb_id=tmdb_id, media_type=media_type)
+                    checked += 1
+                    if not links:
+                        logger.info(f"mhnotify: 最近订阅未获取到链接 uuid={uuid} name={str(name or '')[:50]}")
+                        no_links += 1
+                        continue
+                    def extract_key(link: str) -> str:
+                        key = link.replace("https://", "").replace("http://", "").rstrip("& ").lower()
+                        return key
+                    keys = set(extract_key(l) for l in existing_links)
+                    merged = list(existing_links)
+                    for l in links:
+                        k = extract_key(l)
+                        if k not in keys:
+                            merged.append(l)
+                            keys.add(k)
+                    if len(merged) > len(existing_links):
+                        try:
+                            payload = {"user_custom_links": merged}
+                            name2 = name
+                            if name2:
+                                import re as _re
+                                n2 = _re.sub(r'^\[订阅\]\s*', '', name2).strip()
+                                if n2:
+                                    payload["custom_name"] = n2
+                            upd = self.__mh_update_subscription(access_token, uuid, payload)
+                            if upd:
+                                updated += 1
+                                logger.info(f"mhnotify: 最近订阅链接更新 uuid={uuid} name={str(name or '')[:50]} 新增={len(merged) - len(existing_links)} 总数={len(merged)}")
+                                try:
+                                    self.__mh_execute_subscription(access_token, uuid)
+                                except Exception:
+                                    logger.warning(f"mhnotify: 最近订阅触发执行失败 uuid={uuid}")
+                        except Exception:
+                            logger.warning(f"mhnotify: 最近订阅更新链接失败 uuid={uuid}", exc_info=True)
+                            errors += 1
+                except Exception:
+                    logger.debug("mhnotify: 最近订阅刷新条目异常", exc_info=True)
+                    errors += 1
+                    continue
+            logger.info(f"mhnotify: 最近订阅刷新完成 检查={checked} 更新={updated} 跳过完成={skipped_completed} 无新链接={no_links} 异常={errors} 窗口秒={win_sec} 目标数={len(recent)}")
+            if channel:
+                text = f"检查订阅: {checked}\n有更新: {updated}\n跳过完成: {skipped_completed}\n无新链接: {no_links}\n异常: {errors}"
+                try:
+                    self.post_message(channel=channel, title="✅ HDHive资源刷新完成", text=text, userid=userid, mtype=NotificationType.Plugin)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"mhnotify: 定时刷新最近订阅异常 msg={str(e)}", exc_info=True)
+
     def _execute_hdhive_refresh(self, subscription_name: Optional[str] = None, channel: Optional[str] = None, userid: Optional[Union[str, int]] = None):
         """
         执行HDHive资源刷新：
@@ -1124,6 +1345,7 @@ class MHNotify(_PluginBase):
         - 更新订阅并触发立即执行查询
         """
         try:
+            logger.info(f"mhnotify: HDHive资源刷新开始 subscription={str(subscription_name or '')} mode={self._hdhive_query_mode} cookie={'Y' if (self._hdhive_cookie or '').strip() else 'N'} auto_refresh={'Y' if self._hdhive_auto_refresh else 'N'}")
             access_token = self.__mh_login()
             if not access_token:
                 logger.error("mhnotify: HDHive刷新失败，无法登录MH")
@@ -1188,6 +1410,7 @@ class MHNotify(_PluginBase):
                         targets = targets[:self._hdhive_max_subscriptions]
                 except Exception:
                     pass
+            logger.info(f"mhnotify: HDHive订阅列表 count={len(subs)} 目标115订阅 count={len(targets)} 限制={self._hdhive_max_subscriptions}")
             updated = 0
             checked = 0
             updated_names: List[str] = []
@@ -1197,12 +1420,20 @@ class MHNotify(_PluginBase):
                     cloud_type = (params.get("cloud_type") or "").lower()
                     if cloud_type != "drive115":
                         continue
+                    uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
+                    name = rec.get("name") or rec.get("task", {}).get("name") or (params.get("custom_name") or params.get("title"))
+                    completed, saved, expected, mtype = self.__is_mh_subscription_completed(rec)
+                    if completed:
+                        logger.info(f"mhnotify: 跳过刷新 uuid={uuid} name={str(name or '')[:50]} type={mtype} saved={saved}/{expected}")
+                        continue
                     tmdb_id = params.get("tmdb_id")
                     media_type = (params.get("media_type") or "movie").lower()
                     existing_links: List[str] = params.get("user_custom_links") or []
+                    logger.info(f"mhnotify: 刷新前 uuid={uuid} name={str(name or '')[:50]} tmdb_id={tmdb_id} type={media_type} links={len(existing_links)}")
                     links = self.__fetch_hdhive_links(tmdb_id=tmdb_id, media_type=media_type)
                     checked += 1
                     if not links:
+                        logger.info(f"mhnotify: 未获取到新的链接 uuid={uuid} name={str(name or '')[:50]}")
                         continue
                     # 去重合并
                     def extract_key(link: str) -> str:
@@ -1216,8 +1447,6 @@ class MHNotify(_PluginBase):
                             merged.append(l)
                             keys.add(k)
                     if len(merged) > len(existing_links):
-                        uuid = rec.get("uuid") or rec.get("task", {}).get("uuid")
-                        name = rec.get("name") or rec.get("task", {}).get("name") or (params.get("custom_name") or params.get("title"))
                         # 提取 custom_name：优先已有，其次从 name 去掉前缀 [订阅]
                         def _extract_custom_name(n: Optional[str]) -> Optional[str]:
                             if not n:
@@ -1232,6 +1461,7 @@ class MHNotify(_PluginBase):
                             if upd:
                                 updated += 1
                                 updated_names.append(str(name or uuid))
+                                logger.info(f"mhnotify: 链接已更新 uuid={uuid} name={str(name or '')[:50]} 新增={len(merged) - len(existing_links)} 总数={len(merged)}")
                                 # 触发立即执行
                                 try:
                                     self.__mh_execute_subscription(access_token, uuid)
@@ -1285,7 +1515,10 @@ class MHNotify(_PluginBase):
         if not event:
             return
         event_data = event.event_data
-        if not event_data or event_data.get("action") != "mh_hdhive_refresh":
+        if not event_data:
+            return
+        action = event_data.get("action")
+        if action not in {"mh_hdhive_refresh", "mh_hdhive_refresh_newest"}:
             return
         arg_raw = (event_data.get("arg_str") or "").strip()
         names = [x.strip() for x in arg_raw.split(",") if x.strip()] if arg_raw else []
@@ -1297,10 +1530,13 @@ class MHNotify(_PluginBase):
                 limit_val = int(self._hdhive_max_subscriptions or 0)
             except Exception:
                 limit_val = 0
-            if names:
-                start_text = "刷新指定订阅: " + ", ".join(names)
+            if action == "mh_hdhive_refresh":
+                if names:
+                    start_text = "刷新指定订阅: " + ", ".join(names)
+                else:
+                    start_text = f"刷新前{limit_val}个115订阅" if limit_val > 0 else "刷新所有115订阅"
             else:
-                start_text = f"刷新前{limit_val}个115订阅" if limit_val > 0 else "刷新所有115订阅"
+                start_text = "刷新最近添加的MH订阅"
             self.post_message(
                 channel=event_data.get("channel"),
                 title="⏳ HDHive资源刷新开始",
@@ -1308,24 +1544,34 @@ class MHNotify(_PluginBase):
                 userid=event_data.get("user"),
                 mtype=NotificationType.Plugin
             )
-            if names:
-                threading.Thread(
-                    target=self._execute_hdhive_refresh_multi,
-                    kwargs={"names": names, "channel": event_data.get("channel"), "userid": event_data.get("user")},
-                    daemon=True
-                ).start()
+            if action == "mh_hdhive_refresh":
+                if names:
+                    threading.Thread(
+                        target=self._execute_hdhive_refresh_multi,
+                        kwargs={"names": names, "channel": event_data.get("channel"), "userid": event_data.get("user")},
+                        daemon=True
+                    ).start()
+                else:
+                    threading.Thread(
+                        target=self._execute_hdhive_refresh,
+                        kwargs={"subscription_name": None, "channel": event_data.get("channel"), "userid": event_data.get("user")},
+                        daemon=True
+                    ).start()
             else:
                 threading.Thread(
-                    target=self._execute_hdhive_refresh,
-                    kwargs={"subscription_name": None, "channel": event_data.get("channel"), "userid": event_data.get("user")},
+                    target=self.hdhive_refresh_newest_job,
+                    kwargs={"channel": event_data.get("channel"), "userid": event_data.get("user")},
                     daemon=True
                 ).start()
         except Exception:
             logger.warning("mhnotify: 启动HDHive资源刷新后台线程失败，改为同步执行")
-            if names:
-                self._execute_hdhive_refresh_multi(names=names, channel=event_data.get("channel"), userid=event_data.get("user"))
+            if action == "mh_hdhive_refresh":
+                if names:
+                    self._execute_hdhive_refresh_multi(names=names, channel=event_data.get("channel"), userid=event_data.get("user"))
+                else:
+                    self._execute_hdhive_refresh(subscription_name=None, channel=event_data.get("channel"), userid=event_data.get("user"))
             else:
-                self._execute_hdhive_refresh(subscription_name=None, channel=event_data.get("channel"), userid=event_data.get("user"))
+                self.hdhive_refresh_newest_job(channel=event_data.get("channel"), userid=event_data.get("user"))
     def _execute_hdhive_refresh_multi(self, names: List[str], channel: Optional[str] = None, userid: Optional[Union[str, int]] = None):
         try:
             for nm in names:
@@ -2847,6 +3093,45 @@ class MHNotify(_PluginBase):
         except Exception:
             pass
         return mtype, saved, expected_total
+
+    def __is_mh_subscription_completed(self, rec: dict) -> Tuple[bool, int, int, str]:
+        try:
+            if not isinstance(rec, dict):
+                logger.warning("mhnotify: 订阅记录类型异常，跳过完成判定")
+                return False, 0, 0, ""
+            mtype, saved, expected = self.__compute_progress(rec)
+            name = rec.get("name") or (rec.get("task") or {}).get("name")
+            logger.info(f"mhnotify: 订阅进度 name={str(name or '')[:50]} type={mtype} saved={saved}/{expected}")
+            return expected > 0 and saved >= expected, saved, expected, mtype
+        except Exception:
+            logger.warning("mhnotify: 订阅完成判定异常，视为未完成")
+            return False, 0, 0, ""
+
+    def __is_plugin_created_mh_subscription(self, rec: dict) -> bool:
+        try:
+            if not isinstance(rec, dict):
+                return False
+            
+            # 获取MH订阅的TMDB ID
+            params = rec.get("params") or {}
+            mh_tmdb_id = params.get("tmdb_id")
+            if not mh_tmdb_id:
+                return False
+                
+            # 获取插件记录的watch列表
+            watch: Dict[str, dict] = self.get_data(self._ASSIST_WATCH_KEY) or {}
+            if not watch:
+                return False
+                
+            # 检查MH订阅的TMDB ID是否在插件记录的watch列表中
+            for sid, info in watch.items():
+                watch_tmdb_id = info.get("tmdb_id")
+                if watch_tmdb_id and str(watch_tmdb_id) == str(mh_tmdb_id):
+                    return True
+                    
+            return False
+        except Exception:
+            return False
 
     def __assist_scheduler(self):
         """每分钟执行：先等待2分钟进行首次查询；未查询到则每1分钟重试，直到查询到；并处理MP完成监听"""
