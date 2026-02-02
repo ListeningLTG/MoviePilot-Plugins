@@ -83,5 +83,17 @@
       "v1.0.1": "修复枫叶的显示",
       "v1.0.0": "115网盘签到，首次提交"
     }
+  },
+  "autopausesub": {
+    "name": "自动暂停订阅",
+    "description": "当媒体服务器离线时自动暂停所有订阅，在线时恢复。",
+    "labels": "开发",
+    "version": "1.0",
+    "icon": "pause.png",
+    "author": "ListeningLTG",
+    "level": 1,
+    "history": {
+      "v1.0": "首次提交"
+    }
   }
 }
