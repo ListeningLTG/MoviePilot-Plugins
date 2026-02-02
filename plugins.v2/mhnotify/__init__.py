@@ -24,7 +24,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.6.9"
+    plugin_version = "1.7.0"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -2286,8 +2286,8 @@ class MHNotify(_PluginBase):
                 data = res.json() or {}
                 core = (data or {}).get("data") or {}
                 logger.info(
-                    "mhnotify: 默认配置摘要 cloud_type=%s account=%s target_directory=%s quality_preference=%s",
-                    core.get("cloud_type"), core.get("account_identifier"), core.get("target_directory"), core.get("quality_preference")
+                    "mhnotify: 默认配置摘要 cloud_type=%s account=%s target_directory=%s",
+                    core.get("cloud_type"), core.get("account_identifier"), core.get("target_directory")
                 )
                 return data
         except Exception:
@@ -2315,7 +2315,7 @@ class MHNotify(_PluginBase):
     def __build_mh_create_payload(self, subscribe, mediainfo_dict: Dict[str, Any], defaults: Dict[str, Any], aggregate_seasons: Optional[List[int]] = None) -> Optional[Dict[str, Any]]:
         try:
             data = (defaults or {}).get("data") or {}
-            quality_pref = data.get("quality_preference") or "auto"
+            quality_pref = "auto"
             target_dir = data.get("target_directory") or "/影视"
             logger.info(f"m1hnotify: 目标目录: {target_dir}")
             cron = data.get("cron") or "0 */6 * * *"
