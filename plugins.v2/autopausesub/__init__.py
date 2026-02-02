@@ -18,8 +18,8 @@ class AutoPauseSub(_PluginBase):
     # 插件基本信息
     plugin_name = "自动暂停订阅"
     plugin_desc = "当媒体服务器离线时自动暂停所有订阅，在线时恢复"
-    plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/pause.png"
-    plugin_version = "1.0.2"
+    plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/autopause.png"
+    plugin_version = "1.0.3"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "autopausesub_"
     plugin_order = 20
