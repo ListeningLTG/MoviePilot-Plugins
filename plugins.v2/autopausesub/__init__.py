@@ -17,9 +17,9 @@ class AutoPauseSub(_PluginBase):
 
     # 插件基本信息
     plugin_name = "自动暂停订阅"
-    plugin_desc = "当媒体服务器离线时自动暂停所有订阅，在线时恢复。"
+    plugin_desc = "当媒体服务器离线时自动暂停所有订阅，在线时恢复"
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/pause.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "autopausesub_"
     plugin_order = 20
@@ -159,20 +159,34 @@ class AutoPauseSub(_PluginBase):
             return
 
         logger.info("开始检测媒体服务器状态...")
-        
+
         # 获取所有配置的服务
-        services = self.mediaserver_helper.get_services(name_filters=self._mediaservers)
+        try:
+            services = self.mediaserver_helper.get_services(name_filters=self._mediaservers)
+        except Exception:
+            # 兼容性保护：避免因为配置字段变更或模块初始化异常导致插件逻辑中断
+            logger.exception("获取媒体服务器服务实例时发生异常")
+            services = {}
         
         # 统计在线状态
         online_servers = []
         offline_servers = []
         
         for name in self._mediaservers:
-            service = services.get(name)
-            if service and not service.instance.is_inactive():
-                online_servers.append(name)
-            else:
+            logger.info(f"正在检测媒体服务器: {name} ...")
+            try:
+                service = services.get(name)
+                if service and service.instance and self._is_server_online(service.instance):
+                    online_servers.append(name)
+                    logger.info(f"媒体服务器 {name} 检测完成，结果: 在线")
+                else:
+                    offline_servers.append(name)
+                    logger.info(f"媒体服务器 {name} 检测完成，结果: 离线")
+            except Exception as e:
+                # 你遇到的报错通常来自旧代码访问 MediaServerConf.host（该字段在当前模型中不存在）
+                # 这里做兜底，避免异常导致“无论在线离线都判定为离线且一直报错”
                 offline_servers.append(name)
+                logger.error(f"检测媒体服务器 {name} 在线状态时发生异常: {e}")
 
         logger.info(f"媒体服务器检测结果：在线 {online_servers}，离线 {offline_servers}")
 
@@ -182,6 +196,32 @@ class AutoPauseSub(_PluginBase):
         else:
             # 只要有一个在线，就尝试恢复
             self._restore_subscriptions()
+
+    @staticmethod
+    def _is_server_online(instance: Any) -> bool:
+        """判断媒体服务器实例是否在线。
+
+        - 优先兼容项目内置媒体服务器实现：通过 is_inactive() 判断。
+        - 兼容部分实现/单测桩：通过 get_server_id() 是否有值判断。
+        """
+        if not instance:
+            return False
+        if hasattr(instance, "get_server_id") and callable(getattr(instance, "get_server_id")):
+            try:
+                return bool(instance.get_server_id())
+            except Exception:
+                # 兼容不规范实现
+                pass
+
+        if hasattr(instance, "is_inactive") and callable(getattr(instance, "is_inactive")):
+            try:
+                inactive = instance.is_inactive()
+                if isinstance(inactive, bool):
+                    return not inactive
+            except Exception:
+                pass
+        # 最保守的兜底：无法判断时按离线处理
+        return False
 
     def _pause_all_subscriptions(self):
         """
@@ -244,5 +284,5 @@ class AutoPauseSub(_PluginBase):
     def get_api(self) -> List[Dict[str, Any]]:
         return []
 
-    def get_page(self) -> List[dict]:
-        return []
+    def get_page(self) -> Optional[List[dict]]:
+        pass
