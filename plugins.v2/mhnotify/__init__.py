@@ -24,7 +24,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.7.0"
+    plugin_version = "1.7.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -39,6 +39,9 @@ class MHNotify(_PluginBase):
     # 线程锁
     _tmdb_locks: Dict[int, threading.Lock] = {}
     _locks_lock = threading.Lock()
+    # 待检查订阅的定时器映射 (sid -> threading.Timer)
+    _pending_timers: Dict[str, threading.Timer] = {}
+    _timers_lock = threading.Lock()
 
     # 私有属性
     _mh_domain = None
@@ -162,7 +165,7 @@ class MHNotify(_PluginBase):
                 self._hdhive_refresh_before = 3600
             # HDHive 资源刷新配置
             self._hdhive_refresh_enabled = bool(config.get("hdhive_refresh_enabled", False))
-            self._hdhive_refresh_cron = (config.get("hdhive_refresh_cron") or "0 */6 * * *").strip() or "0 */6 * * *"
+            self._hdhive_refresh_cron = (config.get("hdhive_refresh_cron") or "30 */6 * * *").strip() or "30 */6 * * *"
             # 运行一次（保存后立即触发一次刷新并复位）
             try:
                 if bool(config.get("hdhive_refresh_once", False)):
@@ -870,7 +873,7 @@ class MHNotify(_PluginBase):
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': 'HDHive资源查询：新增订阅时，获取免费 115 分享链接，作为自定义链接随订阅传入mh订阅'}}]}]},
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_enabled', 'label': 'HDHive资源查询'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSelect', 'props': {'model': 'hdhive_query_mode', 'label': 'HDHive 查询模式', 'items': [{'title': 'Playwright', 'value': 'playwright'}, {'title': 'API', 'value': 'api'}], 'clearable': False}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_username', 'label': 'HDHive 用户名'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_password', 'label': 'HDHive 密码', 'type': 'password'}}]}]},
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_cookie', 'label': 'HDHive Cookie（API 模式）', 'type': 'password'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_auto_refresh', 'label': '自动刷新 Cookie'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_refresh_before', 'label': 'Cookie提前刷新秒数', 'type': 'number', 'placeholder': '默认 3600'}}]}]},
-                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_enabled', 'label': '定时刷新mh订阅', 'hint': '开启后按Cron周期刷新mh订阅的自定义链接'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 9}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_refresh_cron', 'label': '刷新计划 Cron', 'placeholder': '例如：0 */6 * * *（每6小时）', 'hint': '使用标准Crontab表达式'}}]}]},
+                                    {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 3}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_enabled', 'label': '定时刷新mh订阅', 'hint': '开启后按Cron周期刷新mh订阅的自定义链接'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 9}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_refresh_cron', 'label': '刷新计划 Cron', 'placeholder': '默认：30 */6 * * *（每6小时的30分）', 'hint': '使用标准Crontab表达式，默认为 30 */6 * * *'}}]}]},
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_max_subscriptions', 'label': '最多订阅条数', 'type': 'number', 'placeholder': '默认 20', 'hint': '仅处理启用且为115的前 N 条订阅'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_once', 'label': '运行一次刷新mh订阅', 'hint': '开启后保存将立即执行一次刷新任务，执行后自动复位为关闭'}}]}]},
                             {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_newest_enabled', 'label': '定时刷新最近订阅', 'hint': '开启后按间隔自动刷新最近窗口内的启用115订阅的自定义链接'}}]} , {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_refresh_newest_interval_minutes', 'label': '刷新间隔分钟', 'type': 'number', 'placeholder': '默认 10'}}]} , {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'hdhive_refresh_newest_once', 'label': '运行一次刷新最近订阅'}}]} ]},
                                     {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'density': 'comfortable', 'text': '/mhrefresh [订阅1,订阅2,...] — 刷新mh订阅；支持多个订阅名称用英文逗号分隔。不带参数时刷新前N个启用的115订阅（N为“最多订阅条数”）。'}}]}]},
@@ -2190,6 +2193,10 @@ class MHNotify(_PluginBase):
                 import threading
                 def _delayed_check():
                     try:
+                        # 执行完成后从定时器字典中移除
+                        with self._timers_lock:
+                            self._pending_timers.pop(str(sub_id), None)
+                        
                         p = self.get_data(self._ASSIST_PENDING_KEY) or {}
                         info = p.get(str(sub_id))
                         if not info:
@@ -2200,7 +2207,12 @@ class MHNotify(_PluginBase):
                         self.__assist_scheduler()
                     except Exception:
                         logger.warning("mhnotify: 新订阅延迟检查异常", exc_info=True)
-                threading.Timer(self._assist_initial_delay_seconds, _delayed_check).start()
+                
+                # 创建定时器并存储引用
+                timer = threading.Timer(self._assist_initial_delay_seconds, _delayed_check)
+                with self._timers_lock:
+                    self._pending_timers[str(sub_id)] = timer
+                timer.start()
                 logger.info(f"mhnotify: 已安排新订阅在 {int(self._assist_initial_delay_seconds/60)} 分钟后立即检查进度（不受全局调度频率影响）")
             except Exception:
                 logger.warning("mhnotify: 安排新订阅延迟检查失败", exc_info=True)
@@ -3160,11 +3172,11 @@ class MHNotify(_PluginBase):
                             logger.info(f"mhnotify: 到期处理 sid={sid} mh_uuid={mh_uuid} type={info.get('type')} douban_id={info.get('douban_id')}")
                             target = subs_map.get(mh_uuid)
                             if not target:
-                                # 未找到，记录重试次数，超过30次则移除记录
+                                # 未找到，记录重试次数，超过5次则移除记录
                                 attempts = int(info.get("attempts") or 0) + 1
                                 info["attempts"] = attempts
                                 info["last_attempt"] = now_ts
-                                if attempts >= 30:
+                                if attempts >= 5:
                                     logger.warning(f"mhnotify: 订阅 {mh_uuid} 未在MH列表中找到，已重试{attempts}次，移除记录")
                                     pending.pop(sid, None)
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
@@ -4492,39 +4504,75 @@ class MHNotify(_PluginBase):
         except Exception as e:
             logger.error(f"mhnotify: 发送云下载通知失败: {e}", exc_info=True)
 
-    def _get_mh_access_token(self) -> Optional[str]:
+    def _get_mh_access_token(self, max_retries: int = 5) -> Optional[str]:
         """
-        获取MH access token
+        获取MH access token，支持重试
+        :param max_retries: 最大重试次数（默认5次）
         :return: access token或None
         """
-        try:
-            login_url = f"{self._mh_domain}/api/v1/auth/login"
-            login_payload = {
-                "username": self._mh_username,
-                "password": self._mh_password
-            }
-            headers = {
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json;charset=UTF-8",
-                "Origin": self._mh_domain,
-                "Accept-Language": "zh-CN",
-                "User-Agent": "MoviePilot/Plugin MHNotify"
-            }
-            login_res = RequestUtils(headers=headers).post(login_url, json=login_payload)
-            if not login_res or login_res.status_code != 200:
-                logger.error(f"mhnotify: MH登录失败")
-                return None
-            
+        for attempt in range(1, max_retries + 1):
             try:
-                login_data = login_res.json()
-                access_token = login_data.get("data", {}).get("access_token")
-                return access_token
-            except Exception:
-                logger.error(f"mhnotify: 解析MH登录响应失败")
-                return None
-        except Exception as e:
-            logger.error(f"mhnotify: 获取MH access token异常: {e}")
-            return None
+                login_url = f"{self._mh_domain}/api/v1/auth/login"
+                login_payload = {
+                    "username": self._mh_username,
+                    "password": self._mh_password
+                }
+                headers = {
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json;charset=UTF-8",
+                    "Origin": self._mh_domain,
+                    "Accept-Language": "zh-CN",
+                    "User-Agent": "MoviePilot/Plugin MHNotify"
+                }
+                login_res = RequestUtils(headers=headers).post(login_url, json=login_payload)
+                if not login_res or login_res.status_code != 200:
+                    if attempt < max_retries:
+                        wait_time = 2 ** (attempt - 1)
+                        logger.warning(f"mhnotify: MH登录失败（第{attempt}/{max_retries}次），{wait_time}秒后重试...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"mhnotify: MH登录失败，已重试{max_retries}次")
+                        return None
+                
+                try:
+                    login_data = login_res.json()
+                    access_token = login_data.get("data", {}).get("access_token")
+                    if access_token:
+                        if attempt > 1:
+                            logger.info(f"mhnotify: MH登录成功（第{attempt}次尝试）")
+                        return access_token
+                    else:
+                        if attempt < max_retries:
+                            wait_time = 2 ** (attempt - 1)
+                            logger.warning(f"mhnotify: 未获取到 access token（第{attempt}/{max_retries}次），{wait_time}秒后重试...")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            logger.error(f"mhnotify: 未获取到 access token，已重试{max_retries}次")
+                            return None
+                except Exception as parse_err:
+                    if attempt < max_retries:
+                        wait_time = 2 ** (attempt - 1)
+                        logger.warning(f"mhnotify: 解析MH登录响应失败（第{attempt}/{max_retries}次）: {parse_err}，{wait_time}秒后重试...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"mhnotify: 解析MH登录响应失败，已重试{max_retries}次")
+                        return None
+            except Exception as e:
+                if attempt < max_retries:
+                    wait_time = 2 ** (attempt - 1)
+                    logger.warning(f"mhnotify: 获取MH access token异常（第{attempt}/{max_retries}次）: {e}，{wait_time}秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"mhnotify: 获取MH access token异常，已重试{max_retries}次: {e}")
+                    return None
+        
+        logger.error(f"mhnotify: MH登录失败，已达到最大重试次数{max_retries}")
+        return None
+
 
     def _organize_cloud_download(self, access_token: str, target_path: str):
         """
@@ -4921,6 +4969,27 @@ class MHNotify(_PluginBase):
             if not sid:
                 return
             logger.info(f"mhnotify: SubscribeDeleted 事件收到 sid={sid}")
+            
+            # 取消待处理的定时器（如果存在）
+            try:
+                with self._timers_lock:
+                    timer = self._pending_timers.pop(sid, None)
+                    if timer:
+                        timer.cancel()
+                        logger.info(f"mhnotify: 已取消订阅 {sid} 的待检查定时器")
+            except Exception as e:
+                logger.warning(f"mhnotify: 取消定时器失败: {e}")
+            
+            # 从待检查队列中移除（如果存在）
+            try:
+                pending = self.get_data(self._ASSIST_PENDING_KEY) or {}
+                if sid in pending:
+                    pending.pop(sid, None)
+                    self.save_data(self._ASSIST_PENDING_KEY, pending)
+                    logger.info(f"mhnotify: 已从待检查队列中移除订阅 {sid}")
+            except Exception as e:
+                logger.warning(f"mhnotify: 从待检查队列移除失败: {e}")
+            
             try:
                 import json
                 logger.info(f"mhnotify: SubscribeDeleted 全量事件 event_data={str(json.dumps(data, ensure_ascii=False, default=str))[:2000]}")
