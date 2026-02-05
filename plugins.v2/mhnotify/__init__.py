@@ -24,7 +24,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.7.1"
+    plugin_version = "1.7.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -4336,8 +4336,13 @@ class MHNotify(_PluginBase):
                         
                         logger.debug(f"mhnotify: 检查文件: {file_name}, 大小: {file_size/1024/1024:.2f}MB")
                         
-                        # 如果文件小于10MB，删除
+                        # 如果文件小于10MB，且不是字幕文件（srt, ass, sup），则删除
                         if file_size < min_size:
+                            # 检查扩展名，忽略字幕文件
+                            if any(file_name.lower().endswith(ext) for ext in ('.srt', '.ass', '.sup')):
+                                logger.debug(f"mhnotify: 跳过字幕文件: {file_name}")
+                                continue
+
                             try:
                                 logger.info(f"mhnotify: 准备删除小文件: {file_name} ({file_size/1024/1024:.2f}MB)")
                                 client.fs_delete(file_id)
@@ -4461,6 +4466,11 @@ class MHNotify(_PluginBase):
                         logger.debug(f"mhnotify: 检查文件: {file_name}, 大小: {file_size/1024/1024:.2f}MB")
                         
                         if file_size < min_size:
+                            # 检查扩展名，忽略字幕文件
+                            if any(file_name.lower().endswith(ext) for ext in ('.srt', '.ass', '.sup')):
+                                logger.debug(f"mhnotify: 跳过字幕文件: {file_name}")
+                                continue
+
                             try:
                                 logger.info(f"mhnotify: 准备删除小文件: {file_name} ({file_size/1024/1024:.2f}MB)")
                                 client.fs_delete(file_id)
@@ -5463,24 +5473,25 @@ class MHNotify(_PluginBase):
                 return
             
             # 获取分享文件列表（递归）
-            media_exts = ['.mp4', '.mkv', '.avi', '.wmv', '.mov', '.flv', '.rmvb', '.rm', '.ts', '.m2ts', '.webm', '.mpg', '.mpeg', '.m4v', '.3gp', '.iso']
+            media_exts = ['.mp4', '.mkv', '.avi', '.wmv', '.mov', '.flv', '.rmvb', '.rm', '.ts', '.m2ts', '.webm', '.mpg', '.mpeg', '.m4v', '.3gp', '.iso', '.srt', '.ass', '.sup']
             
-            def get_share_files(share_token, parent_file_id="root"):
-                """递归获取分享文件列表"""
+            def get_share_files(share_token, parent_file_id="root", current_path=""):
+                """递归获取分享文件列表（包含相对路径）"""
                 files = []
                 try:
                     file_list = ali_client.get_share_file_list(share_token, parent_file_id=parent_file_id)
                     for file in file_list:
+                        new_path = f"{current_path}/{file.name}" if current_path else file.name
                         if file.type == "folder":
-                            files.extend(get_share_files(share_token, file.file_id))
+                            files.extend(get_share_files(share_token, file.file_id, new_path))
                         else:
                             suffix = Path(file.name).suffix.lower()
                             if suffix in media_exts:
-                                files.append(file)
+                                files.append({"name": file.name, "rel_path": current_path})
                             else:
-                                logger.debug(f"mhnotify: 跳过非媒体文件: {file.name}")
+                                logger.debug(f"mhnotify: 跳过无关文件: {file.name}")
                 except Exception as e:
-                    logger.warning(f"mhnotify: 获取文件列表异常: {e}")
+                    logger.warning(f"mhnotify: 获取分享文件列表异常: {e}")
                 return files
             
             share_files = get_share_files(share_token)
@@ -5489,59 +5500,60 @@ class MHNotify(_PluginBase):
                 self.post_message(
                     channel=channel,
                     title="⚠️ 阿里云盘秒传完成",
-                    text="分享中没有找到媒体文件（支持的格式：mp4、mkv、avi 等）",
+                    text="分享中没有找到媒体或字幕文件 (mp4, mkv, srt 等)",
                     userid=userid
                 )
                 return
             
-            share_file_names = [f.name for f in share_files]
-            logger.info(f"mhnotify: 找到 {len(share_file_names)} 个媒体文件待秒传")
+            logger.info(f"mhnotify: 找到 {len(share_files)} 个媒体/字幕文件待秒传")
             
             # 获取已转存文件的下载链接和SHA1
             download_url_list = []
             remove_list = []
             
-            def walk_files(parent_file_id, callback):
+            def walk_files(parent_file_id, callback, current_rel_path=""):
                 """遍历阿里云盘目录"""
                 try:
                     file_list = ali_client.get_file_list(parent_file_id=parent_file_id)
                     for file in file_list:
-                        callback(file)
+                        callback(file, current_rel_path)
                         if file.type == "folder":
-                            walk_files(file.file_id, callback)
+                            new_rel_path = f"{current_rel_path}/{file.name}" if current_rel_path else file.name
+                            walk_files(file.file_id, callback, new_rel_path)
                 except Exception as e:
                     logger.warning(f"mhnotify: 遍历文件夹异常: {e}")
             
-            file_name_list = list(share_file_names)
+            file_info_list = list(share_files)
             
-            def collect_file_info(file):
-                nonlocal file_name_list
+            def collect_file_info(file, rel_path):
+                nonlocal file_info_list
                 # 记录所有遍历到的文件ID，以便后续删除
                 if file.file_id not in remove_list:
                     remove_list.append(file.file_id)
                 
                 # 检查是否是我们需要的目标文件
                 if file.type == "file":
-                    # 尝试匹配文件名（不区分大小写，且忽略扩展名差异）
-                    matched_name = None
-                    for name in file_name_list:
-                        if name == file.name:
-                            matched_name = name
+                    # 匹配文件名与相对路径
+                    matched_info = None
+                    for info in file_info_list:
+                        if info.get("name") == file.name and info.get("rel_path") == rel_path:
+                            matched_info = info
                             break
                     
-                    if matched_name:
+                    if matched_info:
                         try:
                             url_info = ali_client.get_download_url(file_id=file.file_id)
                             if url_info and url_info.url:
                                 info = {
                                     "url": url_info.url,
                                     "size": url_info.size,
-                                    "name": matched_name,
+                                    "name": matched_info.get("name"),
+                                    "rel_path": rel_path,
                                     "sha1": str(url_info.content_hash).upper(),
                                     "file_id": file.file_id
                                 }
                                 download_url_list.append(info)
-                                file_name_list = [n for n in file_name_list if n != matched_name]
+                                file_info_list = [i for i in file_info_list if i != matched_info]
                         except Exception as e:
                             logger.warning(f"mhnotify: 获取文件 {file.name} 下载链接失败: {e}")
 
@@ -5551,11 +5563,11 @@ class MHNotify(_PluginBase):
             
             # 最多尝试10次获取所有文件信息 (增加重试次数)
             for attempt in range(10):
-                if not file_name_list:
+                if not file_info_list:
                     break
                 walk_files(ali_folder_id, collect_file_info)
-                if file_name_list:
-                    logger.info(f"mhnotify: 尚有 {len(file_name_list)} 个文件未获取到下载信息，等待重试 ({attempt+1}/10)...")
+                if file_info_list:
+                    logger.info(f"mhnotify: 尚有 {len(file_info_list)} 个文件未获取到下载信息，等待重试 ({attempt+1}/10)...")
                     sleep(3)
             
             if not download_url_list:
@@ -5613,11 +5625,30 @@ class MHNotify(_PluginBase):
                     return calculate_sha1_range(url, sign_check)
                 return read_range_bytes_or_hash
             
+            # 115 目录缓存 (rel_path -> cid)
+            cid_cache = {"": target_cid}
+
             def upload_to_115(file_info: dict):
                 """上传文件到115"""
                 file_id = file_info.get("file_id")
                 file_name = file_info.get("name")
                 fallback_url = file_info.get("url")
+                rel_path = file_info.get("rel_path", "")
+                
+                # 获取或创建115目标子目录
+                dest_cid = target_cid
+                if rel_path:
+                    if rel_path in cid_cache:
+                        dest_cid = cid_cache[rel_path]
+                    else:
+                        try:
+                            full_dest_path = f"{target_path}/{rel_path}".replace('//', '/')
+                            mkdir_resp = p115_client.fs_makedirs_app(full_dest_path, pid=0)
+                            if mkdir_resp and mkdir_resp.get("cid"):
+                                dest_cid = int(mkdir_resp.get("cid"))
+                                cid_cache[rel_path] = dest_cid
+                        except Exception as e:
+                            logger.warning(f"mhnotify: 确保115目录 {rel_path} 存在失败: {e}")
                 
                 # 创建专属于这个文件的读取函数
                 read_range_func = make_read_range_func(file_id, fallback_url)
@@ -5626,7 +5657,7 @@ class MHNotify(_PluginBase):
                     filename=file_name,
                     filesize=file_info.get("size"),
                     filesha1=file_info.get("sha1"),
-                    pid=target_cid,
+                    pid=dest_cid,
                     read_range_bytes_or_hash=read_range_func,
                 )
             
