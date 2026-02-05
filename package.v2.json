@@ -3,11 +3,12 @@
     "name": "MediaHelper增强",
     "description": "配合MediaHelper使用的一些小功能",
     "labels": "开发",
-    "version": "1.7.3",
+    "version": "1.7.4",
     "icon": "mh.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.7.4": "资源刷新优化季数判断",
       "v1.7.3": "资源刷新添加剧集播出日期判定",
       "v1.7.2": "优化阿里云盘秒传和云下载",
       "v1.7.1": "优化订阅取消处理",

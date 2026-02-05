@@ -28,7 +28,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.7.3"
+    plugin_version = "1.7.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -1443,6 +1443,11 @@ class MHNotify(_PluginBase):
                         try:
                             logger.info(f"mhnotify: 开始剧集播出时间判定 uuid={uuid} name={name}")
                             
+                            # 0. 获取订阅的季列表
+                            selected_seasons = params.get("selected_seasons") or []
+                            selected_set = set(int(x) for x in selected_seasons) if selected_seasons else set()
+                            logger.info(f"mhnotify: 订阅季列表 selected_seasons={selected_seasons} (空=订阅所有季)")
+                            
                             # 1. 获取缺失集数 (DownloadChain)
                             from app.core.metainfo import MetaInfo
                             
@@ -1472,6 +1477,11 @@ class MHNotify(_PluginBase):
                             for media_key, season_dict in no_exists.items():
                                 logger.info(f"mhnotify: 检查媒体 media_key={media_key} 季数={len(season_dict)}")
                                 for season_num, not_exist_info in season_dict.items():
+                                    # 如果指定了 selected_seasons，则只检查选中的季
+                                    if selected_set and season_num not in selected_set:
+                                        logger.info(f"mhnotify: S{season_num} 不在订阅列表中，跳过")
+                                        continue
+                                    
                                     # 获取该季详情
                                     detail = tmdb.get_tv_season_detail(tmdbid=int(tmdb_id), season=season_num)
                                     if not detail or 'episodes' not in detail:
