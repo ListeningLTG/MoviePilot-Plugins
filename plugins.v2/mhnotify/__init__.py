@@ -1,6 +1,7 @@
 import time
 import re
 import threading
+from datetime import datetime
 from urllib.parse import quote
 
 from typing import List, Tuple, Dict, Any, Optional, Union
@@ -8,7 +9,10 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
 from app.core.event import eventmanager, Event
-from app.schemas.types import EventType, NotificationType
+from app.schemas.types import EventType, NotificationType, MediaType
+from app.core.context import MediaInfo
+from app.modules.themoviedb.tmdbapi import TmdbApi
+from app.chain.download import DownloadChain
 from app.utils.http import RequestUtils
 from app.log import logger
 from app.plugins import _PluginBase
@@ -24,7 +28,7 @@ class MHNotify(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.7.2"
+    plugin_version = "1.7.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -1433,6 +1437,80 @@ class MHNotify(_PluginBase):
                     media_type = (params.get("media_type") or "movie").lower()
                     existing_links: List[str] = params.get("user_custom_links") or []
                     logger.info(f"mhnotify: 刷新前 uuid={uuid} name={str(name or '')[:50]} tmdb_id={tmdb_id} type={media_type} links={len(existing_links)}")
+                    
+                    # 剧集播出时间判定优化
+                    if media_type == 'tv' and tmdb_id:
+                        try:
+                            logger.info(f"mhnotify: 开始剧集播出时间判定 uuid={uuid} name={name}")
+                            
+                            # 1. 获取缺失集数 (DownloadChain)
+                            from app.core.metainfo import MetaInfo
+                            
+                            minfo = MediaInfo()
+                            minfo.tmdb_id = int(tmdb_id)
+                            minfo.type = MediaType.TV
+                            minfo.title = name
+                            
+                            # 创建 MetaBase 对象（从标题识别）
+                            meta = MetaInfo(title=name or "")
+                            
+                            # 调用 DownloadChain 检查缺失集 (get_no_exists_info 返回: (is_missing, {季号: NotExistMediaInfo}))
+                            is_missing, no_exists = DownloadChain().get_no_exists_info(meta=meta, mediainfo=minfo)
+                            logger.info(f"mhnotify: 缺失检查完成 uuid={uuid} is_missing={is_missing} no_exists_count={len(no_exists) if no_exists else 0}")
+                            
+                            if not no_exists:
+                                logger.info(f"mhnotify: 剧集已全集入库，跳过刷新 uuid={uuid} name={name}")
+                                continue
+                            
+                            
+                            # 2. 检查缺失集中是否有已播出的
+                            has_aired = False
+                            tmdb = TmdbApi()
+                            today = datetime.now().strftime('%Y-%m-%d')
+                            
+                            # no_exists 结构: {tmdb_id: {season_num: NotExistMediaInfo}}
+                            for media_key, season_dict in no_exists.items():
+                                logger.info(f"mhnotify: 检查媒体 media_key={media_key} 季数={len(season_dict)}")
+                                for season_num, not_exist_info in season_dict.items():
+                                    # 获取该季详情
+                                    detail = tmdb.get_tv_season_detail(tmdbid=int(tmdb_id), season=season_num)
+                                    if not detail or 'episodes' not in detail:
+                                        logger.warning(f"mhnotify: 无法获取季详情 season={season_num}")
+                                        continue
+                                    
+                                    # 将该季所有集存入映射
+                                    aired_eps = {ep.get('episode_number'): ep.get('air_date') for ep in detail['episodes'] if ep.get('air_date')}
+                                    
+                                    # 获取缺失的集号列表
+                                    missing_episodes = not_exist_info.episodes if not_exist_info.episodes else []
+                                    
+                                    # 如果 episodes 为空列表，表示整季缺失，需要检查所有集
+                                    if not missing_episodes and not_exist_info.total_episode:
+                                        start_ep = not_exist_info.start_episode or 1
+                                        missing_episodes = list(range(start_ep, start_ep + not_exist_info.total_episode))
+                                    
+                                    logger.info(f"mhnotify: S{season_num} 缺失集数={len(missing_episodes)} 集号={missing_episodes[:5]}...")
+                                    
+                                    for ep_num in missing_episodes:
+                                        ep_air_date = aired_eps.get(ep_num)
+                                        if ep_air_date and ep_air_date <= today:
+                                            logger.info(f"mhnotify: 发现已播出集 S{season_num}E{ep_num} air_date={ep_air_date}")
+                                            has_aired = True
+                                            break
+                                    if has_aired:
+                                        break
+                                if has_aired:
+                                    break
+                            
+                            if not has_aired:
+                                logger.info(f"mhnotify: 缺失剧集均尚未播出，跳过刷新 uuid={uuid} name={name}")
+                                continue
+                            else:
+                                logger.info(f"mhnotify: 存在已播出的缺失剧集，继续刷新 uuid={uuid} name={name}")
+                                
+                        except Exception as e:
+                            logger.warning(f"mhnotify: 剧集播出时间判定异常 uuid={uuid} name={name}: {e}", exc_info=True)
+
                     links = self.__fetch_hdhive_links(tmdb_id=tmdb_id, media_type=media_type)
                     checked += 1
                     if not links:
