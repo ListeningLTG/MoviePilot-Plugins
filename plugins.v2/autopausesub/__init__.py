@@ -19,8 +19,11 @@ class AutoPauseSub(_PluginBase):
     plugin_name = "自动暂停订阅"
     plugin_desc = "当媒体服务器离线时自动暂停所有订阅，在线时恢复"
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/autopause.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
+    # 插件作者
     plugin_author = "ListeningLTG"
+    # 作者主页
+    author_url = "https://github.com/ListeningLTG"
     plugin_config_prefix = "autopausesub_"
     plugin_order = 20
 
@@ -28,6 +31,8 @@ class AutoPauseSub(_PluginBase):
     _enabled = False
     _mediaservers = []
     _interval = 10
+    _pause_condition = "any"
+    _restore_condition = "all"
 
     def __init__(self):
         super().__init__()
@@ -42,6 +47,8 @@ class AutoPauseSub(_PluginBase):
             self._enabled = config.get("enabled", False)
             self._mediaservers = config.get("mediaservers") or []
             self._interval = int(config.get("interval") or 10)
+            self._pause_condition = config.get("pause_condition") or "any"
+            self._restore_condition = config.get("restore_condition") or "all"
 
     def get_state(self) -> bool:
         return self._enabled
@@ -115,6 +122,45 @@ class AutoPauseSub(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VSelect',
+                                        'props': {
+                                            'model': 'pause_condition',
+                                            'label': '暂停触发条件',
+                                            'items': [
+                                                {'title': '任一服务器离线', 'value': 'any'},
+                                                {'title': '所有服务器离线', 'value': 'all'}
+                                            ]
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VSelect',
+                                        'props': {
+                                            'model': 'restore_condition',
+                                            'label': '恢复触发条件',
+                                            'items': [
+                                                {'title': '任一服务器在线', 'value': 'any'},
+                                                {'title': '所有服务器在线', 'value': 'all'}
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
                                 'props': {'cols': 12},
                                 'content': [
                                     {
@@ -122,7 +168,7 @@ class AutoPauseSub(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '启用后，插件将每隔指定时间检测所选媒体服务器的状态。如果所有服务器都不在线，将保存当前订阅状态并全部暂停；当任一服务器恢复在线时，将自动还原这些订阅的状态。'
+                                            'text': '启用后，插件将根据所选条件检测媒体服务器状态。若触发暂停条件，将保存当前订阅状态并全部暂停；若触发恢复条件，将自动还原这些订阅。'
                                         }
                                     }
                                 ]
@@ -132,9 +178,11 @@ class AutoPauseSub(_PluginBase):
                 ]
             }
         ], {
-            "enabled": False,
-            "interval": 10,
-            "mediaservers": []
+            "enabled": self._enabled,
+            "interval": self._interval,
+            "mediaservers": self._mediaservers,
+            "pause_condition": self._pause_condition or "any",
+            "restore_condition": self._restore_condition or "all"
         }
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -190,11 +238,34 @@ class AutoPauseSub(_PluginBase):
 
         logger.info(f"媒体服务器检测结果：在线 {online_servers}，离线 {offline_servers}")
 
-        # 如果所有选定的服务器都离线
-        if not online_servers:
-            self._pause_all_subscriptions()
+        logger.info(f"媒体服务器检测结果：在线 {online_servers}，离线 {offline_servers}")
+
+        # 判断是否应暂停
+        # all: 所有选定的服务器都离线 (即没有在线库)
+        # any: 任一选定的服务器离线 (即离线库列表不为空)
+        should_pause = False
+        if self._pause_condition == "any":
+            should_pause = len(offline_servers) > 0
         else:
-            # 只要有一个在线，就尝试恢复
+            should_pause = len(online_servers) == 0
+
+        # 判断是否应恢复
+        # any: 只要有一个在线
+        # all: 必须全部在线 (即离线库列表为空)
+        should_restore = False
+        if self._restore_condition == "all":
+            should_restore = len(offline_servers) == 0
+        else:
+            should_restore = len(online_servers) > 0
+
+        # 获取当前保存的暂停状态
+        saved_states = self.get_data("saved_subscription_states")
+
+        if should_pause and not saved_states:
+            # 符合暂停条件且当前未暂停
+            self._pause_all_subscriptions()
+        elif should_restore and saved_states:
+            # 符合恢复条件且当前处于暂停状态
             self._restore_subscriptions()
 
     @staticmethod
