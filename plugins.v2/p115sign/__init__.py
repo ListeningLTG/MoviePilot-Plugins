@@ -24,7 +24,7 @@ class p115sign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
      # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -149,7 +149,11 @@ class p115sign(_PluginBase):
                 while True:
                     if use_client and P115Client:
                         client = P115Client(cookie, check_for_relogin=True)
-                        resp = client.user_points_sign_post()
+                        app_kwargs = {
+                            "headers": {"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 115wangpan_ios/36.2.20"},
+                            "app": "ios"
+                        }
+                        resp = client.user_points_sign_post(**app_kwargs)
                         if isinstance(resp, dict):
                             code = resp.get("code")
                             state = resp.get("state")
