@@ -112,18 +112,23 @@ def process_share_strm(
         # 如果提供了 tmdbid 并且开启了整理，尝试提前获取媒体信息以提高入库准确度
         mediainfo = None
         if tmdbid and transfer_chain:
-            try:
-                from app.chain.media import MediaChain
-                from app.schemas.types import MediaType
-                # 处理媒体类型
-                media_type = MediaType.from_agent(mtype) if mtype else None
-                mediainfo = MediaChain().recognize_media(tmdbid=tmdbid, mtype=media_type)
-                if mediainfo:
-                    logger.info(f"【P115ShareStrm】通过 TMDB ID {tmdbid} ({mtype or '未知类型'}) 提取媒体信息成功: {mediainfo.title_year}")
-                else:
-                    logger.warning(f"【P115ShareStrm】未找到 TMDB ID {tmdbid} ({mtype or '未知类型'}) 对应的媒体信息")
-            except Exception as e:
-                logger.warning(f"【P115ShareStrm】获取 TMDB 媒体信息时发生异常: {e}")
+            for i in range(3):
+                try:
+                    from app.chain.media import MediaChain
+                    from app.schemas.types import MediaType
+                    # 处理媒体类型
+                    media_type = MediaType.from_agent(mtype) if mtype else None
+                    mediainfo = MediaChain().recognize_media(tmdbid=tmdbid, mtype=media_type)
+                    if mediainfo:
+                        logger.info(f"【P115ShareStrm】通过 TMDB ID {tmdbid} ({mtype or '未知类型'}) 提取媒体信息成功: {mediainfo.title_year}")
+                        break
+                    else:
+                        logger.warning(f"【P115ShareStrm】未找到 TMDB ID {tmdbid} ({mtype or '未知类型'}) 对应的媒体信息 (尝试 {i+1}/3)")
+                except Exception as e:
+                    logger.warning(f"【P115ShareStrm】获取 TMDB 媒体信息时发生异常 (尝试 {i+1}/3): {e}")
+
+                if i < 2:
+                    sleep(2)
 
         for item in iter_share_files(client, share_code, receive_code):
             total_files += 1
