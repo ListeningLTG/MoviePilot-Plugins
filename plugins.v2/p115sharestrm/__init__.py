@@ -7,7 +7,7 @@ from app.schemas.types import EventType
 from app.log import logger
 
 from .config import configer
-from .utils import extract_115_links_from_text
+from .utils import extract_115_links
 from .logic import task_queue
 
 
@@ -23,7 +23,7 @@ class P115ShareStrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -408,8 +408,8 @@ class P115ShareStrm(_PluginBase):
             self._send_notify(user_id, "【115分享STRM】提示", "❌ 请在 /sharestrm 后附上 115 分享链接")
             return
 
-        # 从参数文本中提取所有 115 链接
-        links = extract_115_links_from_text(arg_str)
+        # 从参数文本中提取所有 115 链接（支持富文本/实）
+        links = extract_115_links(event_data)
 
         logger.info(f"【P115ShareStrm】提取到链接数: {len(links)}，链接: {links}")
 
