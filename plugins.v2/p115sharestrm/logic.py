@@ -41,33 +41,63 @@ def iter_share_files(
     receive_code: str = "",
     cid: int = 0,
     path_prefix: str = "",
+    max_retries: int = 5,
 ) -> Iterator[dict]:
     """
-    递归遍历分享链接下的所有文件，附带完整路径前缀
+    递归遍历分享链接下的所有文件，附带翻页支持、网络超时重试及完整路径前缀
     """
-    payload = {
-        "share_code": share_code,
-        "receive_code": receive_code,
-        "cid": cid,
-        "limit": 1000,
-        "offset": 0,
-    }
+    offset = 0
+    limit = 1000
+    while True:
+        payload = {
+            "share_code": share_code,
+            "receive_code": receive_code,
+            "cid": cid,
+            "limit": limit,
+            "offset": offset,
+        }
 
-    resp = client.share_snap_cookie(payload)
-    data = check_response(resp).get("data", {})
-    items = data.get("list", [])
+        # 接口级重试逻辑，应对 Server Disconnected 等网络抖动
+        items = []
+        for i in range(max_retries):
+            try:
+                # 显式设置连接超时和读取超时
+                resp = client.share_snap_cookie(payload, timeout=(10, 60))
+                data = check_response(resp).get("data", {})
+                items = data.get("list", [])
+                break
+            except Exception as e:
+                if i < max_retries - 1:
+                    wait_time = (i + 1) * 2 + (time() % 2)
+                    logger.warning(
+                        f"【P115ShareStrm】获取分享目录失败 (cid={cid}, offset={offset})，"
+                        f"正在进行第 {i+1}/{max_retries} 次重试 (等待 {wait_time:.1f}s): {e}"
+                    )
+                    sleep(wait_time)
+                else:
+                    logger.error(f"【P115ShareStrm】请求分享列表失败，已达最大重试次数: {e}")
+                    raise e
 
-    for item in items:
-        item = normalize_attr(item)
-        name = item.get("name", "")
-        current_path = f"{path_prefix}/{name}" if path_prefix else f"/{name}"
-        if item.get("is_dir"):
-            yield from iter_share_files(
-                client, share_code, receive_code, int(item["id"]), current_path
-            )
-        else:
-            item["_full_path"] = current_path
-            yield item
+        if not items:
+            break
+
+        for item in items:
+            item = normalize_attr(item)
+            name = item.get("name", "")
+            current_path = f"{path_prefix}/{name}" if path_prefix else f"/{name}"
+            if item.get("is_dir"):
+                # 递归进入子目录
+                yield from iter_share_files(
+                    client, share_code, receive_code, int(item["id"]), current_path, max_retries
+                )
+            else:
+                item["_full_path"] = current_path
+                yield item
+
+        offset += limit
+        # 如果当前页返回的数据少于 limit，说明已经是最后一页
+        if len(items) < limit:
+            break
 
 
 def process_share_strm(
@@ -106,39 +136,45 @@ def process_share_strm(
         )
 
         strm_count = 0
-        total_files = 0
+        media_files = []
         transfer_chain = TransferChain() if configer.moviepilot_transfer else None
 
-        # 如果提供了 tmdbid 和 mtype 并且开启了整理，尝试提前获取媒体信息以提高入库准确度
+        # 1. 第一步：递归扫描获取分享中的所有目标媒体文件
+        logger.info(f"【P115ShareStrm】正在扫描分享内容: {share_code} ...")
+        for item in iter_share_files(client, share_code, receive_code):
+            filename = item.get("name", "")
+            file_ext = Path(filename).suffix.lower()
+            if file_ext in media_exts:
+                media_files.append(item)
+
+        total_media = len(media_files)
+        logger.info(f"【P115ShareStrm】扫描完成，匹配到 {total_media} 个媒体文件")
+
+        # 2. 第二步：提前识别媒体信息（如有提供 ID）
         mediainfo = None
         if tmdbid and mtype and transfer_chain:
             for i in range(3):
                 try:
                     from app.chain.media import MediaChain
                     from app.schemas.types import MediaType
-                    # 处理媒体类型
                     media_type = MediaType.from_agent(mtype) if mtype else None
                     mediainfo = MediaChain().recognize_media(tmdbid=tmdbid, mtype=media_type)
                     if mediainfo:
-                        logger.info(f"【P115ShareStrm】通过 TMDB ID {tmdbid} ({mtype or '未知类型'}) 提取媒体信息成功: {mediainfo.title_year}")
+                        logger.info(f"【P115ShareStrm】提前识别成功: {mediainfo.title_year}")
                         break
                     else:
-                        logger.warning(f"【P115ShareStrm】未找到 TMDB ID {tmdbid} ({mtype or '未知类型'}) 对应的媒体信息 (尝试 {i+1}/3)")
+                        logger.warning(f"【P115ShareStrm】识别任务未返回信息 (尝试 {i+1}/3)")
                 except Exception as e:
-                    logger.warning(f"【P115ShareStrm】获取 TMDB 媒体信息时发生异常 (尝试 {i+1}/3): {e}")
-
+                    logger.warning(f"【P115ShareStrm】提前识别异常 (尝试 {i+1}/3): {e}")
                 if i < 2:
                     sleep(2)
 
-        for item in iter_share_files(client, share_code, receive_code):
-            total_files += 1
+        # 3. 第三步：生成 STRM 并触发整理
+        for i, item in enumerate(media_files):
             filename = item.get("name", "")
-            file_ext = Path(filename).suffix.lower()
+            if (i + 1) % 10 == 0 or (i + 1) == total_media:
+                logger.info(f"【P115ShareStrm】处理进度 ({i+1}/{total_media}): {filename}")
 
-            if file_ext not in media_exts:
-                continue
-
-            # 保持目录结构
             full_path = item.get("_full_path", f"/{filename}")
             relative_path = Path(full_path.lstrip("/"))
             strm_relative = relative_path.with_suffix(".strm")
@@ -152,7 +188,6 @@ def process_share_strm(
                     receive_code=receive_code,
                     file_id=item["id"],
                     file_name=filename,
-                    # file_path: 文件在分享目录内的完整路径，如 /剧名/S01/S01E01.mkv
                     file_path=full_path,
                     base_url=redirect_base,
                 )
@@ -186,7 +221,7 @@ def process_share_strm(
                     mediainfo=mediainfo
                 )
 
-        return {"status": True, "strm_count": strm_count, "total_files": total_files}
+        return {"status": True, "strm_count": strm_count, "total_files": total_media}
 
     except Exception as e:
         logger.error(f"【P115ShareStrm】逻辑执行异常: {e}", exc_info=True)
