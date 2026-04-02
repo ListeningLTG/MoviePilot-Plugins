@@ -3,7 +3,7 @@
     "name": "MediaHelper增强",
     "description": "配合MediaHelper使用的一些小功能",
     "version": "1.7.4",
-    "icon": "mh.png",
+    "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
@@ -77,7 +77,7 @@
     "name": "115网盘签到",
     "description": "115网盘签到，支持失败重试和历史记录统计",
     "version": "1.0.3",
-    "icon": "u115.png",
+    "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
@@ -91,7 +91,7 @@
     "name": "自动暂停订阅",
     "description": "当媒体服务器离线时自动暂停所有订阅，在线时恢复。",
     "version": "1.0.4",
-    "icon": "autopause.png",
+    "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/autopause.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
@@ -106,7 +106,7 @@
     "name": "115分享STRM生成助手",
     "description": "发送/sharestrm 115分享链接 给TG机器人，自动生成分享STRM",
     "version": "1.0.1",
-    "icon": "u115.png",
+    "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
