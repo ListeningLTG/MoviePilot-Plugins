@@ -9,7 +9,7 @@ from app.plugins import _PluginBase
 from app.schemas import NotificationType
 
 
-class AutoPauseSub(_PluginBase):
+class autopausesub(_PluginBase):
     """
     自动暂停订阅插件
     当媒体服务器离线时自动暂停所有订阅，在线时恢复。
@@ -19,7 +19,7 @@ class AutoPauseSub(_PluginBase):
     plugin_name = "自动暂停订阅"
     plugin_desc = "当媒体服务器离线时自动暂停所有订阅，在线时恢复"
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/autopause.png"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页

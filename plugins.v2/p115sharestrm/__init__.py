@@ -11,7 +11,7 @@ from .utils import extract_115_links
 from .logic import task_queue
 
 
-class P115ShareStrm(_PluginBase):
+class p115sharestrm(_PluginBase):
     """
     115分享内容生成STRM并异步队列整理插件
     """
@@ -21,9 +21,9 @@ class P115ShareStrm(_PluginBase):
     # 插件描述
     plugin_desc = "发送/sharestrm 115分享链接 给TG机器人，自动生成分享STRM"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
+    plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -31,7 +31,7 @@ class P115ShareStrm(_PluginBase):
     # 插件配置项ID前缀
     plugin_config_prefix = "p115sharestrm_"
     # 加载顺序
-    plugin_order = 99
+    plugin_order = 10
     # 可使用的用户级别
     auth_level = 1
 
@@ -58,6 +58,18 @@ class P115ShareStrm(_PluginBase):
         else:
             task_queue.stop()
             logger.info("【P115ShareStrm】插件已停止")
+
+    def get_state(self) -> bool:
+        """
+        获取状态
+        """
+        return configer.enabled
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        """
+        注册插件公共服务
+        """
+        return []
 
     def _send_notify(self, user_id: Optional[str], title: str, text: str):
         """
@@ -92,7 +104,7 @@ class P115ShareStrm(_PluginBase):
                 "event": EventType.PluginAction,
                 "desc": "提取消息中的115分享链接并加入STRM生成队列",
                 "category": "115",
-                "data": {"action": "sharestrm"},
+                "data": {"plugin_id": "p115sharestrm", "action": "sharestrm"},
             },
         ]
 
@@ -388,6 +400,8 @@ class P115ShareStrm(_PluginBase):
             return
 
         event_data = event.event_data
+        if event_data.get("plugin_id") and event_data.get("plugin_id") != "p115sharestrm":
+            return
         if event_data.get("action") != "sharestrm":
             return
 

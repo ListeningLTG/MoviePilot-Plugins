@@ -90,11 +90,12 @@
   "autopausesub": {
     "name": "自动暂停订阅",
     "description": "当媒体服务器离线时自动暂停所有订阅，在线时恢复。",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/autopause.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.6": "修复类名大小写不一致导致的插件无法加载问题",
       "v1.0.5": "图标调整",
       "v1.0.4": "优化暂停和恢复的触发条件",
       "v1.0.3": "调整图标",
@@ -106,11 +107,12 @@
   "p115sharestrm": {
     "name": "115分享STRM生成助手",
     "description": "发送/sharestrm 115分享链接 给TG机器人，自动生成分享STRM",
-    "version": "1.0.6",
+    "version": "1.0.7",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.7": "修复插件在某些环境下无法正常加载显示的问题",
       "v1.0.6": "优化",
       "v1.0.5": "优化电影和电视剧的识别逻辑",
       "v1.0.4": "修复普通文本链接提取失败的问题",
