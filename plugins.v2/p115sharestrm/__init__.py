@@ -23,7 +23,7 @@ class P115ShareStrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
     # 插件版本
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -398,10 +398,13 @@ class P115ShareStrm(_PluginBase):
             tmdbid = int(tmdb_match.group(1))
             logger.info(f"【P115ShareStrm】从指令文本中提取到 TMDB ID: {tmdbid}")
             # 尝试通过关键词判断类型
-            if re.search(r'电影|Movie', arg_str, re.I):
-                mtype = "movie"
-            elif re.search(r'电视剧|剧集|剧|动漫|综艺|TV|Season|S0\d|S\d+', arg_str, re.I):
+            # 1. 优先匹配电视剧强特征
+            if re.search(r'电视剧|剧集|番剧|[美日韩台港英泰]剧|动漫|综艺|Season|S[0-9]+|E[0-9]+|第[0-9]+[季集]', arg_str, re.I):
                 mtype = "tv"
+            # 2. 匹配电影强特征
+            elif re.search(r'电影|Movie', arg_str, re.I):
+                mtype = "movie"
+            # 3. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正確类型
 
         if not arg_str:
             logger.warning("【P115ShareStrm】指令参数为空，未提供链接")
