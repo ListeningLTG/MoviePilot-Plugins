@@ -109,9 +109,9 @@ def process_share_strm(
         total_files = 0
         transfer_chain = TransferChain() if configer.moviepilot_transfer else None
 
-        # 如果提供了 tmdbid 并且开启了整理，尝试提前获取媒体信息以提高入库准确度
+        # 如果提供了 tmdbid 和 mtype 并且开启了整理，尝试提前获取媒体信息以提高入库准确度
         mediainfo = None
-        if tmdbid and transfer_chain:
+        if tmdbid and mtype and transfer_chain:
             for i in range(3):
                 try:
                     from app.chain.media import MediaChain

@@ -28,6 +28,7 @@ class ConfigManager(BaseModel):
     cookies: Optional[str] = Field(default=None, description="115 Cookie")
     strm_save_path: str = Field(default="", description="STRM 保存路径")
     moviepilot_transfer: bool = Field(default=True, description="STRM 交由 MoviePilot 整理")
+    tmdb_extract: bool = Field(default=False, description="从文本中自动提取 TMDB ID")
 
     strm_url_template_enabled: bool = Field(default=False, description="是否启用 STRM URL 自定义模板")
     strm_url_template: Optional[str] = Field(default=None, description="STRM URL 基础模板")

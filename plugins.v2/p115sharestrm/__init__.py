@@ -23,7 +23,7 @@ class P115ShareStrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
     # 插件版本
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -116,7 +116,7 @@ class P115ShareStrm(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 3},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -129,7 +129,7 @@ class P115ShareStrm(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 3},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -142,13 +142,26 @@ class P115ShareStrm(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 3},
                                 "content": [
                                     {
                                         "component": "VSwitch",
                                         "props": {
                                             "model": "strm_url_template_enabled",
                                             "label": "启用 STRM URL 自定义模板",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "tmdb_extract",
+                                            "label": "自动提取 TMDB ID",
                                         },
                                     }
                                 ],
@@ -291,6 +304,7 @@ class P115ShareStrm(_PluginBase):
             "strm_save_path": "",
             "moviepilot_transfer": True,
             "strm_url_template_enabled": False,
+            "tmdb_extract": False,
             "strm_url_template": "",
             "user_rmt_mediaext": "mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v",
         }
@@ -388,23 +402,24 @@ class P115ShareStrm(_PluginBase):
 
         logger.info(f"【P115ShareStrm】收到指令，参数: {arg_str!r}")
 
-        # 尝试提取消息中的 TMDB ID 信息以供匹配
+        # 仅在开启开关时提取消息中的 TMDB ID 信息以供匹配
         import re
         tmdbid = None
         mtype = None
-        # 支持格式: TMDB ID: 123, TMDBID: 123, tmdb-123, tmdb=123, tmdb 123 等
-        tmdb_match = re.search(r'TMDB(?:[\s\-_]*ID)?\s*[：:= \-]+(\d+)', arg_str, re.IGNORECASE)
-        if tmdb_match:
-            tmdbid = int(tmdb_match.group(1))
-            logger.info(f"【P115ShareStrm】从指令文本中提取到 TMDB ID: {tmdbid}")
-            # 尝试通过关键词判断类型
-            # 1. 优先匹配电视剧强特征
-            if re.search(r'电视剧|剧集|番剧|[美日韩台港英泰]剧|动漫|综艺|Season|S[0-9]+|E[0-9]+|第[0-9]+[季集]', arg_str, re.I):
-                mtype = "tv"
-            # 2. 匹配电影强特征
-            elif re.search(r'电影|Movie', arg_str, re.I):
-                mtype = "movie"
-            # 3. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正確类型
+        if configer.tmdb_extract:
+            # 支持格式: TMDB ID: 123, TMDBID: 123, tmdb-123, tmdb=123, tmdb 123 等
+            tmdb_match = re.search(r'TMDB(?:[\s\-_]*ID)?\s*[：:= \-]+(\d+)', arg_str, re.IGNORECASE)
+            if tmdb_match:
+                tmdbid = int(tmdb_match.group(1))
+                logger.info(f"【P115ShareStrm】从指令文本中提取到 TMDB ID: {tmdbid}")
+                # 尝试通过关键词判断类型
+                # 1. 优先匹配电视剧强特征
+                if re.search(r'电视剧|剧集|番剧|[美日韩台港英泰]剧|动漫|综艺|Season|S[0-9]+|E[0-9]+|第[0-9]+[季集]', arg_str, re.I):
+                    mtype = "tv"
+                # 2. 匹配电影强特征
+                elif re.search(r'电影|Movie', arg_str, re.I):
+                    mtype = "movie"
+                # 3. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正確类型
 
         if not arg_str:
             logger.warning("【P115ShareStrm】指令参数为空，未提供链接")
