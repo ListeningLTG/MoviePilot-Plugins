@@ -1,0 +1,5 @@
+orjson~=3.11.7
+p115client==0.0.8.4.6
+p115rsacipher==0.0.1
+httpx[http2]
+qrcode_terminal~=0.8

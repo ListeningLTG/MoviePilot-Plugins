@@ -104,5 +104,17 @@
       "v1.0.1": "修复图标",
       "v1.0": "首次提交"
     }
+  },
+  "p115sharestrm": {
+    "name": "115分享STRM生成助手",
+    "description": "发送/sharestrm 115分享链接 给TG机器人，自动生成分享STRM",
+    "labels": "开发",
+    "version": "1.0.0",
+    "icon": "u115.png",
+    "author": "ListeningLTG",
+    "level": 1,
+    "history": {
+      "v1.0.0": "115分享STRM生成助手，首次提交"
+    }
   }
 }
