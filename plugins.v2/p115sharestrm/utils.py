@@ -117,7 +117,7 @@ def extract_115_links(event_data: Dict[str, Any]) -> List[Dict[str, str]]:
     :param event_data: MoviePilot 事件 event_data 字典
     :return: list of {"share_code": ..., "receive_code": ...}
     """
-    text = event_data.get("text", "") or event_data.get("caption", "") or ""
+    text = event_data.get("text") or event_data.get("caption") or event_data.get("arg_str") or ""
     entities = event_data.get("entities") or []
 
     # 将 text_link 实体替换为实际 URL（富文本场景）
