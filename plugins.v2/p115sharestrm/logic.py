@@ -175,15 +175,25 @@ def _download_subtitles_from_share(
     save_path_obj: Path,
 ) -> Tuple[List[Path], int]:
     """
-    将分享中的字幕文件转存到用户网盘，下载到本地后删除临时目录。
+    将分享中的字幕文件转存到用户网盘，通过 fs_video_subtitle 获取下载链接后下载到本地，
+    最后删除临时目录。
 
-    流程：share_receive 转存 → 等待完成 → 枚举 pickcode → download_urls 获取链接 → 下载 → 删除临时目录
+    流程：share_receive 转存 → 等待 → 枚举 pickcode → fs_video_subtitle 获取链接 → 下载 → 删除临时目录
 
     :return: (成功下载的本地路径列表, 失败数量)
     """
     import httpx
     from uuid import uuid4
     from p115client.tool.iterdir import iter_files_with_path_skim
+
+    # fs_video_subtitle 返回的是预签名 CDN URL，不需要携带 Cookie
+    # （与 p115strmhelper 的 hide_cookies=True 保持一致）
+    _download_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+        ),
+    }
 
     downloaded_paths: List[Path] = []
     fail_count = 0
@@ -230,7 +240,7 @@ def _download_subtitles_from_share(
             # 等待 115 完成转存
             sleep(8)
 
-            # 枚举临时目录，获取文件 pickcode 列表
+            # 枚举临时目录，获取各文件 pickcode（仅需第一个用于获取关联字幕 URL）
             try:
                 file_info_lst = list(
                     iter_files_with_path_skim(
@@ -244,35 +254,50 @@ def _download_subtitles_from_share(
                 fail_count += len(batch)
                 continue
 
-            pcs = [i["pickcode"] for i in file_info_lst if i.get("pickcode")]
-            if not pcs:
+            if not file_info_lst:
                 logger.warning("【P115ShareStrm】临时目录为空，字幕转存可能未完成")
                 fail_count += len(batch)
                 continue
 
-            # 批量获取下载链接
+            # 通过 fs_video_subtitle 获取字幕专用下载链接（不依赖 UA token）
+            first_pickcode = file_info_lst[0]["pickcode"]
             try:
-                url_map = client.download_urls(",".join(pcs))
+                resp_sub = client.fs_video_subtitle(first_pickcode)
+                check_response(resp_sub)
+                subtitle_url_map: Dict[str, str] = {
+                    info["sha1"]: info["url"]
+                    for info in resp_sub.get("data", {}).get("list", [])
+                    if info.get("file_id") and info.get("sha1") and info.get("url")
+                }
             except Exception as e:
-                logger.error(f"【P115ShareStrm】获取字幕下载链接失败: {e}")
+                logger.error(f"【P115ShareStrm】获取字幕下载链接失败 (fs_video_subtitle): {e}")
                 fail_count += len(batch)
                 continue
 
-            # 下载字幕文件（通过 sha1 跨对本地路径）
-            for _key, url_info in url_map.items():
-                try:
-                    sha1 = (
-                        url_info.get("sha1")
-                        if hasattr(url_info, "get")
-                        else getattr(url_info, "sha1", None)
+            if not subtitle_url_map:
+                logger.warning("【P115ShareStrm】fs_video_subtitle 未返回任何字幕链接")
+                fail_count += len(batch)
+                continue
+
+            # 按 sha1 匹配并下载字幕文件，每个文件间隔 1s 避免触发频率限制
+            for idx, item in enumerate(batch):
+                sha1 = item.get("sha1", "")
+                url = subtitle_url_map.get(sha1)
+                local_path = sha1_to_local.get(sha1)
+                if not url or not local_path:
+                    logger.warning(
+                        f"【P115ShareStrm】字幕文件无可用链接或本地路径 "
+                        f"(sha1={sha1}, name={item.get('name', '?')})"
                     )
-                    local_path = sha1_to_local.get(sha1 or "")
-                    if not local_path:
-                        logger.warning(f"【P115ShareStrm】找不到字幕文件对应本地路径 (sha1={sha1})")
-                        fail_count += 1
-                        continue
-                    url = url_info.geturl() if hasattr(url_info, "geturl") else str(url_info)
-                    resp_dl = httpx.get(url, timeout=30, follow_redirects=True)
+                    fail_count += 1
+                    continue
+                try:
+                    resp_dl = httpx.get(
+                        url,
+                        headers=_download_headers,
+                        timeout=30,
+                        follow_redirects=True,
+                    )
                     resp_dl.raise_for_status()
                     local_path.write_bytes(resp_dl.content)
                     logger.info(f"【P115ShareStrm】字幕下载成功: {local_path.name}")
@@ -280,6 +305,9 @@ def _download_subtitles_from_share(
                 except Exception as e:
                     logger.warning(f"【P115ShareStrm】字幕文件下载失败: {e}")
                     fail_count += 1
+                # 每个文件下载后间隔 1s，避免触发 115 频率限制
+                if idx < len(batch) - 1:
+                    sleep(1)
 
         except Exception as e:
             logger.error(f"【P115ShareStrm】字幕批处理异常: {e}", exc_info=True)
