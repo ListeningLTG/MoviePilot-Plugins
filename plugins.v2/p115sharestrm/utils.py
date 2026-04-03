@@ -1,8 +1,9 @@
 import re
-from typing import Optional, Dict, Any, List
+from pathlib import Path
+from typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import quote
 
-from jinja2 import Environment, select_autoescape
+from jinja2 import Environment, Template, select_autoescape
 from jinja2.exceptions import TemplateError
 from p115client.util import share_extract_payload
 
@@ -24,32 +25,116 @@ _PWD_PATTERNS = [
 
 class StrmUrlTemplateResolver:
     """
-    基于 Jinja2 的 STRM URL 模板解析器
+    基于 Jinja2 的 STRM URL 模板解析器，支持扩展名特定规则和自定义保存路径。
+
+    custom_rules 格式（每行一条）：
+        ext1,ext2 => url_template [=> /custom/save/path]
+
+    示例：
+        iso => {{ base_url }}/iso?id={{ file_id }}&share_code={{ share_code }} => /data/isoshare
+        mkv,mp4 => {{ base_url }}/redirect?id={{ file_id }}
     """
 
-    def __init__(self, base_template: str, auto_escape: bool = False):
+    def __init__(
+        self,
+        base_template: Optional[str] = None,
+        custom_rules: Optional[str] = None,
+        auto_escape: bool = False,
+    ):
         self.env = Environment(
             autoescape=select_autoescape(["html", "xml"]) if auto_escape else False,
             trim_blocks=True,
             lstrip_blocks=True,
         )
         self._register_filters()
-        try:
-            self.base_template = self.env.from_string(base_template)
-        except TemplateError as e:
-            logger.error(f"【P115ShareStrm】基础模板解析失败: {e}")
-            raise
+
+        # 基础模板（无扩展名匹配时使用）
+        self.base_template: Optional[Template] = None
+        if base_template:
+            try:
+                self.base_template = self.env.from_string(base_template)
+            except TemplateError as e:
+                logger.error(f"【P115ShareStrm】基础模板解析失败: {e}")
+                raise
+
+        # 扩展名 → (url_template, save_path_override)
+        self._extension_rules: Dict[str, Tuple[Template, Optional[str]]] = {}
+        if custom_rules:
+            self._parse_custom_rules(custom_rules)
 
     def _register_filters(self):
         self.env.filters["urlencode"] = lambda v: quote(str(v), safe="")
         self.env.filters["path_encode"] = lambda v: quote(str(v), safe="/")
+        self.env.filters["upper"] = lambda v: str(v).upper() if v else ""
+        self.env.filters["lower"] = lambda v: str(v).lower() if v else ""
 
-    def render(self, **kwargs: Any) -> Optional[str]:
+    def _parse_custom_rules(self, config_str: str):
         """
-        渲染模板，返回最终 URL
+        解析扩展名特定规则。
+
+        格式：ext1,ext2 => url_template [=> /save/path]
         """
+        for line in config_str.strip().splitlines():
+            line = line.strip()
+            if not line or "=>" not in line:
+                continue
+            parts = line.split("=>")
+            if len(parts) < 2:
+                continue
+            try:
+                exts_part = parts[0].strip()
+                url_tpl_str = parts[1].strip()
+                save_path_override = parts[2].strip() if len(parts) >= 3 else None
+
+                if not url_tpl_str:
+                    logger.warning(f"【P115ShareStrm】扩展名规则模板为空，跳过: {line}")
+                    continue
+
+                try:
+                    tpl = self.env.from_string(url_tpl_str)
+                except TemplateError as e:
+                    logger.error(f"【P115ShareStrm】扩展名规则模板解析失败: {line}: {e}")
+                    continue
+
+                for ext in exts_part.split(","):
+                    ext = ext.strip().lower()
+                    if not ext:
+                        continue
+                    if not ext.startswith("."):
+                        ext = "." + ext
+                    self._extension_rules[ext] = (tpl, save_path_override or None)
+                    logger.debug(
+                        f"【P115ShareStrm】注册扩展名规则: {ext} => "
+                        f"{url_tpl_str[:40]}... "
+                        f"(保存路径: {save_path_override or '默认'})"
+                    )
+            except Exception as e:
+                logger.error(f"【P115ShareStrm】解析扩展名规则失败: {line}: {e}")
+
+    def get_save_path_override(self, file_name: str) -> Optional[str]:
+        """
+        返回该文件扩展名对应的自定义保存路径，无则返回 None。
+        """
+        ext = Path(file_name).suffix.lower()
+        rule = self._extension_rules.get(ext)
+        return rule[1] if rule else None
+
+    def render(self, file_name: str = "", **kwargs: Any) -> Optional[str]:
+        """
+        渲染模板，返回最终 URL。
+
+        优先匹配扩展名规则，无匹配则使用基础模板。
+        """
+        ext = Path(file_name).suffix.lower() if file_name else ""
+        rule = self._extension_rules.get(ext)
+        tpl = rule[0] if rule else self.base_template
+
+        if not tpl:
+            return None
+
+        ctx = {"file_name": file_name, **kwargs}
         try:
-            return self.base_template.render(**kwargs)
+            return tpl.render(**ctx)
         except Exception as e:
             logger.error(f"【P115ShareStrm】模板渲染失败: {e}")
             return None

@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.15"
+    plugin_version = "1.0.16"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -390,6 +390,32 @@ class p115sharestrm(_PluginBase):
                                             },
                                         ],
                                     },
+                                    # ── 扩展名特定模板 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextarea",
+                                                        "props": {
+                                                            "model": "strm_url_template_custom",
+                                                            "label": "STRM URL 扩展名特定模板 (Jinja2)",
+                                                            "hint": (
+                                                                "每行一条规则，格式：扩展名1,扩展名2 => URL模板 [=> /自定义保存路径]，"
+                                                                "保存路径可选。示例：iso => {{ base_url }}{{ file_path | urlencode }}?id={{ file_id }} => /data/strm/iso"
+                                                            ),
+                                                            "persistent-hint": True,
+                                                            "rows": 6,
+                                                            "auto-grow": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
                                 ],
                             },
                         ],
@@ -406,6 +432,7 @@ class p115sharestrm(_PluginBase):
             "strm_url_template_enabled": False,
             "tmdb_extract": False,
             "strm_url_template": "",
+            "strm_url_template_custom": "",
             "user_rmt_mediaext": "mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v",
             "download_subtitle": False,
             "user_subtitle_ext": "srt,ass,ssa",

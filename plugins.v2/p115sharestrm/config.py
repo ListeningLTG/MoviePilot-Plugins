@@ -33,6 +33,10 @@ class ConfigManager(BaseModel):
 
     strm_url_template_enabled: bool = Field(default=False, description="是否启用 STRM URL 自定义模板")
     strm_url_template: Optional[str] = Field(default=None, description="STRM URL 基础模板")
+    strm_url_template_custom: Optional[str] = Field(
+        default=None,
+        description="STRM URL 扩展名特定规则，格式：ext1,ext2 => url_template [=> /save/path]",
+    )
 
     user_rmt_mediaext: str = Field(
         default="mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v",

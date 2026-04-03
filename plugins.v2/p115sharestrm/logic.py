@@ -386,8 +386,13 @@ def process_share_strm(
         }
 
         resolver = None
-        if configer.strm_url_template_enabled and configer.strm_url_template:
-            resolver = StrmUrlTemplateResolver(configer.strm_url_template)
+        if configer.strm_url_template_enabled and (
+            configer.strm_url_template or configer.strm_url_template_custom
+        ):
+            resolver = StrmUrlTemplateResolver(
+                base_template=configer.strm_url_template or None,
+                custom_rules=configer.strm_url_template_custom or None,
+            )
 
         redirect_base = (
             f"{configer.moviepilot_address}/api/v1/plugin/P115StrmHelper/redirect_url"
@@ -448,16 +453,24 @@ def process_share_strm(
             full_path = item.get("_full_path", f"/{filename}")
             relative_path = Path(full_path.lstrip("/"))
             strm_relative = relative_path.with_suffix(".strm")
-            strm_file_path = save_path_obj / strm_relative
+
+            # 扩展名特定规则可能指定不同的保存目录
+            if resolver:
+                path_override = resolver.get_save_path_override(filename)
+                effective_save_path = Path(path_override) if path_override else save_path_obj
+            else:
+                effective_save_path = save_path_obj
+
+            strm_file_path = effective_save_path / strm_relative
             strm_file_path.parent.mkdir(parents=True, exist_ok=True)
 
             # 生成 STRM URL
             if resolver:
                 strm_url = resolver.render(
+                    file_name=filename,
                     share_code=share_code,
                     receive_code=receive_code,
                     file_id=item["id"],
-                    file_name=filename,
                     file_path=full_path,
                     base_url=redirect_base,
                 )
