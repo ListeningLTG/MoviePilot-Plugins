@@ -17,13 +17,13 @@ class p115sharestrm(_PluginBase):
     """
 
     # 插件名称
-    plugin_name = "115分享STRM生成助手"
+    plugin_name = "分享STRM生成助手"
     # 插件描述
     plugin_desc = "发送/sharestrm 115分享链接 给TG机器人，自动生成分享STRM"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.11"
+    plugin_version = "1.0.12"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -122,185 +122,271 @@ class p115sharestrm(_PluginBase):
             {
                 "component": "VForm",
                 "content": [
-                    # ── 第一行：开关区 ──
                     {
-                        "component": "VRow",
+                        "component": "VTabs",
+                        "props": {
+                            "model": "_tabs",
+                            "fixed-tabs": True,
+                            "show-arrows": True,
+                            "slider-color": "primary",
+                        },
                         "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "enabled",
-                                            "label": "启用插件",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "moviepilot_transfer",
-                                            "label": "STRM 交由 MoviePilot 整理",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "strm_url_template_enabled",
-                                            "label": "启用 STRM URL 自定义模板",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "tmdb_extract",
-                                            "label": "自动提取 TMDB ID",
-                                        },
-                                    }
-                                ],
-                            },
+                            {"component": "VTab", "props": {"value": "tab_basic"}, "text": "基础配置"},
+                            {"component": "VTab", "props": {"value": "tab_custom"}, "text": "自定义STRM"},
                         ],
                     },
-                    # ── 第二行：Cookie ──
                     {
-                        "component": "VRow",
+                        "component": "VWindow",
+                        "props": {"model": "_tabs"},
                         "content": [
+                            # ── Tab 0: 基础配置 ──
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12},
+                                "component": "VWindowItem",
+                                "props": {"value": "tab_basic"},
                                 "content": [
+                                    # ── 第一行：开关区 ──
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cookies",
-                                            "label": "115 Cookie",
-                                            "hint": "可复用 115网盘STRM助手 插件的 Cookie 配置",
-                                            "persistent-hint": True,
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    # ── 第三行：STRM 保存路径 ──
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "strm_save_path",
-                                            "label": "STRM 保存路径",
-                                            "hint": "生成的 .strm 文件保存到本地的目录，例如 /media/share_strm",
-                                            "persistent-hint": True,
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    # ── 第四行：媒体后缀 ──
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "user_rmt_mediaext",
-                                            "label": "可识别媒体后缀",
-                                            "hint": "逗号分隔，仅对此类后缀文件生成 STRM，例如 mp4,mkv,ts",
-                                            "persistent-hint": True,
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    # ── 第五行：Jinja2 URL 模板 ──
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "strm_url_template",
-                                            "label": "STRM URL 自定义模板 (Jinja2)",
-                                            "hint": (
-                                                "需开启上方【启用 STRM URL 自定义模板】开关后生效。"
-                                                "可用变量：{{ share_code }}、{{ receive_code }}、{{ file_id }}、{{ file_name }}、{{ file_path }}、{{ base_url }}"
-                                            ),
-                                            "persistent-hint": True,
-                                            "rows": 4,
-                                            "auto-grow": True,
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    # ── 说明区 ──
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VAlert",
-                                        "props": {
-                                            "type": "info",
-                                            "variant": "tonal",
-                                            "density": "compact",
-                                            "class": "mt-2",
-                                        },
+                                        "component": "VRow",
                                         "content": [
                                             {
-                                                "component": "div",
-                                                "html": "<b>使用说明</b>",
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VSwitch",
+                                                        "props": {
+                                                            "model": "enabled",
+                                                            "label": "启用插件",
+                                                        },
+                                                    }
+                                                ],
                                             },
                                             {
-                                                "component": "div",
-                                                "text": "• 向 TG 机器人发送 /sharestrm <链接> 即可触发，链接中的 password=xxx 参数自动识别为提取码",
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VSwitch",
+                                                        "props": {
+                                                            "model": "moviepilot_transfer",
+                                                            "label": "STRM 交由 MoviePilot 整理",
+                                                        },
+                                                    }
+                                                ],
                                             },
                                             {
-                                                "component": "div",
-                                                "text": "• 支持图片描述（Caption）中的富文本超链接，提取码会自动从链接附近文字中识别",
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VSwitch",
+                                                        "props": {
+                                                            "model": "tmdb_extract",
+                                                            "label": "自动提取 TMDB ID",
+                                                            "hint": "从指令文本中提取 TMDB ID，格式如 TMDB:123 或 TMDB ID: 123，传给 MP 整理时直接匹配媒体信息",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    # ── 字幕下载行 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 3},
+                                                "content": [
+                                                    {
+                                                        "component": "VSwitch",
+                                                        "props": {
+                                                            "model": "download_subtitle",
+                                                            "label": "同步下载字幕文件",
+                                                        },
+                                                    }
+                                                ],
                                             },
                                             {
-                                                "component": "div",
-                                                "text": "• 多个链接会依次加入队列，避免并发风控，实时通过 TG 推送处理进度",
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 9},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "user_subtitle_ext",
+                                                            "label": "字幕文件后缀",
+                                                            "hint": "逗号分隔，开启后将此类后缀文件从分享转存下载到本地，例如 srt,ass,ssa",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    # ── 第二行：Cookie 与 地址 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 6},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "cookies",
+                                                            "label": "115 Cookie",
+                                                            "hint": "115网盘的 Cookie 配置",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 6},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "moviepilot_address_custom",
+                                                            "label": "MoviePilot 地址",
+                                                            "hint": "手动指定访问地址 (如 http://192.168.1.10:3000)，留空则优先使用系统设置的外部域地址来进行生成strm",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    # ── 第三行：STRM 保存路径 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "strm_save_path",
+                                                            "label": "STRM 保存路径",
+                                                            "hint": "生成的 .strm 文件保存到本地的目录，例如 /media/share_strm",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    # ── 第四行：媒体后缀 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "user_rmt_mediaext",
+                                                            "label": "可识别媒体后缀",
+                                                            "hint": "逗号分隔，仅对此类后缀文件生成 STRM，例如 mp4,mkv,ts",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    # ── 说明区 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12},
+                                                "content": [
+                                                    {
+                                                        "component": "VAlert",
+                                                        "props": {
+                                                            "type": "info",
+                                                            "variant": "tonal",
+                                                            "density": "compact",
+                                                            "class": "mt-2",
+                                                        },
+                                                        "content": [
+                                                            {
+                                                                "component": "div",
+                                                                "html": "<b>使用说明</b>",
+                                                            },
+                                                            {
+                                                                "component": "div",
+                                                                "text": "• 向 TG 机器人发送 /sharestrm <链接> 即可触发，链接中的 password=xxx 参数自动识别为提取码",
+                                                            },
+                                                            {
+                                                                "component": "div",
+                                                                "text": "• 多个链接会依次加入队列，避免并发风控，实时通过 TG 推送处理进度",
+                                                            },
+                                                        ],
+                                                    },
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                ],
+                            },
+                            # ── Tab 1: 自定义STRM ──
+                            {
+                                "component": "VWindowItem",
+                                "props": {"value": "tab_custom"},
+                                "content": [
+                                    # ── 启用模板开关 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VSwitch",
+                                                        "props": {
+                                                            "model": "strm_url_template_enabled",
+                                                            "label": "启用 STRM URL 自定义模板",
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    # ── Jinja2 URL 模板 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextarea",
+                                                        "props": {
+                                                            "model": "strm_url_template",
+                                                            "label": "STRM URL 自定义模板 (Jinja2)",
+                                                            "hint": (
+                                                                "需开启上方【启用 STRM URL 自定义模板】开关后生效。"
+                                                                "可用变量：{{ share_code }}、{{ receive_code }}、{{ file_id }}、{{ file_name }}、{{ file_path }}、{{ base_url }}"
+                                                            ),
+                                                            "persistent-hint": True,
+                                                            "rows": 4,
+                                                            "auto-grow": True,
+                                                        },
+                                                    }
+                                                ],
                                             },
                                         ],
                                     },
@@ -311,14 +397,18 @@ class p115sharestrm(_PluginBase):
                 ],
             }
         ], {
+            "_tabs": "tab_basic",
             "enabled": False,
             "cookies": "",
+            "moviepilot_address_custom": "",
             "strm_save_path": "",
             "moviepilot_transfer": True,
             "strm_url_template_enabled": False,
             "tmdb_extract": False,
             "strm_url_template": "",
             "user_rmt_mediaext": "mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v",
+            "download_subtitle": False,
+            "user_subtitle_ext": "srt,ass,ssa",
         }
 
     def get_page(self) -> List[dict]:
