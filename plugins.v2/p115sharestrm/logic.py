@@ -207,7 +207,6 @@ def _download_subtitles_from_share(
             full_path = item.get("_full_path", f"/{item.get('name', '')}")
             relative_path = Path(full_path.lstrip("/"))
             local_path = save_path_obj / relative_path
-            local_path.parent.mkdir(parents=True, exist_ok=True)
             if item.get("sha1"):
                 sha1_to_local[item["sha1"]] = local_path
 
@@ -299,6 +298,8 @@ def _download_subtitles_from_share(
                         follow_redirects=True,
                     )
                     resp_dl.raise_for_status()
+                    # MP 移动整理后原目录可能已被删除，写入前确保目录存在
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
                     local_path.write_bytes(resp_dl.content)
                     logger.info(f"【P115ShareStrm】字幕下载成功: {local_path.name}")
                     downloaded_paths.append(local_path)
