@@ -4,6 +4,8 @@ from time import sleep, time
 from threading import Thread, Lock, Event
 from typing import Dict, Any, List, Optional, Iterator, Callable, Tuple
 from queue import Queue, Empty
+from uuid import uuid4
+import json
 
 from p115client import P115Client, check_response
 from p115client.util import complete_url
@@ -235,8 +237,6 @@ def _download_subtitles_from_share(
 
     return downloaded_paths, fail_count
 
-    return downloaded_paths, fail_count
-
 
 def process_share_strm(
     share_code: str,
@@ -445,11 +445,14 @@ def process_share_strm(
 
 class ShareTaskQueue:
     """
-    异步任务队列管理器：通过单线程串行处理，避免并发风控
+    异步任务队列管理器：通过单线程串行处理，避免并发风控。
+    支持 JSON 文件持久化，MP/插件重启后自动恢复未完成任务。
     """
 
     # 去重时间窗口（秒）：同一 share_code 在此时间内只入队一次
     _DEDUP_WINDOW: float = 10.0
+    # 单任务最大重试次数（超过后从持久化文件移除，不再重试）
+    _MAX_RETRY: int = 3
 
     def __init__(self):
         self._queue: Queue = Queue()
@@ -459,18 +462,88 @@ class ShareTaskQueue:
         self._notify_callback: Optional[Callable[[Optional[str], str, str], None]] = None
         # 去重缓存：{share_code: 最后入队时间戳}
         self._recent_tasks: Dict[str, float] = {}
+        # 持久化文件路径，在 start() 中通过 settings 初始化
+        self._persist_path: Optional[Path] = None
+
+    # ── 持久化 ──────────────────────────────────────────────
+
+    def _get_persist_path(self) -> Path:
+        """懒加载持久化文件路径（避免模块加载时 settings 尚未就绪）"""
+        if self._persist_path is None:
+            from app.core.config import settings
+            data_dir = Path(settings.PLUGIN_DATA_PATH) / "P115ShareStrm"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            self._persist_path = data_dir / "pending_tasks.json"
+        return self._persist_path
+
+    def _load_tasks(self) -> List[Dict]:
+        """从 JSON 文件加载持久化任务列表，文件不存在或损坏时返回空列表"""
+        path = self._get_persist_path()
+        try:
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"【P115ShareStrm】读取持久化任务失败，将重置: {e}")
+        return []
+
+    def _save_tasks(self, tasks: List[Dict]) -> None:
+        """原子写入：先写 .tmp 再 rename，防止崩溃导致文件损坏"""
+        path = self._get_persist_path()
+        tmp = path.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as e:
+            logger.warning(f"【P115ShareStrm】写入持久化任务失败: {e}")
+
+    def _persist_add(self, task_id: str, share_code: str, receive_code: str,
+                     user_id: Optional[str], tmdbid: Optional[int], mtype: Optional[str]) -> None:
+        """向持久化文件追加一条任务（需在 _lock 内调用）"""
+        tasks = self._load_tasks()
+        tasks.append({
+            "task_id": task_id,
+            "share_code": share_code,
+            "receive_code": receive_code,
+            "user_id": user_id,
+            "tmdbid": tmdbid,
+            "mtype": mtype,
+            "added_at": time(),
+            "retry_count": 0,
+        })
+        self._save_tasks(tasks)
+
+    def _persist_remove(self, task_id: str) -> None:
+        """从持久化文件移除已完成/放弃的任务"""
+        with self._lock:
+            tasks = self._load_tasks()
+            tasks = [t for t in tasks if t.get("task_id") != task_id]
+            self._save_tasks(tasks)
+
+    def _persist_increment_retry(self, task_id: str) -> int:
+        """将任务重试次数 +1，返回更新后的重试次数"""
+        with self._lock:
+            tasks = self._load_tasks()
+            count = 0
+            for t in tasks:
+                if t.get("task_id") == task_id:
+                    t["retry_count"] = t.get("retry_count", 0) + 1
+                    count = t["retry_count"]
+                    break
+            self._save_tasks(tasks)
+        return count
+
+    # ── 公共接口 ─────────────────────────────────────────────
 
     def set_notify_callback(
         self, callback: Callable[[Optional[str], str, str], None]
     ):
-        """
-        设置通知回调，由 __init__.py 注入，签名: (user_id, title, text) -> None
-        """
+        """设置通知回调，由 __init__.py 注入，签名: (user_id, title, text) -> None"""
         self._notify_callback = callback
 
     def start(self):
         """
-        启动工作线程（幂等）
+        启动工作线程（幂等）。
+        启动前先从持久化文件恢复未完成任务，重新入队。
         """
         with self._lock:
             if not self._running:
@@ -479,44 +552,82 @@ class ShareTaskQueue:
                 self._worker_thread.start()
                 logger.info("【P115ShareStrm】任务队列工作线程已启动")
 
+        # 恢复持久化任务（在 _lock 外执行，避免死锁）
+        self._restore_persisted_tasks()
+
     def stop(self):
-        """
-        停止工作线程
-        """
+        """停止工作线程"""
         self._running = False
 
     def add_task(
-        self, share_code: str, receive_code: str, user_id: Optional[str] = None, tmdbid: Optional[int] = None, mtype: Optional[str] = None
+        self,
+        share_code: str,
+        receive_code: str,
+        user_id: Optional[str] = None,
+        tmdbid: Optional[int] = None,
+        mtype: Optional[str] = None,
+        _task_id: Optional[str] = None,
+        _skip_dedup: bool = False,
     ) -> bool:
         """
-        向队列添加分享处理任务
+        向队列添加分享处理任务。
 
-        内置去重：同一 share_code 在 _DEDUP_WINDOW 秒内重复入队时直接忽略，
-        防止插件热重载导致事件处理器多次注册引发重复处理。
+        内置去重：同一 share_code 在 _DEDUP_WINDOW 秒内重复入队时直接忽略。
+        _task_id / _skip_dedup 供内部恢复任务使用，外部调用无需传入。
 
         :return: True 表示成功入队，False 表示被去重过滤
         """
         now = time()
-        with self._lock:
-            last_time = self._recent_tasks.get(share_code)
-            if last_time is not None and now - last_time < self._DEDUP_WINDOW:
-                logger.warning(
-                    f"【P115ShareStrm】重复任务已忽略（去重窗口 {self._DEDUP_WINDOW}s）: {share_code}"
-                )
-                return False
-            self._recent_tasks[share_code] = now
+        task_id = _task_id or str(uuid4())
 
-        self._queue.put((share_code, receive_code, user_id, tmdbid, mtype))
-        logger.info(f"【P115ShareStrm】新任务已入队: {share_code}")
+        with self._lock:
+            if not _skip_dedup:
+                last_time = self._recent_tasks.get(share_code)
+                if last_time is not None and now - last_time < self._DEDUP_WINDOW:
+                    logger.warning(
+                        f"【P115ShareStrm】重复任务已忽略（去重窗口 {self._DEDUP_WINDOW}s）: {share_code}"
+                    )
+                    return False
+                self._recent_tasks[share_code] = now
+                # 新任务才写持久化，恢复任务已在文件中
+                self._persist_add(task_id, share_code, receive_code, user_id, tmdbid, mtype)
+
+        self._queue.put((task_id, share_code, receive_code, user_id, tmdbid, mtype))
+        logger.info(f"【P115ShareStrm】新任务已入队: {share_code} (id={task_id})")
         return True
+
+    def _restore_persisted_tasks(self) -> None:
+        """从持久化文件恢复未完成任务，重新放入内存队列"""
+        tasks = self._load_tasks()
+        if not tasks:
+            return
+        logger.info(f"【P115ShareStrm】从持久化文件恢复 {len(tasks)} 个待处理任务")
+        for t in tasks:
+            if t.get("retry_count", 0) >= self._MAX_RETRY:
+                logger.warning(
+                    f"【P115ShareStrm】任务已达最大重试次数，跳过: {t.get('share_code')} (id={t.get('task_id')})"
+                )
+                self._persist_remove(t["task_id"])
+                continue
+            self._queue.put((
+                t["task_id"],
+                t["share_code"],
+                t["receive_code"],
+                t.get("user_id"),
+                t.get("tmdbid"),
+                t.get("mtype"),
+            ))
+            logger.info(f"【P115ShareStrm】已恢复任务: {t['share_code']} (重试次数: {t.get('retry_count', 0)})")
+
+    # ── 工作线程 ──────────────────────────────────────────────
 
     def _worker(self):
         while self._running:
             try:
                 task = self._queue.get(timeout=10)
-                share_code, receive_code, user_id, tmdbid, mtype = task
+                task_id, share_code, receive_code, user_id, tmdbid, mtype = task
 
-                # 稍作等待，确保主线程"已入队"通知先到达用户，再发"开始处理"
+                # 稍作等待，确保"已入队"通知先到达用户
                 sleep(0.8)
                 self._notify(user_id, "【115分享STRM】", f"🚀 开始处理分享: {share_code}")
 
@@ -533,12 +644,26 @@ class ShareTaskQueue:
                         if result.get("subtitle_fail_count"):
                             msg += f"，失败 {result.get('subtitle_fail_count')} 个"
                     self._notify(user_id, "【115分享STRM】完成", msg)
+                    # 成功：从持久化文件移除
+                    self._persist_remove(task_id)
                 else:
-                    self._notify(
-                        user_id,
-                        "【115分享STRM】失败",
-                        f"❌ {share_code}\n原因: {result.get('msg')}",
-                    )
+                    retry_count = self._persist_increment_retry(task_id)
+                    if retry_count >= self._MAX_RETRY:
+                        logger.error(
+                            f"【P115ShareStrm】任务失败且已达最大重试次数 ({self._MAX_RETRY})，放弃: {share_code}"
+                        )
+                        self._persist_remove(task_id)
+                        self._notify(
+                            user_id,
+                            "【115分享STRM】放弃",
+                            f"❌ {share_code}\n已重试 {self._MAX_RETRY} 次，放弃处理\n原因: {result.get('msg')}",
+                        )
+                    else:
+                        self._notify(
+                            user_id,
+                            "【115分享STRM】失败",
+                            f"❌ {share_code}\n原因: {result.get('msg')}\n将在重启后自动重试 (第 {retry_count}/{self._MAX_RETRY} 次)",
+                        )
 
                 self._queue.task_done()
                 sleep(2)
