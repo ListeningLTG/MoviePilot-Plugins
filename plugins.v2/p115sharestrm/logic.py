@@ -184,7 +184,7 @@ def _download_subtitles_from_share(
     """
     import httpx
     from uuid import uuid4
-    from p115client.tool.iterdir import iter_files_with_path_skim
+    from p115client.tool.iterdir import iterdir
 
     # fs_video_subtitle 返回的是预签名 CDN URL，不需要携带 Cookie
     # （与 p115strmhelper 的 hide_cookies=True 保持一致）
@@ -252,17 +252,15 @@ def _download_subtitles_from_share(
             # 等待 115 完成转存
             sleep(8)
 
-            # 枚举临时目录，获取各文件 pickcode（仅需第一个用于获取关联字幕 URL）
-            # timeout=60 防止 115 响应慢时永久阻塞队列 worker
+            # 枚举临时目录，获取第一个文件的 pickcode（用于 fs_video_subtitle 查询）
+            # 用 iterdir 直接列目录内容，不构建完整路径，避免 FileNotFoundError(cid)
             try:
-                file_info_lst = list(
-                    iter_files_with_path_skim(
-                        client=client,
-                        cid=temp_cid,
-                        with_ancestors=False,
-                        timeout=60,
-                    )
-                )
+                file_info_lst = list(iterdir(
+                    client,
+                    cid=temp_cid,
+                    show_dir=0,
+                    timeout=60,
+                ))
             except Exception as e:
                 logger.error(f"【P115ShareStrm】枚举字幕目录失败: {e}")
                 fail_count += len(batch)
@@ -275,7 +273,9 @@ def _download_subtitles_from_share(
 
             # 通过 fs_video_subtitle 获取字幕专用下载链接（不依赖 UA token）
             # timeout=60 防止接口无响应时永久阻塞
-            first_pickcode = file_info_lst[0]["pickcode"]
+            # iterdir 规范化后用 pickcode，原始 fs_files 响应用 pc
+            first_item = file_info_lst[0]
+            first_pickcode = first_item.get("pickcode") or first_item.get("pc", "")
             try:
                 resp_sub = client.fs_video_subtitle(first_pickcode, timeout=60)
                 check_response(resp_sub)
