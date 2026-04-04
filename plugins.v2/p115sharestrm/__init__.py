@@ -543,14 +543,16 @@ class p115sharestrm(_PluginBase):
             if tmdb_match:
                 tmdbid = int(tmdb_match.group(1))
                 logger.info(f"【P115ShareStrm】从指令文本中提取到 TMDB ID: {tmdbid}")
+                # 剥掉 URL，只在纯文本上做类型关键词匹配，避免密码/参数干扰
+                clean_text = re.sub(r'https?://\S+', '', arg_str)
                 # 尝试通过关键词判断类型
                 # 1. 优先匹配电视剧强特征
-                if re.search(r'电视剧|剧集|番剧|[美日韩台港英泰]剧|动漫|综艺|Season|S[0-9]+|E[0-9]+|第[0-9]+[季集]', arg_str, re.I):
+                if re.search(r'电视剧|剧集|番剧|[美日韩台港英泰]剧|动漫|综艺|Season|S[0-9]+E[0-9]+|第[0-9]+[季集]', clean_text, re.I):
                     mtype = "tv"
                 # 2. 匹配电影强特征
-                elif re.search(r'电影|Movie', arg_str, re.I):
+                elif re.search(r'电影|Movie', clean_text, re.I):
                     mtype = "movie"
-                # 3. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正確类型
+                # 3. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正确类型
 
         if not arg_str:
             logger.warning("【P115ShareStrm】指令参数为空，未提供链接")
