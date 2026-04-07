@@ -2,11 +2,12 @@
   "MHNotify": {
     "name": "MediaHelper增强",
     "description": "配合MediaHelper使用的一些小功能",
-    "version": "1.7.4",
+    "version": "1.7.5",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.7.5": "按媒体类型决定首次查询延迟：电影3分钟，电视剧6分钟",
       "v1.7.4": "资源刷新优化季数判断",
       "v1.7.3": "资源刷新添加剧集播出日期判定",
       "v1.7.2": "优化阿里云盘秒传和云下载",
