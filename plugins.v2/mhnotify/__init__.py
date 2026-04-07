@@ -33,7 +33,7 @@ class MHNotify(MHApiMixin, MHAssistMixin, CloudDownloadMixin, AliTo115Mixin, _Pl
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.7.5"
+    plugin_version = "1.7.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -129,6 +129,7 @@ class MHNotify(MHApiMixin, MHAssistMixin, CloudDownloadMixin, AliTo115Mixin, _Pl
     _btl_identity: str = "23734adac0301bccdcb107c4aa21f96c"
 
     def init_plugin(self, config: dict = None):
+        logger.info(f"mhnotify: 插件初始化 v{self.plugin_version}")
         if config:
             self._enabled = config.get("enabled")
             self._mh_domain = config.get("mh_domain")
@@ -417,6 +418,25 @@ class MHNotify(MHApiMixin, MHAssistMixin, CloudDownloadMixin, AliTo115Mixin, _Pl
 
     def get_page(self) -> List[dict]:
         pass
+
+    @eventmanager.register(EventType.SubscribeAdded)
+    def on_subscribe_added(self, event: Event):
+        """将事件转发到 mixin 实现（装饰器必须在主插件类上才能被 eventmanager 正确分发）"""
+        return self._on_subscribe_added(event)
+
+    @eventmanager.register(EventType.SubscribeDeleted)
+    def on_subscribe_deleted(self, event: Event):
+        return self._on_subscribe_deleted(event)
+
+    @eventmanager.register(EventType.SubscribeComplete)
+    def on_subscribe_complete(self, event: Event):
+        return self._on_subscribe_complete(event)
+
+    @eventmanager.register(EventType.PluginAction)
+    def on_plugin_action(self, event: Event):
+        """统一分发 PluginAction 事件到云下载和阿里秒传"""
+        self.handle_cloud_download(event)
+        self.handle_ali_to_115(event)
 
     @eventmanager.register(EventType.TransferComplete)
     @eventmanager.register(EventType.DownloadAdded)

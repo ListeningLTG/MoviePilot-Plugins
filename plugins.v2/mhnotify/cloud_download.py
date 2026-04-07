@@ -1,8 +1,8 @@
 from typing import List, Tuple, Dict, Any, Optional, Union
 
 from app.core.config import settings
-from app.core.event import eventmanager, Event
-from app.schemas.types import EventType, NotificationType
+from app.core.event import Event
+from app.schemas.types import NotificationType
 from app.log import logger
 
 
@@ -1823,7 +1823,6 @@ class CloudDownloadMixin:
         except Exception as e:
             logger.error(f"mhnotify: 发送云下载失败通知失败: {e}", exc_info=True)
 
-    @eventmanager.register(EventType.PluginAction)
     def handle_cloud_download(self, event: Event):
         """远程命令触发：添加115云下载任务"""
         if not event:

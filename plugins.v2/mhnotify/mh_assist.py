@@ -6,8 +6,8 @@ from typing import List, Tuple, Dict, Any, Optional, Union
 
 from apscheduler.triggers.cron import CronTrigger
 from app.core.config import settings
-from app.core.event import eventmanager, Event
-from app.schemas.types import EventType, MediaType
+from app.core.event import Event
+from app.schemas.types import MediaType
 from app.core.context import MediaInfo
 from app.modules.themoviedb.tmdbapi import TmdbApi
 from app.chain.download import DownloadChain
@@ -18,7 +18,6 @@ from app.db.subscribe_oper import SubscribeOper
 
 class MHAssistMixin:
 
-    @eventmanager.register(EventType.SubscribeAdded)
     def _on_subscribe_added(self, event: Event):
         """
         mh订阅辅助：仅对新订阅生效
@@ -28,6 +27,7 @@ class MHAssistMixin:
         - 记录mh_uuid并在5分钟后查询进度，按规则处理（删除或恢复MP订阅）
         """
         try:
+            logger.info(f"mhnotify: [v{self.plugin_version}] SubscribeAdded 事件到达, assist_enabled={self._mh_assist_enabled}")
             if not event or not self._mh_assist_enabled:
                 return
             event_data = event.event_data or {}
@@ -198,12 +198,15 @@ class MHAssistMixin:
                     logger.info(f"mhnotify: 已在MH创建订阅，uuid={mh_uuid}；{delay_mins}分钟后查询进度")
             
             # 记录待检查项
+            _now_ts = int(time.time())
             pending: Dict[str, dict] = self.get_data(self._ASSIST_PENDING_KEY) or {}
             pending[str(sub_id)] = {
                 "mh_uuid": mh_uuid,
-                "created_at": int(time.time()),
+                "created_at": _now_ts,
+                "min_check_at": _now_ts + initial_delay,
                 "type": (create_payload.get("media_type") or mediainfo_dict.get("type") or "movie"),
-                "douban_id": (mediainfo_dict.get("douban_id") or mediainfo_dict.get("doubanid") or getattr(subscribe, 'doubanid', None))
+                "douban_id": (mediainfo_dict.get("douban_id") or mediainfo_dict.get("doubanid") or getattr(subscribe, 'doubanid', None)),
+                "title": (create_payload.get("title") or mediainfo_dict.get("title") or getattr(subscribe, 'name', '') or "")
             }
             self.save_data(self._ASSIST_PENDING_KEY, pending)
             # 同步订阅名称到转发白名单/黑名单
@@ -224,7 +227,7 @@ class MHAssistMixin:
                         info = p.get(str(sub_id))
                         if not info:
                             return
-                        info["created_at"] = int(time.time()) - initial_delay - 1
+                        info["min_check_at"] = int(time.time())  # 立即让全局 scheduler 可处理
                         p[str(sub_id)] = info
                         self.save_data(self._ASSIST_PENDING_KEY, p)
                         self._assist_scheduler()
@@ -499,29 +502,28 @@ class MHAssistMixin:
     def _assist_scheduler(self):
         """每分钟执行：先等待2分钟进行首次查询；未查询到则每1分钟重试，直到查询到；并处理MP完成监听"""
         try:
+            logger.debug(f"mhnotify: _assist_scheduler v{self.plugin_version} 开始执行")
             # 处理待检查
             pending: Dict[str, dict] = self.get_data(self._ASSIST_PENDING_KEY) or {}
             if pending:
                 now_ts = int(time.time())
                 # 收集已到查询时间的条目（首次查询延迟）
-                matured_items = {sid: info for sid, info in pending.items() if now_ts - int(info.get("created_at") or 0) >= self._assist_initial_delay_seconds}
+                matured_items = {
+                    sid: info for sid, info in pending.items()
+                    if now_ts >= int(info.get("min_check_at") or (int(info.get("created_at") or 0) + self._assist_initial_delay_seconds))
+                }
                 if matured_items:
                     logger.info(f"mhnotify: 助手到期查询条目数={len(matured_items)}")
                     token = self._mh_login()
                     if not token:
                         logger.error("mhnotify: 登录MH失败，无法查询订阅进度")
                     else:
-                        lst = self._mh_list_subscriptions(token)
-                        subs = (lst.get("data") or {}).get("subscriptions") or []
-                        subs_map = {}
-                        for rec in subs:
-                            uid = rec.get("uuid") or rec.get("task", {}).get("uuid")
-                            if uid:
-                                subs_map[uid] = rec
                         for sid, info in list(matured_items.items()):
                             mh_uuid = info.get("mh_uuid")
+                            title = info.get("title") or ""
                             logger.info(f"mhnotify: 到期处理 sid={sid} mh_uuid={mh_uuid} type={info.get('type')} douban_id={info.get('douban_id')}")
-                            target = subs_map.get(mh_uuid)
+                            # 先按标题搜索，未命中再全量兜底
+                            target = self._mh_find_subscription_by_uuid(token, mh_uuid, title or None)
                             if not target:
                                 # 未找到，记录重试次数，超过5次则移除记录
                                 attempts = int(info.get("attempts") or 0) + 1
@@ -538,8 +540,17 @@ class MHAssistMixin:
                                     pending[str(sid)] = info
                                     self.save_data(self._ASSIST_PENDING_KEY, pending)
                                     continue
+                            # 检查 execution_status：running 表示 MH 仍在查找中，需等待后重试
+                            exec_status = (target.get("execution_status") or "").lower()
+                            if exec_status == "running":
+                                retry_delay = 120  # 2分钟后再检查
+                                info["min_check_at"] = now_ts + retry_delay
+                                pending[str(sid)] = info
+                                self.save_data(self._ASSIST_PENDING_KEY, pending)
+                                logger.info(f"mhnotify: 订阅 {mh_uuid} 仍在查找中(running)，{retry_delay//60}分钟后再检查")
+                                continue
                             mtype, saved, expected = self._compute_progress(target)
-                            logger.info(f"mhnotify: 订阅 {mh_uuid} 进度 saved={saved}/{expected} type={mtype}")
+                            logger.info(f"mhnotify: 订阅 {mh_uuid} 进度 saved={saved}/{expected} type={mtype} exec_status={exec_status}")
                             with SessionFactory() as db:
                                 subscribe = SubscribeOper(db=db).get(int(sid))
                             if not subscribe:
@@ -873,7 +884,6 @@ class MHAssistMixin:
         except Exception:
             logger.warning("mhnotify: 同步转发监听关键词异常", exc_info=True)
 
-    @eventmanager.register(EventType.SubscribeDeleted)
     def _on_subscribe_deleted(self, event: Event):
         """
         监听 MP 订阅取消事件，按 tmdb_id 删除对应的 MH 订阅（drive115）
@@ -975,7 +985,6 @@ class MHAssistMixin:
         except Exception:
             logger.error("mhnotify: 处理SubscribeDeleted事件异常", exc_info=True)
 
-    @eventmanager.register(EventType.SubscribeComplete)
     def _on_subscribe_complete(self, event: Event):
         try:
             if not event or not event.event_data:

@@ -329,6 +329,29 @@ class MHApiMixin:
             logger.error("mhnotify: 触发MH订阅执行异常", exc_info=True)
         return False
 
+    def _mh_find_subscription_by_uuid(self, access_token: str, uuid: str, title: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """先按标题搜索快捷查找，再按全量兜底，最终从结果中匹配 uuid 对应的订阅记录"""
+        def _search_in_list(lst_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            for rec in (lst_data.get("data") or {}).get("subscriptions") or []:
+                uid = rec.get("uuid") or (rec.get("task") or {}).get("uuid")
+                if uid == uuid:
+                    return rec
+            return None
+
+        # Step1：按标题精确搜索（速度快）
+        if title:
+            try:
+                lst = self._mh_list_subscriptions(access_token, search=title, page_size=50)
+                found = _search_in_list(lst)
+                if found:
+                    return found
+                logger.debug(f"mhnotify: 按标题搜索未命中 '{title}'，回退全量查询")
+            except Exception:
+                pass
+        # Step2：全量查询兜底
+        lst = self._mh_list_subscriptions(access_token)
+        return _search_in_list(lst)
+
     def _mh_get_listeners(self, access_token: str) -> List[Dict[str, Any]]:
         """获取TG转发监听配置列表
         GET /api/v1/tg-forwarder/listeners

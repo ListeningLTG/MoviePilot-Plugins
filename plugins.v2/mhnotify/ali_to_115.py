@@ -2,14 +2,12 @@ import re
 from urllib.parse import quote
 from typing import Tuple, Optional
 
-from app.core.event import eventmanager, Event
-from app.schemas.types import EventType
+from app.core.event import Event
 from app.log import logger
 
 
 class AliTo115Mixin:
 
-    @eventmanager.register(EventType.PluginAction)
     def handle_ali_to_115(self, event: Event):
         """远程命令触发：阿里云盘分享秒传到115"""
         if not event:
