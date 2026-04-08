@@ -238,11 +238,71 @@ def _download_subtitles_from_share(
     return downloaded_paths, fail_count
 
 
+def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str) -> Optional[str]:
+    """
+    当只有 tmdbid 但 mtype 未知时，同时查询 TMDB 电影和TV，
+    将两者的全部候选名称与消息原文做匹配，以此推断媒体类型。
+
+    返回 "tv" / "movie"，或 None（无法判断时）。
+    """
+    import re
+    try:
+        from app.modules.themoviedb.tmdbapi import TmdbApi
+        from app.schemas.types import MediaType
+
+        tmdb = TmdbApi()
+        movie_info = tmdb.get_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
+        tv_info = tmdb.get_info(mtype=MediaType.TV, tmdbid=tmdbid)
+
+        def _collect_names(info: Optional[dict]) -> List[str]:
+            if not info:
+                return []
+            names = []
+            for key in ("title", "original_title", "name", "original_name"):
+                v = info.get(key)
+                if v and isinstance(v, str):
+                    names.append(v)
+            aka = info.get("also_known_as") or []
+            if isinstance(aka, list):
+                names.extend(n for n in aka if n and isinstance(n, str))
+            return names
+
+        def _matches(names: List[str]) -> bool:
+            for name in names:
+                if not name:
+                    continue
+                try:
+                    if re.search(re.escape(name), arg_str, re.IGNORECASE):
+                        return True
+                except re.error:
+                    if name in arg_str:
+                        return True
+            return False
+
+        movie_hit = _matches(_collect_names(movie_info))
+        tv_hit = _matches(_collect_names(tv_info))
+
+        logger.info(
+            f"【P115ShareStrm】TMDB名称匹配结果 tmdbid={tmdbid}: movie_hit={movie_hit}, tv_hit={tv_hit}"
+        )
+
+        if tv_hit and not movie_hit:
+            return "tv"
+        if movie_hit and not tv_hit:
+            return "movie"
+        # 两者都命中或都未命中，无法判断
+        return None
+    except Exception as e:
+        logger.warning(f"【P115ShareStrm】TMDB名称匹配异常: {e}")
+        return None
+
+
 def process_share_strm(
     share_code: str,
     receive_code: str,
     tmdbid: Optional[int] = None,
     mtype: Optional[str] = None,
+    arg_str: Optional[str] = None,
     notify: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
@@ -306,6 +366,14 @@ def process_share_strm(
 
         # 2. 第二步：提前识别媒体信息（如有提供 ID）
         mediainfo = None
+
+        # 当有 tmdbid 但 mtype 未知时，尝试通过 TMDB 名称匹配推断类型
+        if tmdbid and not mtype and arg_str and configer.moviepilot_transfer:
+            inferred = _resolve_mtype_by_tmdb_names(tmdbid, arg_str)
+            if inferred:
+                logger.info(f"【P115ShareStrm】通过TMDB名称匹配推断媒体类型: {inferred}")
+                mtype = inferred
+
         if tmdbid and mtype and configer.moviepilot_transfer:
             for i in range(3):
                 try:
@@ -497,7 +565,8 @@ class ShareTaskQueue:
             logger.warning(f"【P115ShareStrm】写入持久化任务失败: {e}")
 
     def _persist_add(self, task_id: str, share_code: str, receive_code: str,
-                     user_id: Optional[str], tmdbid: Optional[int], mtype: Optional[str]) -> None:
+                     user_id: Optional[str], tmdbid: Optional[int], mtype: Optional[str],
+                     arg_str: Optional[str] = None) -> None:
         """向持久化文件追加一条任务（需在 _lock 内调用）"""
         tasks = self._load_tasks()
         tasks.append({
@@ -507,6 +576,7 @@ class ShareTaskQueue:
             "user_id": user_id,
             "tmdbid": tmdbid,
             "mtype": mtype,
+            "arg_str": arg_str,
             "added_at": time(),
             "retry_count": 0,
         })
@@ -566,6 +636,7 @@ class ShareTaskQueue:
         user_id: Optional[str] = None,
         tmdbid: Optional[int] = None,
         mtype: Optional[str] = None,
+        arg_str: Optional[str] = None,
         _task_id: Optional[str] = None,
         _skip_dedup: bool = False,
     ) -> bool:
@@ -590,9 +661,9 @@ class ShareTaskQueue:
                     return False
                 self._recent_tasks[share_code] = now
                 # 新任务才写持久化，恢复任务已在文件中
-                self._persist_add(task_id, share_code, receive_code, user_id, tmdbid, mtype)
+                self._persist_add(task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str)
 
-        self._queue.put((task_id, share_code, receive_code, user_id, tmdbid, mtype))
+        self._queue.put((task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str))
         logger.info(f"【P115ShareStrm】新任务已入队: {share_code} (id={task_id})")
         return True
 
@@ -616,6 +687,7 @@ class ShareTaskQueue:
                 t.get("user_id"),
                 t.get("tmdbid"),
                 t.get("mtype"),
+                t.get("arg_str"),
             ))
             logger.info(f"【P115ShareStrm】已恢复任务: {t['share_code']} (重试次数: {t.get('retry_count', 0)})")
 
@@ -625,13 +697,13 @@ class ShareTaskQueue:
         while self._running:
             try:
                 task = self._queue.get(timeout=10)
-                task_id, share_code, receive_code, user_id, tmdbid, mtype = task
+                task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str = task
 
                 # 稍作等待，确保"已入队"通知先到达用户
                 sleep(0.8)
                 self._notify(user_id, "【115分享STRM】", f"🚀 开始处理分享: {share_code}")
 
-                result = process_share_strm(share_code, receive_code, tmdbid=tmdbid, mtype=mtype)
+                result = process_share_strm(share_code, receive_code, tmdbid=tmdbid, mtype=mtype, arg_str=arg_str)
 
                 if result.get("status"):
                     msg = (

@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.20"
+    plugin_version = "1.0.21"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -581,7 +581,7 @@ class p115sharestrm(_PluginBase):
         for link_info in links:
             sc = link_info["share_code"]
             rc = link_info["receive_code"]
-            queued = task_queue.add_task(sc, rc, user_id, tmdbid=tmdbid, mtype=mtype)
+            queued = task_queue.add_task(sc, rc, user_id, tmdbid=tmdbid, mtype=mtype, arg_str=arg_str)
             if queued:
                 logger.info(f"【P115ShareStrm】加入队列 share_code={sc}, receive_code={rc}")
                 self._send_notify(

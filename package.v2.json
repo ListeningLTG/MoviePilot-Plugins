@@ -109,11 +109,12 @@
   "p115sharestrm": {
     "name": "分享STRM生成助手",
     "description": "发送/sharestrm 115分享链接 给TG机器人，自动生成分享STRM",
-    "version": "1.0.20",
+    "version": "1.0.21",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.21": "添加通过tmdbid获取媒体类型的逻辑",
       "v1.0.20": "优化从 TMDB 链接中提取 ID 和媒体类型",
       "v1.0.19": "任务队列持久化，重启后继续未完成的任务",
       "v1.0.18": "修复字幕下载失败的问题",
