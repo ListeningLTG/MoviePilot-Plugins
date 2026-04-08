@@ -527,6 +527,7 @@ class ShareTaskQueue:
         self._worker_thread: Optional[Thread] = None
         self._lock = Lock()
         self._running = False
+        self._processing_count: int = 0  # 当前正在处理中的任务数
         self._notify_callback: Optional[Callable[[Optional[str], str, str], None]] = None
         # 去重缓存：{share_code: 最后入队时间戳}
         self._recent_tasks: Dict[str, float] = {}
@@ -701,6 +702,7 @@ class ShareTaskQueue:
 
                 # 稍作等待，确保"已入队"通知先到达用户
                 sleep(0.8)
+                self._processing_count += 1
                 self._notify(user_id, "【115分享STRM】", f"🚀 开始处理分享: {share_code}")
 
                 result = process_share_strm(share_code, receive_code, tmdbid=tmdbid, mtype=mtype, arg_str=arg_str)
@@ -738,6 +740,7 @@ class ShareTaskQueue:
                         )
 
                 self._queue.task_done()
+                self._processing_count = max(0, self._processing_count - 1)
                 sleep(2)
 
             except Empty:

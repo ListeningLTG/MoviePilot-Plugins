@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.21"
+    plugin_version = "1.0.22"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -443,6 +443,7 @@ class p115sharestrm(_PluginBase):
         获取插件数据页面（队列状态展示）
         """
         queue_size = task_queue._queue.qsize() if task_queue._queue else 0
+        processing_count = task_queue._processing_count
         is_running = task_queue._running
 
         return [
@@ -484,11 +485,26 @@ class p115sharestrm(_PluginBase):
                                             {
                                                 "component": "VChip",
                                                 "props": {
+                                                    "color": "primary" if processing_count > 0 else "default",
+                                                    "variant": "tonal",
+                                                    "prepend-icon": "mdi-cog-sync",
+                                                },
+                                                "text": f"处理中: {processing_count} 个任务",
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 6, "md": 3},
+                                        "content": [
+                                            {
+                                                "component": "VChip",
+                                                "props": {
                                                     "color": "warning" if queue_size > 0 else "default",
                                                     "variant": "tonal",
                                                     "prepend-icon": "mdi-format-list-numbered",
                                                 },
-                                                "text": f"队列中: {queue_size} 个任务",
+                                                "text": f"等待中: {queue_size} 个任务",
                                             }
                                         ],
                                     },
@@ -562,6 +578,7 @@ class p115sharestrm(_PluginBase):
                     elif re.search(r'电影|Movie', clean_text, re.I):
                         mtype = "movie"
                     # 3. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正确类型
+                    logger.info(f"【P115ShareStrm】关键词匹配媒体类型: {mtype or '未识别，将通过TMDBID 进行名称匹配推断'}")
 
         if not arg_str:
             logger.warning("【P115ShareStrm】指令参数为空，未提供链接")
