@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.19"
+    plugin_version = "1.0.20"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -538,21 +538,30 @@ class p115sharestrm(_PluginBase):
         tmdbid = None
         mtype = None
         if configer.tmdb_extract:
-            # 支持格式: TMDB ID: 123, TMDBID: 123, tmdb-123, tmdb=123, tmdb 123 等
-            tmdb_match = re.search(r'TMDB(?:[\s\-_]*ID)?\s*[：:= \-]+(\d+)', arg_str, re.IGNORECASE)
-            if tmdb_match:
-                tmdbid = int(tmdb_match.group(1))
-                logger.info(f"【P115ShareStrm】从指令文本中提取到 TMDB ID: {tmdbid}")
-                # 剥掉 URL，只在纯文本上做类型关键词匹配，避免密码/参数干扰
-                clean_text = re.sub(r'https?://\S+', '', arg_str)
-                # 尝试通过关键词判断类型
-                # 1. 优先匹配电视剧强特征
-                if re.search(r'电视剧|剧集|番剧|[美日韩台港英泰]剧|动漫|综艺|Season|S[0-9]+E[0-9]+|第[0-9]+[季集]', clean_text, re.I):
-                    mtype = "tv"
-                # 2. 匹配电影强特征
-                elif re.search(r'电影|Movie', clean_text, re.I):
-                    mtype = "movie"
-                # 3. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正确类型
+            # 优先从 TMDB 链接中提取 ID 和媒体类型，格式如:
+            #   https://www.themoviedb.org/tv/289690
+            #   https://www.themoviedb.org/movie/1474050
+            tmdb_url_match = re.search(r'themoviedb\.org/(tv|movie)/(\d+)', arg_str, re.IGNORECASE)
+            if tmdb_url_match:
+                mtype = tmdb_url_match.group(1).lower()  # "tv" 或 "movie"
+                tmdbid = int(tmdb_url_match.group(2))
+                logger.info(f"【P115ShareStrm】从 TMDB 链接中提取到 TMDB ID: {tmdbid}，类型: {mtype}")
+            else:
+                # 回退：支持格式: TMDB ID: 123, TMDBID: 123, tmdb-123, tmdb=123, tmdb 123 等
+                tmdb_match = re.search(r'TMDB(?:[\s\-_]*ID)?\s*[：:= \-]+(\d+)', arg_str, re.IGNORECASE)
+                if tmdb_match:
+                    tmdbid = int(tmdb_match.group(1))
+                    logger.info(f"【P115ShareStrm】从指令文本中提取到 TMDB ID: {tmdbid}")
+                    # 剥掉 URL，只在纯文本上做类型关键词匹配，避免密码/参数干扰
+                    clean_text = re.sub(r'https?://\S+', '', arg_str)
+                    # 尝试通过关键词判断类型
+                    # 1. 优先匹配电视剧强特征（S01E01 或仅 S01 均视为剧集）
+                    if re.search(r'电视剧|剧集|番剧|[美日韩台港英泰]剧|动漫|综艺|Season|S[0-9]+E[0-9]+|S[0-9]+|第[0-9]+[季集]', clean_text, re.I):
+                        mtype = "tv"
+                    # 2. 匹配电影强特征
+                    elif re.search(r'电影|Movie', clean_text, re.I):
+                        mtype = "movie"
+                    # 3. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正确类型
 
         if not arg_str:
             logger.warning("【P115ShareStrm】指令参数为空，未提供链接")
