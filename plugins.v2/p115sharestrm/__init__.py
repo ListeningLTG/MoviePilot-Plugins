@@ -8,7 +8,7 @@ from app.log import logger
 
 from .config import configer
 from .utils import extract_115_links
-from .logic import task_queue
+from .logic import task_queue, _resolve_mtype_by_tmdb_names
 
 
 class p115sharestrm(_PluginBase):
@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.22"
+    plugin_version = "1.0.23"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -579,6 +579,17 @@ class p115sharestrm(_PluginBase):
                         mtype = "movie"
                     # 3. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正确类型
                     logger.info(f"【P115ShareStrm】关键词匹配媒体类型: {mtype or '未识别，将通过TMDBID 进行名称匹配推断'}")
+
+                    # 4. 关键词匹配到类型后，用 TMDB 接口做二次验证，纠正可能的误判
+                    if mtype:
+                        verified = _resolve_mtype_by_tmdb_names(tmdbid, arg_str, prefer=mtype)
+                        if verified is None:
+                            logger.info(f"【P115ShareStrm】TMDB验证无法确认，保留关键词结果: {mtype}")
+                        elif verified != mtype:
+                            logger.info(f"【P115ShareStrm】TMDB验证修正媒体类型: {mtype} → {verified}")
+                            mtype = verified
+                        else:
+                            logger.info(f"【P115ShareStrm】TMDB验证确认媒体类型: {mtype}")
 
         if not arg_str:
             logger.warning("【P115ShareStrm】指令参数为空，未提供链接")

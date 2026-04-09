@@ -238,10 +238,16 @@ def _download_subtitles_from_share(
     return downloaded_paths, fail_count
 
 
-def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str) -> Optional[str]:
+def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
+                                   prefer: Optional[str] = None) -> Optional[str]:
     """
-    当只有 tmdbid 但 mtype 未知时，同时查询 TMDB 电影和TV，
-    将两者的全部候选名称与消息原文做匹配，以此推断媒体类型。
+    通过 TMDB 接口查询媒体名称，与消息原文匹配来推断或验证媒体类型。
+
+    - prefer=None  : 同时查询电影和TV，双向匹配（用于 mtype 未知时）
+    - prefer="tv"  : 先查TV验证，命中则确认；未命中再查电影，命中则修正（用于关键词结果验证）
+    - prefer="movie": 先查电影验证，命中则确认；未命中再查TV，命中则修正
+
+    兜底规则（名称都未命中时）：若只有一个类型在 TMDB 有数据，则直接使用该类型。
 
     返回 "tv" / "movie"，或 None（无法判断时）。
     """
@@ -251,8 +257,6 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str) -> Optional[str]:
         from app.schemas.types import MediaType
 
         tmdb = TmdbApi()
-        movie_info = tmdb.get_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
-        tv_info = tmdb.get_info(mtype=MediaType.TV, tmdbid=tmdbid)
 
         def _collect_names(info: Optional[dict]) -> List[str]:
             if not info:
@@ -279,19 +283,67 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str) -> Optional[str]:
                         return True
             return False
 
-        movie_hit = _matches(_collect_names(movie_info))
-        tv_hit = _matches(_collect_names(tv_info))
+        def _only_one_exists(info_a: Optional[dict], info_b: Optional[dict],
+                              type_a: str, type_b: str) -> Optional[str]:
+            """名称匹配都失败后，若只有一侧有数据则直接返回该类型"""
+            has_a = bool(info_a)
+            has_b = bool(info_b)
+            if has_a and not has_b:
+                logger.info(
+                    f"【P115ShareStrm】TMDB名称均未命中，但仅 {type_a} 有数据，兜底使用: {type_a}"
+                )
+                return type_a
+            if has_b and not has_a:
+                logger.info(
+                    f"【P115ShareStrm】TMDB名称均未命中，但仅 {type_b} 有数据，兜底使用: {type_b}"
+                )
+                return type_b
+            return None
 
-        logger.info(
-            f"【P115ShareStrm】TMDB名称匹配结果 tmdbid={tmdbid}: movie_hit={movie_hit}, tv_hit={tv_hit}"
-        )
+        if prefer:
+            # 有偏好类型时：先验证偏好类型，若不命中再验证另一类型
+            prefer_mtype = MediaType.TV if prefer == "tv" else MediaType.MOVIE
+            other_mtype = MediaType.MOVIE if prefer == "tv" else MediaType.TV
+            other_str = "movie" if prefer == "tv" else "tv"
 
-        if tv_hit and not movie_hit:
-            return "tv"
-        if movie_hit and not tv_hit:
-            return "movie"
-        # 两者都命中或都未命中，无法判断
-        return None
+            prefer_info = tmdb.get_info(mtype=prefer_mtype, tmdbid=tmdbid)
+            prefer_hit = _matches(_collect_names(prefer_info))
+            logger.info(
+                f"【P115ShareStrm】TMDB验证 tmdbid={tmdbid} prefer={prefer}: {prefer}_hit={prefer_hit}"
+            )
+            if prefer_hit:
+                return prefer
+
+            # 偏好类型未命中，查另一类型
+            other_info = tmdb.get_info(mtype=other_mtype, tmdbid=tmdbid)
+            other_hit = _matches(_collect_names(other_info))
+            logger.info(
+                f"【P115ShareStrm】TMDB验证 tmdbid={tmdbid} fallback={other_str}: {other_str}_hit={other_hit}"
+            )
+            if other_hit:
+                return other_str
+
+            # 名称都未命中，尝试兜底：只有一侧有数据
+            return _only_one_exists(prefer_info, other_info, prefer, other_str)
+        else:
+            # 无偏好时：同时查询双向匹配
+            movie_info = tmdb.get_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
+            tv_info = tmdb.get_info(mtype=MediaType.TV, tmdbid=tmdbid)
+            movie_hit = _matches(_collect_names(movie_info))
+            tv_hit = _matches(_collect_names(tv_info))
+            logger.info(
+                f"【P115ShareStrm】TMDB名称匹配结果 tmdbid={tmdbid}: movie_hit={movie_hit}, tv_hit={tv_hit}"
+            )
+            if tv_hit and not movie_hit:
+                return "tv"
+            if movie_hit and not tv_hit:
+                return "movie"
+
+            # 名称都未命中（或都命中），尝试兜底：只有一侧有数据
+            if not tv_hit and not movie_hit:
+                return _only_one_exists(movie_info, tv_info, "movie", "tv")
+            # 两者都命中，无法判断
+            return None
     except Exception as e:
         logger.warning(f"【P115ShareStrm】TMDB名称匹配异常: {e}")
         return None
