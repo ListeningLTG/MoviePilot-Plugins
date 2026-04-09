@@ -341,6 +341,10 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
 
             # 名称都未命中（或都命中），尝试兜底：只有一侧有数据
             if not tv_hit and not movie_hit:
+                logger.info(
+                    f"【P115ShareStrm】兜底判断: movie_info={bool(movie_info)}({type(movie_info).__name__}), "
+                    f"tv_info={bool(tv_info)}({type(tv_info).__name__})"
+                )
                 return _only_one_exists(movie_info, tv_info, "movie", "tv")
             # 两者都命中，无法判断
             return None
