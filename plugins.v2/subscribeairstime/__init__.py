@@ -15,7 +15,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.schemas import NotificationType, MediaType
 
 
-class SubscribeAirsTime(_PluginBase):
+class subscribeairstime(_PluginBase):
     # 插件名称
     plugin_name = "订阅播出提醒"
     # 插件描述
@@ -23,7 +23,7 @@ class SubscribeAirsTime(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/subscribe_reminder.png"
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
