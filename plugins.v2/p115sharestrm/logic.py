@@ -299,7 +299,7 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
             """名称匹配都失败后，若只有一侧有有效数据则直接返回该类型"""
             has_a = _has_valid_data(info_a)
             has_b = _has_valid_data(info_b)
-            logger.info(
+            logger.debug(
                 f"【P115ShareStrm】兜底数据检查: {type_a}_valid={has_a}, {type_b}_valid={has_b}"
             )
             if has_a and not has_b:
@@ -343,8 +343,6 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
             # 无偏好时：同时查询双向匹配
             movie_info = tmdb.get_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
             tv_info = tmdb.get_info(mtype=MediaType.TV, tmdbid=tmdbid)
-            logger.info(f"【P115ShareStrm】TMDB电影接口返回: {movie_info}")
-            logger.info(f"【P115ShareStrm】TMDB电视剧接口返回: {tv_info}")
             movie_hit = _matches(_collect_names(movie_info))
             tv_hit = _matches(_collect_names(tv_info))
             logger.info(
@@ -357,10 +355,6 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
 
             # 名称都未命中（或都命中），尝试兜底：只有一侧有数据
             if not tv_hit and not movie_hit:
-                logger.info(
-                    f"【P115ShareStrm】兜底判断: movie_info={bool(movie_info)}({type(movie_info).__name__}), "
-                    f"tv_info={bool(tv_info)}({type(tv_info).__name__})"
-                )
                 return _only_one_exists(movie_info, tv_info, "movie", "tv")
             # 两者都命中，无法判断
             return None

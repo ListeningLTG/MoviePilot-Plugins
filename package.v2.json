@@ -109,11 +109,12 @@
   "p115sharestrm": {
     "name": "分享STRM生成助手",
     "description": "发送/sharestrm 115分享链接 给TG机器人，自动生成分享STRM",
-    "version": "1.0.24.1",
+    "version": "1.0.25",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.25": "优化",
       "v1.0.24.1": "测试验证",
       "v1.0.23": "优化TMDB接口识别媒体类型的逻辑",
       "v1.0.22": "日志优化，添加关键词匹配媒体类型信息",
