@@ -17,19 +17,19 @@ from app.schemas import NotificationType, MediaType
 
 class SubscribeReminder(_PluginBase):
     # 插件名称
-    plugin_name = "订阅提醒"
+    plugin_name = "订阅播出提醒"
     # 插件描述
-    plugin_desc = "推送当天订阅更新内容。"
+    plugin_desc = "推送当天订阅更新内容及播出时间。"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/thsrite/MoviePilot-Plugins/main/icons/subscribe_reminder.png"
+    plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/subscribe_reminder.png"
     # 插件版本
-    plugin_version = "1.5"
+    plugin_version = "1.0.0"
     # 插件作者
-    plugin_author = "thsrite"
+    plugin_author = "ListeningLTG"
     # 作者主页
-    author_url = "https://github.com/thsrite"
+    author_url = "https://github.com/ListeningLTG"
     # 插件配置项ID前缀
-    plugin_config_prefix = "subscribereminder_"
+    plugin_config_prefix = "subscribeairstime_"
     # 加载顺序
     plugin_order = 33
     # 可使用的用户级别
@@ -142,12 +142,22 @@ class SubscribeReminder(_PluginBase):
                         episodes.append(episode.episode_number)
 
                 if episodes:
+                    # 尝试从 TVDB 获取系列级播出时间
+                    airs_time = ""
+                    if subscribe.tvdbid:
+                        try:
+                            tvdb_data = self.media.tvdb_info(tvdbid=subscribe.tvdbid)
+                            if tvdb_data:
+                                airs_time = tvdb_data.get("airsTime") or ""
+                        except Exception as e:
+                            logger.warning(f"获取TVDB播出时间失败 ({subscribe.name}): {e}")
                     current_tv_subscribe.append({
                         'name': f"{subscribe.name} ({subscribe.year})",
                         'season': f"S{str(subscribe.season).rjust(2, '0')}",
                         'episode': f"E{str(episodes[0]).rjust(2, '0')}-E{str(episodes[-1]).rjust(2, '0')}" if len(
                             episodes) > 1 else f"E{str(episodes[0]).rjust(2, '0')}",
-                        "image": subscribe.backdrop or subscribe.poster
+                        "image": subscribe.backdrop or subscribe.poster,
+                        "airs_time": airs_time
                     })
 
             # 电影
@@ -169,7 +179,9 @@ class SubscribeReminder(_PluginBase):
             image = []
             count = 0
             for sub in current_tv_subscribe:
-                text += f"📺︎{sub.get('name')} {sub.get('season')}{sub.get('episode')}\n"
+                airs_time = sub.get('airs_time')
+                time_label = f" {airs_time}" if airs_time else ""
+                text += f"📺︎{sub.get('name')} {sub.get('season')}{sub.get('episode')}{time_label}\n"
                 count += 1
                 image.append(sub.get('image'))
                 if count % 8 == 0:  # 每8条发送一次

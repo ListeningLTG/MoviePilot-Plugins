@@ -139,5 +139,16 @@
       "v1.0.1": "优化从tmdb获取媒体信息时的代码逻辑",
       "v1.0.0": "115分享STRM生成助手，首次提交"
     }
+  },
+  "subscribereminder": {
+    "name": "订阅播出提醒",
+    "description": "每天定时提醒用户当天有剧集更新的订阅及播出时间",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/subscribe_reminder.png",
+    "author": "ListeningLTG",
+    "level": 1,
+    "history": {
+      "v1.0.0": "订阅播出提醒，首次提交"
+    }
   }
 }
