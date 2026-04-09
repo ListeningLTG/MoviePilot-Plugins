@@ -23,7 +23,7 @@ class subscribeairstime(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/subscribe_reminder.png"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -175,6 +175,8 @@ class subscribeairstime(_PluginBase):
 
         # 处理电视剧订阅
         if "tv" in self._subtype and current_tv_subscribe:
+            # 按播出时间升序排序，无时间的排到最后
+            current_tv_subscribe.sort(key=lambda x: x.get('airs_time') or "99:99")
             text = ""
             image = []
             count = 0
