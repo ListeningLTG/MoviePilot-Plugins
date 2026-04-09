@@ -283,19 +283,33 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
                         return True
             return False
 
+        def _has_valid_data(info: Optional[dict]) -> bool:
+            """判断 TMDB 返回的数据是否包含有效标题（排除空响应或占位数据）"""
+            if not info or not isinstance(info, dict):
+                return False
+            # 检查是否有任何有效的标题/名称字段
+            for key in ("title", "original_title", "name", "original_name"):
+                v = info.get(key)
+                if v and isinstance(v, str) and v.strip():
+                    return True
+            return False
+
         def _only_one_exists(info_a: Optional[dict], info_b: Optional[dict],
                               type_a: str, type_b: str) -> Optional[str]:
-            """名称匹配都失败后，若只有一侧有数据则直接返回该类型"""
-            has_a = bool(info_a)
-            has_b = bool(info_b)
+            """名称匹配都失败后，若只有一侧有有效数据则直接返回该类型"""
+            has_a = _has_valid_data(info_a)
+            has_b = _has_valid_data(info_b)
+            logger.info(
+                f"【P115ShareStrm】兜底数据检查: {type_a}_valid={has_a}, {type_b}_valid={has_b}"
+            )
             if has_a and not has_b:
                 logger.info(
-                    f"【P115ShareStrm】TMDB名称均未命中，但仅 {type_a} 有数据，兜底使用: {type_a}"
+                    f"【P115ShareStrm】TMDB名称均未命中，但仅 {type_a} 有有效数据，兜底使用: {type_a}"
                 )
                 return type_a
             if has_b and not has_a:
                 logger.info(
-                    f"【P115ShareStrm】TMDB名称均未命中，但仅 {type_b} 有数据，兜底使用: {type_b}"
+                    f"【P115ShareStrm】TMDB名称均未命中，但仅 {type_b} 有有效数据，兜底使用: {type_b}"
                 )
                 return type_b
             return None
@@ -329,6 +343,8 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
             # 无偏好时：同时查询双向匹配
             movie_info = tmdb.get_info(mtype=MediaType.MOVIE, tmdbid=tmdbid)
             tv_info = tmdb.get_info(mtype=MediaType.TV, tmdbid=tmdbid)
+            logger.info(f"【P115ShareStrm】TMDB电影接口返回: {movie_info}")
+            logger.info(f"【P115ShareStrm】TMDB电视剧接口返回: {tv_info}")
             movie_hit = _matches(_collect_names(movie_info))
             tv_hit = _matches(_collect_names(tv_info))
             logger.info(
