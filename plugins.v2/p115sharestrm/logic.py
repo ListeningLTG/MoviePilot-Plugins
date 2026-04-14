@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional, Iterator, Callable, Tuple
 from queue import Queue, Empty
 from uuid import uuid4
 import json
+import shutil
 
 from p115client import P115Client, check_response
 from p115client.util import complete_url
@@ -167,6 +168,183 @@ def iter_share_files(
         # 如果当前页返回的数据少于 limit，说明已经是最后一页
         if len(items) < limit:
             break
+
+
+# 字幕语言标签正则（与 MoviePilot transhandler.__rename_subtitles 保持一致）
+_ZHCN_SUB_RE = (
+    r"([.\[(\s](((zh[-_])?(cn|ch[si]|sg|sc))|zho?"
+    r"|chinese|(cn|ch[si]|sg|zho?)[-_&]?(cn|ch[si]|sg|zho?|eng|jap|ja|jpn)"
+    r"|eng[-_&]?(cn|ch[si]|sg|zho?)|(jap|ja|jpn)[-_&]?(cn|ch[si]|sg|zho?)"
+    r"|简[体中]?)[.\])\s])"
+    r"|([\u4e00-\u9fa5]{0,3}[中双][\u4e00-\u9fa5]{0,2}[字文语璃][[\u4e00-\u9fa5]{0,3})"
+    r"|简体中[文字]|中[文字]简体|简体|JPSC|sc_jp"
+    r"|(?<![a-z0-9])gb(?![a-z0-9])"
+)
+_ZHTW_SUB_RE = (
+    r"([.\[(\s](((zh[-_])?(hk|tw|cht|tc))"
+    r"|cht[-_&]?(cht|eng|jap|ja|jpn)"
+    r"|eng[-_&]?cht|(jap|ja|jpn)[-_&]?cht"
+    r"|繁[体中]?)[.\])\s])"
+    r"|繁体中[文字]|中[文字]繁体|繁体|JPTC|tc_jp"
+    r"|(?<![a-z0-9])big5(?![a-z0-9])"
+)
+_JA_SUB_RE = (
+    r"([.\[(\s](ja-jp|jap|ja|jpn"
+    r"|(jap|ja|jpn)[-_&]?eng|eng[-_&]?(jap|ja|jpn))[.\])\s])"
+    r"|日本語|日語"
+)
+_ENG_SUB_RE = r"[.\[(\s]eng[.\])\s]"
+
+
+def _extract_subtitle_lang_tag(sub_filename: str) -> str:
+    """
+    从字幕文件名提取语言标签（用于拼接到媒体文件主名之后）。
+
+    规则与 MoviePilot transhandler 保持一致：
+      简体中文 → .chi.zh-cn
+      繁体中文 → .zh-tw
+      日语     → .ja
+      英文     → .eng
+      其他     → 空字符串
+
+    当检测到的语言与系统 settings.DEFAULT_SUB 一致时，自动添加 .default 前缀，
+    与 MP 原生整理行为保持一致。
+    """
+    import re
+    from app.core.config import settings
+
+    if re.search(_ZHCN_SUB_RE, sub_filename, re.I):
+        lang_code = "zh-cn"
+        lang = ".chi.zh-cn"
+    elif re.search(_ZHTW_SUB_RE, sub_filename, re.I):
+        lang_code = "zh-tw"
+        lang = ".zh-tw"
+    elif re.search(_JA_SUB_RE, sub_filename, re.I):
+        lang_code = "ja"
+        lang = ".ja"
+    elif re.search(_ENG_SUB_RE, sub_filename, re.I):
+        lang_code = "eng"
+        lang = ".eng"
+    else:
+        return ""
+
+    # 与 MP transhandler 保持一致：当字幕语言 == settings.DEFAULT_SUB 时加 .default
+    default_sub = getattr(settings, "DEFAULT_SUB", "") or ""
+    if default_sub.lower() == lang_code.lower():
+        return ".default" + lang
+    return lang
+
+
+def _match_subtitle_to_media(
+    subtitle_items: List[dict],
+    media_items: List[dict],
+) -> Dict[str, str]:
+    """
+    将字幕文件与同目录的媒体文件关联，返回 {字幕原始名: 对应媒体文件stem} 的映射。
+
+    匹配策略：同目录下唯一媒体文件直接关联；多文件则按集号或公共前缀匹配。
+    """
+    import re
+
+    # 按父目录分组
+    from collections import defaultdict
+    media_by_dir: Dict[str, List[dict]] = defaultdict(list)
+    for item in media_items:
+        parent = str(Path(item.get("_full_path", item.get("name", ""))).parent)
+        media_by_dir[parent].append(item)
+
+    result: Dict[str, str] = {}
+    for sub_item in subtitle_items:
+        sub_path = sub_item.get("_full_path", sub_item.get("name", ""))
+        sub_name = Path(sub_path).name
+        parent = str(Path(sub_path).parent)
+        candidates = media_by_dir.get(parent, [])
+
+        if not candidates:
+            continue
+
+        if len(candidates) == 1:
+            result[sub_name] = Path(candidates[0].get("name", "")).stem
+            continue
+
+        # 尝试通过集号匹配
+        ep_match = re.search(r"[Ss](\d+)[Ee](\d+)", sub_name)
+        if ep_match:
+            for media_item in candidates:
+                m_name = media_item.get("name", "")
+                m_ep = re.search(r"[Ss](\d+)[Ee](\d+)", m_name)
+                if m_ep and m_ep.group(1) == ep_match.group(1) and m_ep.group(2) == ep_match.group(2):
+                    result[sub_name] = Path(m_name).stem
+                    break
+            continue
+
+        # 公共前缀匹配：找最长公共前缀最多的媒体文件
+        best_media = max(
+            candidates,
+            key=lambda m: len(
+                Path(m.get("name", "")).stem
+            ) if Path(m.get("name", "")).stem in sub_name else 0,
+        )
+        if Path(best_media.get("name", "")).stem and Path(best_media.get("name", "")).stem in sub_name:
+            result[sub_name] = Path(best_media.get("name", "")).stem
+
+    return result
+
+
+def _rename_subtitles_to_match_media(
+    downloaded_paths: List[Path],
+    subtitle_items: List[dict],
+    media_items: List[dict],
+) -> List[Path]:
+    """
+    将已下载的字幕文件重命名，使其前缀与对应媒体文件一致。
+
+    逻辑：
+    1. 建立 {字幕原始文件名 → 媒体stem} 的映射
+    2. 对每个已下载字幕，提取语言标签，生成 {媒体stem}{lang_tag}{ext} 的新名称
+    3. 在本地重命名后，更新路径列表返回
+
+    :return: 重命名后的本地路径列表（重命名失败的保留原路径）
+    """
+    name_map = _match_subtitle_to_media(subtitle_items, media_items)
+    if not name_map:
+        return downloaded_paths
+
+    # 建立 {原始文件名 → 下载路径} 的查找表
+    path_by_original_name: Dict[str, Path] = {}
+    for item, local_path in zip(subtitle_items, downloaded_paths):
+        item_name = Path(item.get("_full_path", item.get("name", ""))).name
+        path_by_original_name[item_name] = local_path
+
+    renamed_paths: List[Path] = list(downloaded_paths)
+    for i, (item, local_path) in enumerate(zip(subtitle_items, downloaded_paths)):
+        sub_name = Path(item.get("_full_path", item.get("name", ""))).name
+        media_stem = name_map.get(sub_name)
+        if not media_stem:
+            continue
+
+        lang_tag = _extract_subtitle_lang_tag(sub_name)
+        file_ext = local_path.suffix
+        new_name = media_stem + lang_tag + file_ext
+        new_path = local_path.with_name(new_name)
+
+        if new_path == local_path:
+            continue
+
+        try:
+            if new_path.exists():
+                new_path.unlink()
+            local_path.rename(new_path)
+            renamed_paths[i] = new_path
+            logger.info(
+                f"【P115ShareStrm】字幕对齐重命名: {local_path.name} → {new_name}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"【P115ShareStrm】字幕对齐重命名失败: {local_path.name}: {e}"
+            )
+
+    return renamed_paths
 
 
 def _download_subtitles_from_share(
@@ -406,6 +584,8 @@ def process_share_strm(
 
         strm_count = 0
         media_files = []
+        # media stem（分享内）→ 生成的 STRM 本地路径，用于后续字幕直接放置
+        media_stem_to_strm_path: Dict[str, Path] = {}
 
         # 构建字幕文件后缀集合（按需）
         subtitle_exts: set = set()
@@ -504,15 +684,20 @@ def process_share_strm(
             strm_count += 1
             if configer.moviepilot_transfer:
                 generated_strm_paths.append(strm_file_path)
+            media_stem_to_strm_path[Path(filename).stem] = strm_file_path
 
-        # 4. 第四步：全部生成完毕后，批量交由 MoviePilot 整理 STRM
-        transfer_chain: Optional[TransferChain] = None
+        # 4. 第四步：全部生成完毕后，批量交由 MoviePilot 整理 STRM（同步模式，以便获取目标路径）
+        # strm 本地源路径（posix）→ MoviePilot 整理后目标路径，用于字幕直接放置
+        strm_source_to_target: Dict[str, Path] = {}
         if generated_strm_paths and configer.moviepilot_transfer:
             logger.info(f"【P115ShareStrm】开始批量整理 STRM，共 {len(generated_strm_paths)} 个文件")
+            from app.db.transferhistory_oper import TransferHistoryOper
+            _th_oper = TransferHistoryOper()
             transfer_chain = TransferChain()
             for strm_file_path in generated_strm_paths:
                 try:
                     stat = strm_file_path.stat()
+                    # background=False 使整理在当前线程同步完成，完成后可立即查询历史记录
                     transfer_chain.do_transfer(
                         fileitem=FileItem(
                             storage="local",
@@ -525,12 +710,24 @@ def process_share_strm(
                             modify_time=stat.st_mtime,
                         ),
                         mediainfo=mediainfo,
+                        background=False,
                     )
+                    # 查询整理历史，获取目标路径
+                    history = _th_oper.get_by_src(strm_file_path.as_posix(), "local")
+                    if history and history.dest:
+                        strm_source_to_target[strm_file_path.as_posix()] = Path(history.dest)
                 except Exception as e:
                     logger.warning(f"【P115ShareStrm】STRM 整理失败: {strm_file_path.name}: {e}")
             logger.info("【P115ShareStrm】STRM 批量整理完成")
 
-        # 5. 第五步：下载字幕文件并整理（如开启）
+        # 构建 媒体 stem → STRM 整理目标路径 映射，供字幕放置使用
+        media_stem_to_target: Dict[str, Path] = {}
+        for stem, strm_path in media_stem_to_strm_path.items():
+            target = strm_source_to_target.get(strm_path.as_posix())
+            if target:
+                media_stem_to_target[stem] = target
+
+        # 5. 第五步：下载字幕文件并放置（如开启）
         subtitle_count = 0
         subtitle_fail_count = 0
         if configer.download_subtitle and subtitle_files:
@@ -542,27 +739,26 @@ def process_share_strm(
             logger.info(
                 f"【P115ShareStrm】字幕下载完成，成功 {subtitle_count} 个，失败 {subtitle_fail_count} 个"
             )
-            if downloaded_subtitle_paths and configer.moviepilot_transfer:
-                if transfer_chain is None:
-                    transfer_chain = TransferChain()
-                for subtitle_path in downloaded_subtitle_paths:
-                    try:
-                        stat = subtitle_path.stat()
-                        transfer_chain.do_transfer(
-                            fileitem=FileItem(
-                                storage="local",
-                                type="file",
-                                path=subtitle_path.as_posix(),
-                                name=subtitle_path.name,
-                                basename=subtitle_path.stem,
-                                extension=subtitle_path.suffix.lstrip(".").lower(),
-                                size=stat.st_size,
-                                modify_time=stat.st_mtime,
-                            ),
-                            mediainfo=mediainfo,
-                        )
-                    except Exception as e:
-                        logger.warning(f"【P115ShareStrm】字幕整理失败: {subtitle_path.name}: {e}")
+            if downloaded_subtitle_paths and configer.moviepilot_transfer and media_stem_to_target:
+                # 直接将字幕复制到 STRM 整理目标目录，文件名以整理后的 STRM stem 为前缀，
+                # 避免 ffprobe 等插件造成 STRM 与字幕文件名前缀不一致的问题
+                name_map = _match_subtitle_to_media(subtitle_files, media_files)
+                for sub_item, local_path in zip(subtitle_files, downloaded_subtitle_paths):
+                    sub_name = Path(sub_item.get("_full_path", sub_item.get("name", ""))).name
+                    media_stem = name_map.get(sub_name)
+                    strm_target = media_stem_to_target.get(media_stem) if media_stem else None
+                    if strm_target:
+                        lang_tag = _extract_subtitle_lang_tag(sub_name)
+                        new_name = strm_target.stem + lang_tag + local_path.suffix
+                        dest_path = strm_target.parent / new_name
+                        try:
+                            dest_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(str(local_path), str(dest_path))
+                            logger.info(f"【P115ShareStrm】字幕放置到目标: {new_name}")
+                        except Exception as e:
+                            logger.warning(f"【P115ShareStrm】字幕放置失败 {sub_name}: {e}")
+                    else:
+                        logger.warning(f"【P115ShareStrm】未找到对应 STRM 目标路径，跳过字幕: {sub_name}")
 
         return {
             "status": True,
