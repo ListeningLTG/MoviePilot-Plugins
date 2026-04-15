@@ -686,18 +686,20 @@ def process_share_strm(
                 generated_strm_paths.append(strm_file_path)
             media_stem_to_strm_path[Path(filename).stem] = strm_file_path
 
-        # 4. 第四步：全部生成完毕后，批量交由 MoviePilot 整理 STRM（同步模式，以便获取目标路径）
+
+        # 4. 第四步：全部生成完毕后，批量交由 MoviePilot 异步整理 STRM，并轮询等待全部完成
         # strm 本地源路径（posix）→ MoviePilot 整理后目标路径，用于字幕直接放置
         strm_source_to_target: Dict[str, Path] = {}
+        media_stem_to_target: Dict[str, Path] = {}
         if generated_strm_paths and configer.moviepilot_transfer:
             logger.info(f"【P115ShareStrm】开始批量整理 STRM，共 {len(generated_strm_paths)} 个文件")
             from app.db.transferhistory_oper import TransferHistoryOper
             _th_oper = TransferHistoryOper()
             transfer_chain = TransferChain()
+            # 1. 全部异步入队
             for strm_file_path in generated_strm_paths:
                 try:
                     stat = strm_file_path.stat()
-                    # background=False 使整理在当前线程同步完成，完成后可立即查询历史记录
                     transfer_chain.do_transfer(
                         fileitem=FileItem(
                             storage="local",
@@ -710,22 +712,40 @@ def process_share_strm(
                             modify_time=stat.st_mtime,
                         ),
                         mediainfo=mediainfo,
-                        background=False,
+                        background=True,
                     )
-                    # 查询整理历史，获取目标路径
-                    history = _th_oper.get_by_src(strm_file_path.as_posix(), "local")
-                    if history and history.dest:
-                        strm_source_to_target[strm_file_path.as_posix()] = Path(history.dest)
                 except Exception as e:
-                    logger.warning(f"【P115ShareStrm】STRM 整理失败: {strm_file_path.name}: {e}")
-            logger.info("【P115ShareStrm】STRM 批量整理完成")
+                    logger.warning(f"【P115ShareStrm】STRM 整理入队失败: {strm_file_path.name}: {e}")
+            logger.info("【P115ShareStrm】STRM 已全部入队，等待整理完成...")
 
-        # 构建 媒体 stem → STRM 整理目标路径 映射，供字幕放置使用
-        media_stem_to_target: Dict[str, Path] = {}
-        for stem, strm_path in media_stem_to_strm_path.items():
-            target = strm_source_to_target.get(strm_path.as_posix())
-            if target:
-                media_stem_to_target[stem] = target
+            # 2. 轮询等待所有 STRM 整理完成，超时时间 10 分钟
+            pending = set(strm_file_path.as_posix() for strm_file_path in generated_strm_paths)
+            timeout = 600
+            interval = 2
+            waited = 0
+            while pending and waited < timeout:
+                finished = set()
+                for src in pending:
+                    history = _th_oper.get_by_src(src, "local")
+                    if history and history.dest:
+                        strm_source_to_target[src] = Path(history.dest)
+                        finished.add(src)
+                if finished:
+                    logger.info(f"【P115ShareStrm】已完成 {len(finished)} 个 STRM 整理")
+                pending -= finished
+                if pending:
+                    sleep(interval)
+                    waited += interval
+            if pending:
+                logger.warning(f"【P115ShareStrm】部分 STRM 整理超时未完成: {pending}")
+            else:
+                logger.info("【P115ShareStrm】STRM 批量整理完成")
+
+            # 3. 构建 媒体 stem → STRM 整理目标路径 映射，供字幕放置使用
+            for stem, strm_path in media_stem_to_strm_path.items():
+                target = strm_source_to_target.get(strm_path.as_posix())
+                if target:
+                    media_stem_to_target[stem] = target
 
         # 5. 第五步：下载字幕文件并放置（如开启）
         subtitle_count = 0
