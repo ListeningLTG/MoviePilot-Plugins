@@ -23,7 +23,7 @@ class subscribeairstime(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/subscribe_reminder.png"
     # 插件版本
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -45,6 +45,72 @@ class subscribeairstime(_PluginBase):
     _msgtype = None
     subscribe_oper = None
     _scheduler: Optional[BackgroundScheduler] = None
+    _country_timezone_map = {
+        "chn": "Asia/Shanghai",
+        "china": "Asia/Shanghai",
+        "hkg": "Asia/Hong_Kong",
+        "twn": "Asia/Taipei",
+        "jpn": "Asia/Tokyo",
+        "japan": "Asia/Tokyo",
+        "kor": "Asia/Seoul",
+        "kr": "Asia/Seoul",
+        "usa": "America/New_York",
+        "us": "America/New_York",
+        "can": "America/Toronto",
+        "gbr": "Europe/London",
+        "uk": "Europe/London",
+        "fra": "Europe/Paris",
+        "deu": "Europe/Berlin",
+        "esp": "Europe/Madrid",
+        "ita": "Europe/Rome",
+        "rus": "Europe/Moscow",
+        "tha": "Asia/Bangkok",
+        "ind": "Asia/Kolkata",
+        "aus": "Australia/Sydney",
+        "nzl": "Pacific/Auckland",
+        "bra": "America/Sao_Paulo",
+        "mex": "America/Mexico_City"
+    }
+
+    def __get_source_timezone(self, tvdb_data: dict) -> Optional[str]:
+        country = None
+        latest_network = tvdb_data.get("latestNetwork") or {}
+        if latest_network.get("country"):
+            country = latest_network.get("country")
+
+        if not country:
+            country = tvdb_data.get("originalCountry")
+
+        if not country:
+            for company in tvdb_data.get("companies") or []:
+                company_type = (company.get("companyType") or {}).get("companyTypeName")
+                if company_type == "Network" and company.get("country"):
+                    country = company.get("country")
+                    break
+
+        if not country:
+            return None
+
+        return self._country_timezone_map.get(str(country).strip().lower())
+
+    def __convert_airs_time(self, airs_time: str, air_date: str, tvdb_data: dict) -> str:
+        if not airs_time or not air_date or not tvdb_data:
+            return airs_time
+
+        source_timezone = self.__get_source_timezone(tvdb_data)
+        if not source_timezone:
+            return airs_time
+
+        try:
+            source_tz = pytz.timezone(source_timezone)
+            target_tz = pytz.timezone(settings.TZ)
+            local_time = datetime.strptime(f"{air_date} {airs_time}", "%Y-%m-%d %H:%M")
+            localized_time = source_tz.localize(local_time)
+            converted_time = localized_time.astimezone(target_tz)
+            return converted_time.strftime("%H:%M")
+        except Exception as err:
+            logger.warning(f"转换TVDB播出时间失败 ({airs_time}, {source_timezone}): {err}")
+            return airs_time
 
     def init_plugin(self, config: dict = None):
         self.subscribe_oper = SubscribeOper()
@@ -142,13 +208,17 @@ class subscribeairstime(_PluginBase):
                         episodes.append(episode.episode_number)
 
                 if episodes:
-                    # 尝试从 TVDB 获取系列级播出时间
+                    # 尝试从 TVDB 获取系列级播出时间，并转换到系统时区
                     airs_time = ""
                     if subscribe.tvdbid:
                         try:
                             tvdb_data = self.media.tvdb_info(tvdbid=subscribe.tvdbid)
                             if tvdb_data:
-                                airs_time = tvdb_data.get("airsTime") or ""
+                                airs_time = self.__convert_airs_time(
+                                    airs_time=tvdb_data.get("airsTime") or "",
+                                    air_date=current_date,
+                                    tvdb_data=tvdb_data
+                                )
                         except Exception as e:
                             logger.warning(f"获取TVDB播出时间失败 ({subscribe.name}): {e}")
                     current_tv_subscribe.append({
