@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from urllib.parse import quote
 from time import sleep, time
@@ -427,7 +428,7 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
 
     兜底规则（名称都未命中时）：若只有一个类型在 TMDB 有数据，则直接使用该类型。
 
-    返回 "tv" / "movie"，或 None（无法判断时）。
+    返回 "tv" / "movie" / "collection"，或 None（无法判断时）。
     """
     import re
     try:
@@ -448,6 +449,14 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
             if isinstance(aka, list):
                 names.extend(n for n in aka if n and isinstance(n, str))
             return names
+
+            return False
+        
+        def _collect_collection_names(info: Optional[dict]) -> List[str]:
+            if not info:
+                return []
+            names = [info.get("name"), info.get("original_name")]
+            return [n for n in names if n and isinstance(n, str)]
 
         def _matches(names: List[str]) -> bool:
             for name in names:
@@ -490,6 +499,14 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
                     f"【P115ShareStrm】TMDB名称均未命中，但仅 {type_b} 有有效数据，兜底使用: {type_b}"
                 )
                 return type_b
+            
+            # 若包含 "系列"、"合集"、"Collection" 等推断合集
+            if re.search(r'系列|合集|Collection', arg_str, re.I):
+                coll_info = tmdb.get_collection(tmdbid)
+                if _has_valid_data(coll_info):
+                    logger.info(f"【P115ShareStrm】TMDB名称匹配推断为合集类型: collection")
+                    return "collection"
+
             return None
 
         if prefer:
@@ -506,7 +523,14 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
             if prefer_hit:
                 return prefer
 
-            # 偏好类型未命中，查另一类型
+            # 偏好类型未命中，尝试合集识别（如果偏好不是合集）
+            if prefer != "collection":
+                coll_info = tmdb.get_collection(tmdbid)
+                if _matches(_collect_collection_names(coll_info)):
+                    logger.info(f"【P115ShareStrm】TMDB验证命中合集类型: collection")
+                    return "collection"
+
+            # 查另一类型
             other_info = tmdb.get_info(mtype=other_mtype, tmdbid=tmdbid)
             other_hit = _matches(_collect_names(other_info))
             logger.info(
@@ -530,6 +554,11 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
                 return "tv"
             if movie_hit and not tv_hit:
                 return "movie"
+            
+            # 检查合集匹配
+            coll_info = tmdb.get_collection(tmdbid)
+            if _matches(_collect_collection_names(coll_info)):
+                return "collection"
 
             # 名称都未命中（或都命中），尝试兜底：只有一侧有数据
             if not tv_hit and not movie_hit:
@@ -612,6 +641,7 @@ def process_share_strm(
 
         # 2. 第二步：提前识别媒体信息（如有提供 ID）
         mediainfo = None
+        collection_parts = []
 
         # 当有 tmdbid 但 mtype 未知时，尝试通过 TMDB 名称匹配推断类型
         if tmdbid and not mtype and arg_str and configer.moviepilot_transfer:
@@ -620,7 +650,36 @@ def process_share_strm(
                 logger.info(f"【P115ShareStrm】通过TMDB名称匹配推断媒体类型: {inferred}")
                 mtype = inferred
 
-        if tmdbid and mtype and configer.moviepilot_transfer:
+        # 处理合集：获取合集下的所有电影
+        if tmdbid and mtype == "collection" and configer.moviepilot_transfer:
+            logger.info(f"【P115ShareStrm】正在获取 TMDB 合集详情 (ID: {tmdbid})...")
+            try:
+                from app.modules.themoviedb.tmdbapi import TmdbApi
+                coll_details = TmdbApi().get_collection(tmdbid)
+                # MoviePilot 的 get_collection 失败时可能返回 []
+                if coll_details:
+                    if isinstance(coll_details, dict):
+                        collection_parts = coll_details.get("parts") or []
+                        logger.info(f"【P115ShareStrm】成功获取合集信息: {coll_details.get('name')}，包含 {len(collection_parts)} 部电影")
+                    elif isinstance(coll_details, list):
+                        # 如果直接返回了列表（某些情况），则认为这就是 parts
+                        collection_parts = coll_details
+                        logger.info(f"【P115ShareStrm】成功获取合集列表信息，包含 {len(collection_parts)} 部电影")
+                    
+                    if collection_parts:
+                        # 核心优化：按标题长度降序排列，确保长标题（如 12回合2）优先于短标题（如 12回合）匹配
+                        collection_parts = sorted(
+                            collection_parts, 
+                            key=lambda x: max(len(x.get("title") or ""), len(x.get("original_title") or "")), 
+                            reverse=True
+                        )
+                else:
+                    logger.warning(f"【P115ShareStrm】未获取到 TMDB 合集详情 (ID: {tmdbid})，请检查网络或 TMDB ID 是否正确")
+            except Exception as e:
+                logger.warning(f"【P115ShareStrm】获取合集详情异常: {e}")
+
+        # 单体媒体提前识别（非合集时）
+        if tmdbid and mtype in ["movie", "tv"] and configer.moviepilot_transfer:
             for i in range(3):
                 try:
                     from app.chain.media import MediaChain
@@ -639,10 +698,48 @@ def process_share_strm(
 
         # 3. 第三步：生成所有 STRM 文件，收集待整理路径
         generated_strm_paths: List[Path] = []
+        # 记录每个文件对应的 mediainfo（用于批量异步入队时区分）
+        strm_to_mediainfo: Dict[str, Any] = {}
+
         for i, item in enumerate(media_files):
             filename = item.get("name", "")
             if (i + 1) % 10 == 0 or (i + 1) == total_media:
                 logger.info(f"【P115ShareStrm】处理进度 ({i+1}/{total_media}): {filename}")
+
+            # 合集模式：为每个文件匹配对应的电影信息
+            current_mediainfo = mediainfo
+            if mtype == "collection" and collection_parts:
+                from app.chain.media import MediaChain
+                from app.schemas.types import MediaType
+                # 尝试根据文件名匹配合集中的子项
+                matched_part = None
+                for part in collection_parts:
+                    p_title = part.get("title")
+                    p_orig = part.get("original_title")
+                    # 只要文件名包含标题或原标题即视为命中（忽略特殊字符）
+                    # 简单清理文件名干扰字符
+                    clean_filename = re.sub(r'[\s._\-]', '', filename).lower()
+                    if (p_title and re.sub(r'[\s._\-]', '', p_title).lower() in clean_filename) or \
+                       (p_orig and re.sub(r'[\s._\-]', '', p_orig).lower() in clean_filename):
+                        matched_part = part
+                        break
+                
+                if matched_part:
+                    try:
+                        p_id = matched_part.get("id")
+                        p_title = matched_part.get("title")
+                        logger.debug(f"【P115ShareStrm】正在为文件 {filename} 识别子项: {p_title} (ID: {p_id})")
+                        current_mediainfo = MediaChain().recognize_media(tmdbid=p_id, mtype=MediaType.MOVIE)
+                        if current_mediainfo:
+                            logger.info(f"【P115ShareStrm】文件 {filename} 成功匹配到合集子项: {current_mediainfo.title_year}")
+                        else:
+                            logger.warning(f"【P115ShareStrm】文件 {filename} 匹配到子项但识别失败: {p_title}")
+                    except Exception as e:
+                        logger.warning(f"【P115ShareStrm】识别合集子项过程异常: {filename}: {e}")
+                else:
+                    # 如果开启了日志级别较低，这里可能产生较多日志，保持为 info 方便你观察
+                    logger.info(f"【P115ShareStrm】文件 {filename} 未匹配到合集子项，将回退到自主识别")
+                    current_mediainfo = None
 
             full_path = item.get("_full_path", f"/{filename}")
             relative_path = Path(full_path.lstrip("/"))
@@ -684,6 +781,7 @@ def process_share_strm(
             strm_count += 1
             if configer.moviepilot_transfer:
                 generated_strm_paths.append(strm_file_path)
+                strm_to_mediainfo[strm_file_path.as_posix()] = current_mediainfo
             media_stem_to_strm_path[Path(filename).stem] = strm_file_path
 
 
@@ -711,7 +809,7 @@ def process_share_strm(
                             size=stat.st_size,
                             modify_time=stat.st_mtime,
                         ),
-                        mediainfo=mediainfo,
+                        mediainfo=strm_to_mediainfo.get(strm_file_path.as_posix()),
                         background=True,
                     )
                 except Exception as e:

@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.27"
+    plugin_version = "1.0.28"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -557,9 +557,10 @@ class p115sharestrm(_PluginBase):
             # 优先从 TMDB 链接中提取 ID 和媒体类型，格式如:
             #   https://www.themoviedb.org/tv/289690
             #   https://www.themoviedb.org/movie/1474050
-            tmdb_url_match = re.search(r'themoviedb\.org/(tv|movie)/(\d+)', arg_str, re.IGNORECASE)
+            #   https://www.themoviedb.org/collection/17149
+            tmdb_url_match = re.search(r'themoviedb\.org/(tv|movie|collection)/(\d+)', arg_str, re.IGNORECASE)
             if tmdb_url_match:
-                mtype = tmdb_url_match.group(1).lower()  # "tv" 或 "movie"
+                mtype = tmdb_url_match.group(1).lower()  # "tv", "movie" 或 "collection"
                 tmdbid = int(tmdb_url_match.group(2))
                 logger.info(f"【P115ShareStrm】从 TMDB 链接中提取到 TMDB ID: {tmdbid}，类型: {mtype}")
             else:
@@ -574,10 +575,13 @@ class p115sharestrm(_PluginBase):
                     # 1. 优先匹配电视剧强特征（S01E01 或仅 S01 均视为剧集）
                     if re.search(r'电视剧|剧集|番剧|[美日韩台港英泰]剧|动漫|综艺|Season|S[0-9]+E[0-9]+|S[0-9]+|第[0-9]+[季集]', clean_text, re.I):
                         mtype = "tv"
-                    # 2. 匹配电影强特征
+                    # 2. 匹配系列强特征
+                    elif re.search(r'系列|合集|Collection', clean_text, re.I):
+                        mtype = "collection"
+                    # 3. 匹配电影强特征
                     elif re.search(r'电影|Movie', clean_text, re.I):
                         mtype = "movie"
-                    # 3. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正确类型
+                    # 4. 如果都没有匹配，mtype 固定为 None，交由 recognize_media 自动根据 TMDB ID 获取正确类型
                     logger.info(f"【P115ShareStrm】关键词匹配媒体类型: {mtype or '未识别，将通过TMDBID 进行名称匹配推断'}")
 
                     # 4. 关键词匹配到类型后，用 TMDB 接口做二次验证，纠正可能的误判
