@@ -1,0 +1,11 @@
+{
+  "top_level_packages": [
+    "p189client"
+  ],
+  "rules": [
+    {
+      "strategy": "author_match",
+      "value": "ChenyangGao"
+    }
+  ]
+}

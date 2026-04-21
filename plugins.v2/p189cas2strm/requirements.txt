@@ -1,0 +1,5 @@
+p189client>=0.0.2.3
+loguru
+jinja2
+fastapi
+httpx
