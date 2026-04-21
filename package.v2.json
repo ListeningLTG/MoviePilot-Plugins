@@ -161,14 +161,15 @@
     }
   },
   "p189cas2strm": {
-    "name": "189网盘CAS转STRM",
-    "description": "189网盘CAS转STRM",
-    "version": "1.0.0",
+    "name": "cas生成strm",
+    "description": "cas生成strm",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/p189.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
-      "v1.0.0": "189网盘CAS转STRM，首次提交"
+      "v1.0.1": "优化",
+      "v1.0.0": "cas生成strm，首次提交"
     }
   }
 }

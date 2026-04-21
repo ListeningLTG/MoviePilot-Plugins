@@ -1,15 +1,15 @@
 from typing import Any, List, Dict, Tuple, Optional
-from datetime import datetime
 
+from apscheduler.triggers.cron import CronTrigger
 from app.plugins import _PluginBase
 from app.core.event import eventmanager, Event
-from app.schemas import Notification, NotificationType
+from app.schemas import NotificationType
 from app.schemas.types import EventType
 from app.log import logger
 
 from .config import configer
-from .utils import extract_189_links, extract_tmdb_info
-from .logic import task_queue, cas_record_manager, router
+from .utils import extract_189_links
+from .logic import task_queue, cas_record_manager, cas_redirect
 from .p189_client import P189ClientWrapper
 
 class p189cas2strm(_PluginBase):
@@ -24,7 +24,7 @@ class p189cas2strm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/p189.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -51,10 +51,10 @@ class p189cas2strm(_PluginBase):
 
         if configer.enabled:
             task_queue.start()
-            logger.info("【P189Cas2Strm】插件已启动")
+            logger.info("【P189Cas2Strm】插件已启动，异步任务工作线程就绪。")
         else:
             task_queue.stop()
-            logger.info("【P189Cas2Strm】插件已停止")
+            logger.info("【P189Cas2Strm】插件服务已停止。")
 
     def get_state(self) -> bool:
         return configer.enabled
@@ -190,20 +190,20 @@ class p189cas2strm(_PluginBase):
         插件数据展示页
         """
         queue_size = task_queue._queue.qsize()
-        processing = task_queue._processing_count
+        processing = task_queue.processing_count
         return [
             {
                 "component": "VCard",
                 "content": [
                     {
                         "component": "VCardTitle",
-                        "text": "任务监控",
+                        "text": "任务监控看板",
                     },
                     {
                         "component": "VCardText",
                         "content": [
-                            {"component": "div", "text": f"排队任务数: {queue_size}"},
-                            {"component": "div", "text": f"处理中任务数: {processing}"},
+                            {"component": "div", "text": f"当前排队任务数: {queue_size}"},
+                            {"component": "div", "text": f"当前正在处理: {processing}"},
                         ],
                     },
                 ],
@@ -226,16 +226,20 @@ class p189cas2strm(_PluginBase):
         """
         注册定时清理服务
         """
+        cron_expr = (configer.cleanup_cron or "0 2 * * *").strip()
+        try:
+            trigger = CronTrigger.from_crontab(cron_expr)
+        except Exception as err:
+            logger.warning(f"【P189Cas2Strm】cleanup_cron 配置无效: {cron_expr}，使用默认 0 2 * * *，错误: {err}")
+            trigger = CronTrigger.from_crontab("0 2 * * *")
+
         return [
             {
                 "id": "p189_cleanup",
                 "name": "189秒传清理",
-                "trigger": "cron",
+                "trigger": trigger,
                 "func": self._do_cleanup,
-                "kwargs": {
-                    "hour": 2,
-                    "minute": 0
-                }
+                "kwargs": {}
             }
         ]
 
@@ -246,7 +250,7 @@ class p189cas2strm(_PluginBase):
         return [
             {
                 "path": "/redirect",
-                "endpoint": router,
+                "endpoint": cas_redirect,
                 "methods": ["GET"],
                 "summary": "189 CAS 重定向"
             }
@@ -256,24 +260,39 @@ class p189cas2strm(_PluginBase):
     def handle_action(self, event: Event):
         if not configer.enabled:
             return
-        data = event.event_data
+        data = event.event_data or {}
         if data.get("plugin_id") != "p189cas2strm" or data.get("action") != "cas2strm":
             return
             
         arg_str = data.get("arg_str", "")
+        logger.info(f"【P189Cas2Strm】接收指令: {arg_str}")
+        
         links = extract_189_links(data)
         if not links:
+            logger.warning("【P189Cas2Strm】未识别到任何 189 分享链接")
             self._send_notify(data.get("userid"), "提示", "❌ 未识别到有效的 189 分享链接")
             return
             
+        count = 0
         for link in links:
-            task_queue.add_task(
-                share_code=link["share_code"],
+            share_code = link["share_code"]
+            logger.info(f"【P189Cas2Strm】提取到分享码: {share_code}，正在压入队列...")
+            queued = task_queue.add_task(
+                share_code=share_code,
                 access_code=link["access_code"],
                 user_id=data.get("userid"),
                 arg_str=arg_str
             )
-        self._send_notify(data.get("userid"), "成功", f"✅ 已将 {len(links)} 个分享链接加入处理队列")
+            if queued:
+                logger.info(f"【P189Cas2Strm】任务入队成功: {share_code}")
+                count += 1
+            else:
+                logger.warning(f"【P189Cas2Strm】任务重复，已自动跳过: {share_code}")
+        
+        if count > 0:
+            self._send_notify(data.get("userid"), "成功", f"✅ 已将 {count} 个新任务加入处理队列")
+        elif len(links) > 0:
+            self._send_notify(data.get("userid"), "提示", "ℹ️ 链接已在处理队列中，请勿重复提交")
 
     async def _do_cleanup(self, **kwargs):
         """

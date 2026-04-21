@@ -32,7 +32,22 @@ class ConfigManager(BaseModel):
     moviepilot_transfer: bool = Field(default=True, description="STRM 交由 MP 整理")
     tmdb_extract: bool = Field(default=False, description="自动提取 TMDB ID")
     moviepilot_address_custom: Optional[str] = Field(default=None, description="MoviePilot 地址 (手动配置优先)")
-    cas_record_path: str = Field(default="cas_records.json", description="CAS 记录路径")
+    
+    @property
+    def plugin_data_path(self) -> str:
+        """获取插件数据存储目录"""
+        import os
+        from app.core.config import settings
+        data_path = os.path.join(settings.PLUGIN_CONFIG_PATH, "p189cas2strm")
+        if not os.path.exists(data_path):
+            os.makedirs(data_path, exist_ok=True)
+        return data_path
+
+    @property
+    def cas_record_path(self) -> str:
+        """CAS 记录持久化路径"""
+        import os
+        return os.path.join(self.plugin_data_path, "cas_records.json")
 
     @property
     def moviepilot_address(self) -> str:
