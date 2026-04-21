@@ -1,5 +1,7 @@
 from typing import Any, List, Dict, Tuple, Optional
 
+import importlib
+import time
 from apscheduler.triggers.cron import CronTrigger
 from app.plugins import _PluginBase
 from app.core.event import eventmanager, Event
@@ -7,10 +9,45 @@ from app.schemas import NotificationType
 from app.schemas.types import EventType
 from app.log import logger
 
-from .config import configer
-from .utils import extract_189_links
-from .logic import task_queue, cas_record_manager, cas_redirect
-from .p189_client import P189ClientWrapper
+
+_configer = None
+_extract_189_links = None
+_task_queue = None
+_cas_record_manager = None
+_cas_redirect = None
+_P189ClientWrapper = None
+
+
+def _resolve_deps():
+    global _configer, _extract_189_links, _task_queue, _cas_record_manager, _cas_redirect, _P189ClientWrapper
+
+    if all([
+        _configer,
+        _extract_189_links,
+        _task_queue,
+        _cas_record_manager,
+        _cas_redirect,
+        _P189ClientWrapper,
+    ]):
+        return _configer, _extract_189_links, _task_queue, _cas_record_manager, _cas_redirect, _P189ClientWrapper
+
+    last_err = None
+    module_base = __package__ or "app.plugins.p189cas2strm"
+    for _ in range(6):
+        try:
+            _configer = importlib.import_module(f"{module_base}.config").configer
+            _extract_189_links = importlib.import_module(f"{module_base}.utils").extract_189_links
+            logic_mod = importlib.import_module(f"{module_base}.logic")
+            _task_queue = logic_mod.task_queue
+            _cas_record_manager = logic_mod.cas_record_manager
+            _cas_redirect = logic_mod.cas_redirect
+            _P189ClientWrapper = importlib.import_module(f"{module_base}.p189_client").P189ClientWrapper
+            return _configer, _extract_189_links, _task_queue, _cas_record_manager, _cas_redirect, _P189ClientWrapper
+        except Exception as err:
+            last_err = err
+            time.sleep(0.2)
+
+    raise last_err
 
 class p189cas2strm(_PluginBase):
     """
@@ -24,7 +61,7 @@ class p189cas2strm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/p189.png"
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -43,6 +80,8 @@ class p189cas2strm(_PluginBase):
         """
         加载配置并启动
         """
+        configer, _, task_queue, _, _, _ = _resolve_deps()
+
         if config:
             configer.load_from_dict(config)
             configer.update_plugin_config()
@@ -57,6 +96,7 @@ class p189cas2strm(_PluginBase):
             logger.info("【P189Cas2Strm】插件服务已停止。")
 
     def get_state(self) -> bool:
+        configer, _, _, _, _, _ = _resolve_deps()
         return configer.enabled
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -189,6 +229,7 @@ class p189cas2strm(_PluginBase):
         """
         插件数据展示页
         """
+        _, _, task_queue, _, _, _ = _resolve_deps()
         queue_size = task_queue._queue.qsize()
         processing = task_queue.processing_count
         return [
@@ -226,6 +267,7 @@ class p189cas2strm(_PluginBase):
         """
         注册定时清理服务
         """
+        configer, _, _, _, _, _ = _resolve_deps()
         cron_expr = (configer.cleanup_cron or "0 2 * * *").strip()
         try:
             trigger = CronTrigger.from_crontab(cron_expr)
@@ -247,6 +289,7 @@ class p189cas2strm(_PluginBase):
         """
         获取插件 API 端点
         """
+        _, _, _, _, cas_redirect, _ = _resolve_deps()
         return [
             {
                 "path": "/redirect",
@@ -258,6 +301,7 @@ class p189cas2strm(_PluginBase):
 
     @eventmanager.register(EventType.PluginAction)
     def handle_action(self, event: Event):
+        configer, extract_189_links, task_queue, _, _, _ = _resolve_deps()
         if not configer.enabled:
             return
         data = event.event_data or {}
@@ -298,6 +342,7 @@ class p189cas2strm(_PluginBase):
         """
         定时清理网盘目录及回收站
         """
+        configer, _, _, cas_record_manager, _, P189ClientWrapper = _resolve_deps()
         if not configer.enabled:
             return
             
@@ -316,6 +361,7 @@ class p189cas2strm(_PluginBase):
         """
         停止插件服务
         """
+        _, _, task_queue, _, _, _ = _resolve_deps()
         task_queue.stop()
         logger.info("【P189Cas2Strm】插件服务已停止")
 
