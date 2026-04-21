@@ -3,7 +3,8 @@
     "allow": [
       "Bash(python -)",
       "Bash(python -m py_compile \"d:/mycode/MoviePilot-Plugins/plugins.v2/p189cas2strm/__init__.py\" \"d:/mycode/MoviePilot-Plugins/plugins.v2/p189cas2strm/config.py\" \"d:/mycode/MoviePilot-Plugins/plugins.v2/p189cas2strm/logic.py\" \"d:/mycode/MoviePilot-Plugins/plugins.v2/p189cas2strm/p189_client.py\" \"d:/mycode/MoviePilot-Plugins/plugins.v2/p189cas2strm/utils.py\")",
-      "Bash(python -m py_compile \"d:/mycode/MoviePilot-Plugins/plugins.v2/p189cas2strm/__init__.py\")"
+      "Bash(python -m py_compile \"d:/mycode/MoviePilot-Plugins/plugins.v2/p189cas2strm/__init__.py\")",
+      "Bash(python -m py_compile \"d:/mycode/MoviePilot-Plugins/plugins.v2/p189cas2strm/config.py\" \"d:/mycode/MoviePilot-Plugins/plugins.v2/p189cas2strm/logic.py\" \"d:/mycode/MoviePilot-Plugins/plugins.v2/p189cas2strm/__init__.py\")"
     ]
   }
 }

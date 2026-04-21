@@ -37,8 +37,14 @@ class ConfigManager(BaseModel):
     def plugin_data_path(self) -> str:
         """获取插件数据存储目录"""
         import os
-        from app.core.config import settings
-        data_path = os.path.join(settings.PLUGIN_CONFIG_PATH, "p189cas2strm")
+
+        base_path = (
+            getattr(settings, "PLUGIN_CONFIG_PATH", None)
+            or getattr(settings, "INNER_CONFIG_PATH", None)
+            or getattr(settings, "CONFIG_PATH", None)
+            or "."
+        )
+        data_path = os.path.join(str(base_path), "p189cas2strm")
         if not os.path.exists(data_path):
             os.makedirs(data_path, exist_ok=True)
         return data_path
