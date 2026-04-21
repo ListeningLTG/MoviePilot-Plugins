@@ -13,8 +13,11 @@ from fastapi import Query, Response
 from fastapi.responses import RedirectResponse
 
 from app.log import logger
+from app.chain.transfer import TransferChain
+from app.schemas import FileItem
 from .config import configer
 from .p189_client import P189ClientWrapper
+from .utils import extract_tmdb_info
 
 # --- API Router 定义 ---
 
@@ -24,9 +27,18 @@ async def cas_redirect(c: str = Query(..., description="Base64 encoded CAS info"
     """
     try:
         logger.info("【P189Cas2Strm】收到 STRM 播控请求，开始解析元数据...")
-        # 1. 解析 CAS 信息
-        cas_json = base64.b64decode(c).decode('utf-8')
-        cas_data = json.loads(cas_json)
+        # 1. 解析 CAS 信息（兼容 URL 传参导致的空格/缺失补位/urlsafe 变体）
+        raw_c = (c or "").strip().replace(" ", "+")
+        padded_c = raw_c + ("=" * ((4 - len(raw_c) % 4) % 4))
+        try:
+            try:
+                cas_json = base64.b64decode(padded_c).decode("utf-8")
+            except Exception:
+                cas_json = base64.urlsafe_b64decode(padded_c).decode("utf-8")
+            cas_data = json.loads(cas_json)
+        except Exception as de:
+            logger.error(f"【P189Cas2Strm】CAS 参数解码失败: {de}; c_prefix={raw_c[:48]}")
+            return Response(content="Invalid CAS payload", status_code=400)
         
         filename = cas_data.get('name')
         size = cas_data.get('size')
@@ -39,8 +51,12 @@ async def cas_redirect(c: str = Query(..., description="Base64 encoded CAS info"
             logger.error(f"【P189Cas2Strm】无效的 CAS 数据块: {cas_data}")
             return Response(content="Invalid CAS data", status_code=400)
             
-        # 2. 初始化天翼云客户端
-        client = P189ClientWrapper(configer.username, configer.password)
+        # 2. 初始化天翼云客户端（优先复用本地持久化会话）
+        client = P189ClientWrapper(
+            configer.username,
+            configer.password,
+            cookie_store_path=configer.cookie_store_path,
+        )
         await client.ensure_logged_in()
         
         # 3. 确定秒传目标目录
@@ -234,7 +250,11 @@ async def process_share_cas(share_code: str, access_code: str, arg_str: str = ""
     """核心处理逻辑"""
     logger.info(f"【P189Cas2Strm】[逻辑层] 正在准备客户端...")
     
-    client = P189ClientWrapper(configer.username, configer.password)
+    client = P189ClientWrapper(
+        configer.username,
+        configer.password,
+        cookie_store_path=configer.cookie_store_path,
+    )
     login_ok = await client.login()
     if not login_ok:
         logger.error("【P189Cas2Strm】[逻辑层] 客户端登录失败，请检查配置中的账号密码。")
@@ -252,7 +272,7 @@ async def process_share_cas(share_code: str, access_code: str, arg_str: str = ""
     
     # 2. 列出文件
     logger.info("【P189Cas2Strm】[逻辑层] 正在递归列出分享内文件...")
-    files = await client.share_list_all(share_id, access_code)
+    files = await client.share_list_all(share_id, access_code, share_code=share_code)
     cas_files = [f for f in files if f.get("name", "").endswith(".cas")]
     
     if not cas_files:
@@ -262,19 +282,37 @@ async def process_share_cas(share_code: str, access_code: str, arg_str: str = ""
     logger.info(f"【P189Cas2Strm】[逻辑层] 发现 {len(cas_files)} 个 .cas 文件，进入处理循环...")
     
     # 准备基础目录
-    temp_dir_id = await client.fs_get_path_id("/P189CasTemp")
+    temp_dir_id = await client.fs_get_path_id(f"/P189CasTemp/{share_code}")
     strm_save_path = configer.strm_save_path
     if not os.path.exists(strm_save_path):
         os.makedirs(strm_save_path, exist_ok=True)
         
     count = 0
+    generated_strm_paths: List[Path] = []
+    mediainfo = None
+
+    if configer.moviepilot_transfer and configer.tmdb_extract and arg_str:
+        try:
+            tmdbid, mtype = extract_tmdb_info(arg_str)
+            if tmdbid and mtype in ["movie", "tv"]:
+                from app.chain.media import MediaChain
+                from app.schemas.types import MediaType
+                mediainfo = MediaChain().recognize_media(
+                    tmdbid=tmdbid,
+                    mtype=MediaType.from_agent(mtype),
+                )
+                if mediainfo:
+                    logger.info(f"【P189Cas2Strm】预识别媒体信息成功: {mediainfo.title_year}")
+        except Exception as e:
+            logger.warning(f"【P189Cas2Strm】TMDB 提取/识别失败，回退默认整理: {e}")
+
     for f_info in cas_files:
         name = f_info["name"]
         fid = f_info["id"]
         
         # 转存 -> 读取 -> 删除
         logger.info(f"【P189Cas2Strm】-- 正在转换: {name} --")
-        local_fid = await client.share_save_to_local(share_id, fid, access_code, temp_dir_id)
+        local_fid = await client.share_save_to_local(share_id, fid, access_code, temp_dir_id, expected_name=name)
         if not local_fid:
             logger.error(f"【P189Cas2Strm】文件转存失败: {name}")
             continue
@@ -295,16 +333,70 @@ async def process_share_cas(share_code: str, access_code: str, arg_str: str = ""
             strm_name = os.path.splitext(name)[0] + ".strm"
             strm_file = os.path.join(strm_save_path, strm_name)
             
-            redirect_host = configer.moviepilot_address or "http://127.0.0.1:3000"
+            redirect_host = configer.moviepilot_address
             strm_content = f"{redirect_host.rstrip('/')}/api/v1/plugin/p189cas2strm/redirect?c={content}"
             
             with open(strm_file, "w", encoding="utf-8") as sf:
                 sf.write(strm_content)
             
             count += 1
+            generated_strm_paths.append(Path(strm_file))
             logger.info(f"【P189Cas2Strm】✅ STRM 写入成功: {strm_name}")
         except Exception as e:
             logger.error(f"【P189Cas2Strm】文件写入 IO 异常: {name}, {e}")
+
+    if generated_strm_paths and configer.moviepilot_transfer:
+        logger.info(f"【P189Cas2Strm】开始批量整理 STRM，共 {len(generated_strm_paths)} 个文件")
+        try:
+            from app.db.transferhistory_oper import TransferHistoryOper
+            transfer_history_oper = TransferHistoryOper()
+            transfer_chain = TransferChain()
+
+            for strm_file_path in generated_strm_paths:
+                try:
+                    stat = strm_file_path.stat()
+                    transfer_chain.do_transfer(
+                        fileitem=FileItem(
+                            storage="local",
+                            type="file",
+                            path=strm_file_path.as_posix(),
+                            name=strm_file_path.name,
+                            basename=strm_file_path.stem,
+                            extension="strm",
+                            size=stat.st_size,
+                            modify_time=stat.st_mtime,
+                        ),
+                        mediainfo=mediainfo,
+                        background=True,
+                    )
+                except Exception as te:
+                    logger.warning(f"【P189Cas2Strm】STRM 整理入队失败: {strm_file_path.name}: {te}")
+
+            logger.info("【P189Cas2Strm】STRM 已全部入队，等待整理完成...")
+
+            pending = set(strm_file_path.as_posix() for strm_file_path in generated_strm_paths)
+            timeout = 600
+            interval = 2
+            waited = 0
+            while pending and waited < timeout:
+                finished = set()
+                for src in pending:
+                    history = transfer_history_oper.get_by_src(src, "local")
+                    if history and history.dest:
+                        finished.add(src)
+                if finished:
+                    logger.info(f"【P189Cas2Strm】已完成 {len(finished)} 个 STRM 整理")
+                pending -= finished
+                if pending:
+                    sleep(interval)
+                    waited += interval
+
+            if pending:
+                logger.warning(f"【P189Cas2Strm】部分 STRM 整理超时未完成: {pending}")
+            else:
+                logger.info("【P189Cas2Strm】STRM 批量整理完成")
+        except Exception as te:
+            logger.warning(f"【P189Cas2Strm】STRM 整理阶段异常，已跳过: {te}")
 
     logger.info(f"【P189Cas2Strm】🎉 任务圆满完成，共生成 {count} 个文件")
     return {"status": True, "count": count}

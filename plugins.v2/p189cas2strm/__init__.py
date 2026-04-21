@@ -21,7 +21,7 @@ class p189cas2strm(_PluginBase):
     plugin_name = "cas生成strm"
     plugin_desc = "将含有cas文件的天翼云盘分享链接生成STRM，支持播放时自动秒传"
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/p189.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "ListeningLTG"
     author_url = "https://github.com/ListeningLTG"
     plugin_config_prefix = "p189cas2strm_"
@@ -107,11 +107,26 @@ class p189cas2strm(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VTextField",
                                         "props": {"model": "strm_save_path", "label": "STRM 本地保存路径"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "moviepilot_address_custom",
+                                            "label": "MoviePilot 地址",
+                                            "hint": "手动指定访问地址 (如 http://192.168.1.10:3000)，留空则优先使用系统设置的外部域地址来生成 STRM",
+                                            "persistent-hint": True,
+                                        },
                                     }
                                 ],
                             },
@@ -153,6 +168,7 @@ class p189cas2strm(_PluginBase):
             "cleanup_cron": "0 2 * * *",
             "moviepilot_transfer": True,
             "tmdb_extract": False,
+            "moviepilot_address_custom": "",
         }
 
     def init_plugin(self, config: dict = None):
@@ -168,10 +184,10 @@ class p189cas2strm(_PluginBase):
 
             if configer.enabled:
                 task_queue.start()
-                logger.info("【P189Cas2Strm】插件已启动，异步任务工作线程就绪。")
+                logger.info(f"【P189Cas2Strm】插件已启动，异步任务工作线程就绪。[P189PATCH-20260421] version={self.plugin_version} file={__file__}")
             else:
                 task_queue.stop()
-                logger.info("【P189Cas2Strm】插件服务已停止。")
+                logger.info(f"【P189Cas2Strm】插件服务已停止。[P189PATCH-20260421] version={self.plugin_version} file={__file__}")
         except Exception as err:
             logger.error(f"【P189Cas2Strm】init_plugin 初始化失败: {err}", exc_info=True)
 
@@ -223,7 +239,8 @@ class p189cas2strm(_PluginBase):
                 "path": "/redirect",
                 "endpoint": cas_redirect,
                 "methods": ["GET"],
-                "summary": "189 CAS 重定向"
+                "summary": "189 CAS 重定向",
+                "allow_anonymous": True,
             }
         ]
 

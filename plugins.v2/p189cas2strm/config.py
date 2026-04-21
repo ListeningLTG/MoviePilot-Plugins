@@ -56,6 +56,12 @@ class ConfigManager(BaseModel):
         return os.path.join(self.plugin_data_path, "cas_records.json")
 
     @property
+    def cookie_store_path(self) -> str:
+        """登录会话 Cookie 持久化路径"""
+        import os
+        return os.path.join(self.plugin_data_path, "session_cookies.txt")
+
+    @property
     def moviepilot_address(self) -> str:
         """
         获取 MoviePilot 访问地址
