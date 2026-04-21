@@ -1,4 +1,5 @@
 import random
+import time
 from datetime import datetime, timedelta
 
 import pytz
@@ -23,7 +24,7 @@ class subscribeairstime(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/subscribe_reminder.png"
     # 插件版本
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -211,16 +212,22 @@ class subscribeairstime(_PluginBase):
                     # 尝试从 TVDB 获取系列级播出时间，并转换到系统时区
                     airs_time = ""
                     if subscribe.tvdbid:
-                        try:
-                            tvdb_data = self.media.tvdb_info(tvdbid=subscribe.tvdbid)
-                            if tvdb_data:
-                                airs_time = self.__convert_airs_time(
-                                    airs_time=tvdb_data.get("airsTime") or "",
-                                    air_date=current_date,
-                                    tvdb_data=tvdb_data
-                                )
-                        except Exception as e:
-                            logger.warning(f"获取TVDB播出时间失败 ({subscribe.name}): {e}")
+                        for i in range(3):
+                            try:
+                                tvdb_data = self.media.tvdb_info(tvdbid=subscribe.tvdbid)
+                                if tvdb_data:
+                                    airs_time = self.__convert_airs_time(
+                                        airs_time=tvdb_data.get("airsTime") or "",
+                                        air_date=current_date,
+                                        tvdb_data=tvdb_data
+                                    )
+                                break
+                            except Exception as e:
+                                if i < 2:
+                                    logger.warning(f"获取TVDB播出时间失败 ({subscribe.name})，10秒后重试 ({i + 1}/3): {e}")
+                                    time.sleep(10)
+                                    continue
+                                logger.warning(f"获取TVDB播出时间失败 ({subscribe.name}): {e}")
                     current_tv_subscribe.append({
                         'name': f"{subscribe.name} ({subscribe.year})",
                         'season': f"S{str(subscribe.season).rjust(2, '0')}",
