@@ -367,13 +367,14 @@ class MHApiMixin:
         return []
 
     def _mh_sync_listener_keyword(self, access_token: str, listener_id: str, keyword: str,
-                                   field: str = "keywords", remove: bool = False) -> bool:
+                                   field: str = "keywords", remove: bool = False,
+                                   listeners_list: Optional[List[Dict[str, Any]]] = None) -> bool:
         """向监听配置的指定字段（keywords/blacklist_keywords）添加或移除关键词
         PUT /api/v1/tg-forwarder/listeners/{id}
         """
         try:
             import copy
-            listeners = self._mh_get_listeners(access_token)
+            listeners = listeners_list or self._mh_get_listeners(access_token)
             target = next((l for l in listeners if l.get("id") == listener_id), None)
             if not target:
                 logger.warning(f"mhnotify: 未找到转发监听配置 id={listener_id}")
@@ -406,3 +407,55 @@ class MHApiMixin:
             logger.warning("mhnotify: 同步转发监听关键词异常", exc_info=True)
         return False
 
+    def _mh_sync_listener_keywords_optimized(self, access_token: str, listener_id: str, 
+                                             keywords_map: Dict[str, str], remove: bool = False,
+                                             listeners_list: Optional[List[Dict[str, Any]]] = None) -> bool:
+        """批量同步多个字段的关键词到同一个监听配置，合并为一个 PUT 请求
+        keywords_map: { "keywords": "media_name", "blacklist_keywords": "media_name" }
+        """
+        try:
+            import copy
+            if not keywords_map:
+                return True
+            listeners = listeners_list or self._mh_get_listeners(access_token)
+            target = next((l for l in listeners if l.get("id") == listener_id), None)
+            if not target:
+                logger.warning(f"mhnotify: [优化版] 未找到转发监听配置 id={listener_id}")
+                return False
+            
+            listener = copy.deepcopy(target)
+            changed = False
+            
+            for field, keyword in keywords_map.items():
+                if not keyword:
+                    continue
+                current_kws = list((listener.get("filter") or {}).get(field) or [])
+                if remove:
+                    if keyword in current_kws:
+                        current_kws = [k for k in current_kws if k != keyword]
+                        changed = True
+                else:
+                    if keyword not in current_kws:
+                        current_kws.append(keyword)
+                        changed = True
+                listener.setdefault("filter", {})[field] = current_kws
+
+            if not changed:
+                return True
+
+            url = f"{self._mh_domain}/api/v1/tg-forwarder/listeners/{listener_id}"
+            res = RequestUtils(
+                headers=self._auth_headers(access_token),
+                content_type="application/json"
+            ).put_res(url=url, json=listener)
+            
+            ok = bool(res and res.status_code == 200)
+            action = "移除" if remove else "添加"
+            if ok:
+                logger.info(f"mhnotify: [优化版] 已{action}多项转发关键词 -> 监听[{listener_id}]")
+            else:
+                logger.warning(f"mhnotify: [优化版] {action}多项转发关键词失败 -> 监听[{listener_id}]")
+            return ok
+        except Exception:
+            logger.warning("mhnotify: 批量同步转发监听关键词异常", exc_info=True)
+        return False

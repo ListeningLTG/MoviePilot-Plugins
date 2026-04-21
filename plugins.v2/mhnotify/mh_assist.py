@@ -873,14 +873,32 @@ class MHAssistMixin:
             if not token:
                 logger.warning("mhnotify: 同步转发关键词失败：MH登录失败")
                 return
+            
+            # 优化：一次性获取所有监听配置，复用到循环中
+            listeners_list = self._mh_get_listeners(token)
+            if not listeners_list:
+                logger.warning("mhnotify: 未获取到转发监听列表，同步取消")
+                return
+
+            # 汇总去重所有需要处理的监听器 ID
+            all_lids = set(self._mh_forwarder_whitelist_listeners or []) | set(self._mh_forwarder_blacklist_listeners or [])
+            
             action = "移除" if remove else "添加"
-            if _has_whitelist:
-                for lid in self._mh_forwarder_whitelist_listeners:
-                    self._mh_sync_listener_keyword(token, lid, subscribe_name, "keywords", remove)
-            if _has_blacklist:
-                for lid in self._mh_forwarder_blacklist_listeners:
-                    self._mh_sync_listener_keyword(token, lid, subscribe_name, "blacklist_keywords", remove)
-            logger.info(f"mhnotify: 转发关键词同步完成 '{subscribe_name}' {action}")
+            for lid in all_lids:
+                # 构造合并更新字典
+                fields_map = {}
+                if self._mh_forwarder_whitelist_enabled and lid in self._mh_forwarder_whitelist_listeners:
+                    fields_map["keywords"] = subscribe_name
+                if self._mh_forwarder_blacklist_enabled and lid in self._mh_forwarder_blacklist_listeners:
+                    fields_map["blacklist_keywords"] = subscribe_name
+                
+                if fields_map:
+                    # 使用合并更新方法，针对同一个 ID 只发一次 PUT 请求，且不重复拉取列表
+                    self._mh_sync_listener_keywords_optimized(
+                        token, lid, fields_map, remove, listeners_list=listeners_list
+                    )
+            
+            logger.info(f"mhnotify: [优化版] 转发关键词同步完成 '{subscribe_name}' {action} (涉及 {len(all_lids)} 个监听配置)")
         except Exception:
             logger.warning("mhnotify: 同步转发监听关键词异常", exc_info=True)
 

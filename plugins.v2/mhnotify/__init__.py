@@ -33,7 +33,7 @@ class MHNotify(MHApiMixin, MHAssistMixin, CloudDownloadMixin, AliTo115Mixin, _Pl
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/mh2.jpg"
     # 插件版本
-    plugin_version = "1.7.6"
+    plugin_version = "1.7.7"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -301,11 +301,9 @@ class MHNotify(MHApiMixin, MHAssistMixin, CloudDownloadMixin, AliTo115Mixin, _Pl
         """
         拼装插件配置页面，需要返回两块数据：1、页面配置；2、数据结构
         """
-        # 如果存储列表为空，尝试获取一次
-        if not self._available_storages:
-            self._available_storages = self._get_available_storages()
-        if not self._mh_listeners_cache:
-            self._mh_listeners_cache = self._get_mh_listeners_for_select()
+        # 每次进入配置页面时，重新获取存储列表和转发监听列表，确保实时性
+        self._available_storages = self._get_available_storages()
+        self._mh_listeners_cache = self._get_mh_listeners_for_select()
         
         # 构建默认值字典，包含现有规则
         defaults = {
