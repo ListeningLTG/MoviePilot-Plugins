@@ -988,19 +988,23 @@ class P189ClientWrapper:
             raw_url = str(url or "").strip()
             if not raw_url:
                 return None
+            # 强制使用 https，许多播放器不接受 http 的 302 跳转
+            if raw_url.startswith("http://"):
+                raw_url = raw_url.replace("http://", "https://", 1)
             try:
                 import httpx
                 headers = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
-                    "Referer": "https://cloud.189.cn/web/main",
                 }
+                # 移除 Referer，避免部分 CDN 对 Referer 校验导致 403
+                # 也可以尝试不带 cookies 进行 302 解析，以获取非 Session 绑定的公开链接
                 cookies = self.client.cookies or None
-                async with httpx.AsyncClient(timeout=15, follow_redirects=False, headers=headers, cookies=cookies) as client:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers, cookies=cookies) as client:
                     resp = await client.get(raw_url)
                     location = resp.headers.get("location") or resp.headers.get("Location")
                     if isinstance(location, str) and location.strip():
                         return location.strip()
-                    logger.debug(f"【P189Client】302 响应未包含 Location: {resp.status_code}")
+                    logger.debug(f"【P189Client】302 响应未包含 Location (Status: {resp.status_code})")
                     return None
             except Exception as e:
                 logger.debug(f"【P189Client】解析 302 Location 异常: {e}")
@@ -1010,7 +1014,7 @@ class P189ClientWrapper:
         # 1. download_url_video_portal: 对应 getNewVlcVideoPlayUrl.action (视频播放首选)
         # 2. download_url_info: 对应 getFileDownloadUrl.action (普通文件/回退)
         attempts = [
-            ("download_url_video_portal", {"fileId": fid_text}),
+            ("download_url_video_portal", {"fileId": fid_text, "dt": 1}),
             ("download_url_info", {"fileId": fid_text, "dt": 3}),
         ]
 
@@ -1027,15 +1031,17 @@ class P189ClientWrapper:
                     if url:
                         # 解析 302
                         final_url = await _resolve_location(url)
-                        if final_url:
-                            logger.info(f"【P189Client】获取下载链接成功 [method={method_name}, attempt={attempt}]")
-                            return final_url
+                        # 如果没有解析到新位置（可能是 200 OK 直链），则使用原始 URL
+                        if not final_url:
+                            logger.debug(f"【P189Client】接口 {method_name} 未能解析出重定向地址，将使用原始 URL")
+                            final_url = url
                         
-                        logger.debug(f"【P189Client】接口 {method_name} 返回了 URL 但 302 解析失败")
+                        logger.info(f"【P189Client】获取下载链接成功 [method={method_name}, attempt={attempt}]")
+                        return final_url
                     else:
                         logger.debug(f"【P189Client】接口 {method_name} 未返回有效 URL: {resp}")
                     
-                    # 如果返回了明确的业务错误且不是网络问题，不再重试该方法
+                    # 如果返回了明确的业务错误且不是网络问题，跳过该方法的重试
                     break
                 except Exception as e:
                     last_err = e

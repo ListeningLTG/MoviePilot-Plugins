@@ -21,7 +21,7 @@ class p189cas2strm(_PluginBase):
     plugin_name = "cas生成strm"
     plugin_desc = "将含有cas文件的天翼云盘分享链接生成STRM，支持播放时自动秒传"
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/p189.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.6.1"
     plugin_author = "ListeningLTG"
     author_url = "https://github.com/ListeningLTG"
     plugin_config_prefix = "p189cas2strm_"
