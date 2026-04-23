@@ -163,11 +163,12 @@
   "p189cas2strm": {
     "name": "cas生成strm",
     "description": "cas生成strm",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/p189.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.5": "优化密码输入框的显示",
       "v1.0.4": "优化",
       "v1.0.3": "修复",
       "v1.0.2": "修复插件无法加载的问题",
