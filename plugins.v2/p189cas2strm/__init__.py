@@ -21,7 +21,7 @@ class p189cas2strm(_PluginBase):
     plugin_name = "cas生成strm"
     plugin_desc = "将含有cas文件的天翼云盘分享链接生成STRM，支持播放时自动秒传"
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/p189.png"
-    plugin_version = "1.0.6.2"
+    plugin_version = "1.0.6.3"
     plugin_author = "ListeningLTG"
     author_url = "https://github.com/ListeningLTG"
     plugin_config_prefix = "p189cas2strm_"
@@ -220,6 +220,9 @@ class p189cas2strm(_PluginBase):
                 # APScheduler 会自动处理线程和 loop
                 task_queue.start()
                 logger.info(f"【P189Cas2Strm】插件已启动 [P189PATCH-20260421] version={self.plugin_version}")
+                
+                # 验证新配置并刷新会话
+                self._run_async(self._verify_account())
             else:
                 task_queue.stop()
                 logger.info(f"【P189Cas2Strm】插件服务已停止。[P189PATCH-20260421] version={self.plugin_version} file={__file__}")
@@ -482,6 +485,26 @@ class p189cas2strm(_PluginBase):
         """
         task_queue.stop()
         logger.info("【P189Cas2Strm】插件服务已停止")
+
+    async def _verify_account(self):
+        """
+        验证配置中的账号或Cookie是否有效
+        """
+        try:
+            logger.info("【P189Cas2Strm】正在验证天翼云盘账号配置...")
+            client = P189ClientWrapper(configer.username, configer.password, cookie_store_path=configer.cookie_store_path)
+            
+            # 使用 force=True 强制忽略本地旧缓存，直接使用新配置测试登录
+            ok = await client.login(force=True)
+            if ok:
+                logger.info("【P189Cas2Strm】账号/Cookie验证成功，已获取并缓存最新会话！")
+                self._send_notify(None, "提示", "✅ 天翼云盘账号配置验证成功")
+            else:
+                logger.error("【P189Cas2Strm】账号/Cookie验证失败，请检查配置")
+                self._send_notify(None, "警告", "❌ 天翼云盘账号/Cookie验证失败，请检查配置！")
+        except Exception as e:
+            logger.error(f"【P189Cas2Strm】账号验证过程异常: {e}")
+
 
     def _send_notify(self, user_id: Optional[str], title: str, text: str):
         self.post_message(

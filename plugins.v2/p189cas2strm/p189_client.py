@@ -19,10 +19,13 @@ class P189ClientWrapper:
         self.password = password
         self.cookie_store_path = str(cookie_store_path or "").strip()
         cookie_text = (cookies or "").strip()
+        pwd_is_cookie = password and ("UID=" in password or "SEID=" in password or "COOKIE_LOGIN_USER" in password)
+        if pwd_is_cookie:
+            cookie_text = password.strip()
+            
         if not cookie_text and self.cookie_store_path:
             cookie_text = self._load_cookie_store() or ""
-        if not cookie_text and password and ("UID=" in password or "SEID=" in password or "COOKIE_LOGIN_USER" in password):
-            cookie_text = password.strip()
+        
         self.client = P189Client(cookies=cookie_text)
         self.session_key: Optional[str] = None
 
@@ -83,10 +86,11 @@ class P189ClientWrapper:
         username = (self.username or "").strip()
         password = (self.password or "").strip()
 
-        if not username and password and "=" in password and ";" in password:
+        if password and ("UID=" in password or "SEID=" in password or "COOKIE_LOGIN_USER" in password):
             self.client = P189Client(cookies=password)
             if self.is_logged_in:
                 logger.info("【P189Client】检测到 Cookie 文本，已直接作为会话使用。")
+                self._save_cookie_store()
                 return True
 
         logger.info(f"【P189Client】正在尝试登录账号: {username}")
