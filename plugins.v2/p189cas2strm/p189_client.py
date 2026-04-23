@@ -938,7 +938,7 @@ class P189ClientWrapper:
 
                 if status == 4 or (sub_count > 0 and finished >= sub_count):
                     if failed > 0:
-                        logger.error(f"【P189Client】删除任务完成但存在失败 taskId={task_id}, check={check}")
+                        logger.error(f"【P189Client】删除任务完成 but 存在失败 taskId={task_id}, check={check}")
                         return False
                     logger.info(f"【P189Client】删除任务完成 taskId={task_id}")
                     return True
@@ -951,33 +951,37 @@ class P189ClientWrapper:
             logger.error(f"【P189Client】删除失败: {e}")
             return False
 
+    def _extract_url(self, resp: Any) -> Optional[str]:
+        if isinstance(resp, str) and resp.strip():
+            return resp.strip()
+        if not isinstance(resp, dict):
+            return None
+
+        # 优先取业务载荷中的真实下载地址（如 normal.url）
+        preferred_nodes: List[dict] = []
+        for key in ("normal", "data", "result", "res", "body"):
+            val = resp.get(key)
+            if isinstance(val, dict):
+                preferred_nodes.append(val)
+        preferred_nodes.append(resp)
+
+        for node in preferred_nodes:
+            for key in ("fileDownloadUrl", "downloadUrl", "url"):
+                url = node.get(key)
+                if isinstance(url, str) and url.strip():
+                    return url.strip()
+        return None
+
     async def get_download_url(self, file_id: str) -> Optional[str]:
         """
-        获取 302 下载链接（兼容 download_url_info / download_url 多种返回）
+        获取直链链接。
+        优化策略（参考 cloud189-auto-save）：
+        1. 优先使用 download_url_video_portal (VLC 播放接口)，对大视频文件支持最好。
+        2. 其次尝试 download_url_info (普通下载接口)。
+        3. 最后尝试 download_url。
         """
         fid_text = str(file_id or "").strip()
         if not fid_text:
-            return None
-
-        def _extract_url(resp: Any) -> Optional[str]:
-            if isinstance(resp, str) and resp.strip():
-                return resp.strip()
-            if not isinstance(resp, dict):
-                return None
-
-            # 优先取业务载荷中的真实下载地址（如 normal.url）
-            preferred_nodes: List[dict] = []
-            for key in ("normal", "data", "result", "res", "body"):
-                val = resp.get(key)
-                if isinstance(val, dict):
-                    preferred_nodes.append(val)
-            preferred_nodes.append(resp)
-
-            for node in preferred_nodes:
-                for key in ("fileDownloadUrl", "downloadUrl", "url"):
-                    url = node.get(key)
-                    if isinstance(url, str) and url.strip():
-                        return url.strip()
             return None
 
         async def _resolve_location(url: str) -> Optional[str]:
@@ -987,60 +991,58 @@ class P189ClientWrapper:
             try:
                 import httpx
                 headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0"
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+                    "Referer": "https://cloud.189.cn/web/main",
                 }
                 cookies = self.client.cookies or None
-                async with httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers, cookies=cookies) as client:
+                async with httpx.AsyncClient(timeout=15, follow_redirects=False, headers=headers, cookies=cookies) as client:
                     resp = await client.get(raw_url)
                     location = resp.headers.get("location") or resp.headers.get("Location")
                     if isinstance(location, str) and location.strip():
                         return location.strip()
-                    logger.warning(
-                        f"【P189Client】302解引用未返回Location fileId={fid_text} status={resp.status_code} url={raw_url[:120]}"
-                    )
+                    logger.debug(f"【P189Client】302 响应未包含 Location: {resp.status_code}")
                     return None
             except Exception as e:
-                logger.warning(f"【P189Client】解析302 Location失败 fileId={fid_text}: {e}")
+                logger.debug(f"【P189Client】解析 302 Location 异常: {e}")
                 return None
 
-        payloads: List[Union[dict, str, int]] = [{"fileId": fid_text}]
-        try:
-            payloads.append({"fileId": int(fid_text)})
-        except Exception:
-            pass
-        payloads.append(fid_text)
+        # 严格对齐 cas-helper，仅保留其使用的两个核心接口
+        # 1. download_url_video_portal: 对应 getNewVlcVideoPlayUrl.action (视频播放首选)
+        # 2. download_url_info: 对应 getFileDownloadUrl.action (普通文件/回退)
+        attempts = [
+            ("download_url_video_portal", {"fileId": fid_text}),
+            ("download_url_info", {"fileId": fid_text, "dt": 3}),
+        ]
 
-        attempts: List[Tuple[str, Union[dict, str, int]]] = []
-        for p in payloads:
-            attempts.append(("download_url_info", p))
-        for p in payloads:
-            attempts.append(("download_url", p))
-        for p in payloads:
-            attempts.append(("download_url_video_portal", p))
-
+        last_err = None
         for method_name, payload in attempts:
-            method = getattr(self.client, method_name, None)
-            if not method:
-                continue
-            try:
-                resp = method(payload)
-                if isinstance(resp, dict):
-                    try:
-                        check_response(resp)
-                    except Exception:
-                        pass
-                url = _extract_url(resp)
-                if url:
-                    final_url = await _resolve_location(url)
-                    if final_url:
-                        logger.info(f"【P189Client】获取下载链接成功 method={method_name} fileId={fid_text}")
-                        return final_url
-                    logger.warning(f"【P189Client】下载链接解302失败 method={method_name} fileId={fid_text} first_url={url[:120]}")
-                logger.warning(f"【P189Client】下载接口无直链字段 method={method_name} fileId={fid_text}, resp={resp}")
-            except Exception as e:
-                logger.warning(f"【P189Client】下载接口调用失败 method={method_name} fileId={fid_text}: {e}")
+            # 每个方法重试 5 次
+            for attempt in range(1, 6):
+                try:
+                    # 使用受保护的调用方式，处理会话过期
+                    resp = await self._protected_client_call(method_name, payload, async_=True)
+                    
+                    # 提取 URL
+                    url = self._extract_url(resp)
+                    if url:
+                        # 解析 302
+                        final_url = await _resolve_location(url)
+                        if final_url:
+                            logger.info(f"【P189Client】获取下载链接成功 [method={method_name}, attempt={attempt}]")
+                            return final_url
+                        
+                        logger.debug(f"【P189Client】接口 {method_name} 返回了 URL 但 302 解析失败")
+                    else:
+                        logger.debug(f"【P189Client】接口 {method_name} 未返回有效 URL: {resp}")
+                    
+                    # 如果返回了明确的业务错误且不是网络问题，不再重试该方法
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.debug(f"【P189Client】接口 {method_name} 调用异常 (第 {attempt} 次): {e}")
+                    await asyncio.sleep(0.5 * attempt)
 
-        logger.error(f"【P189Client】获取下载链接失败，所有路径均未返回直链: fileId={fid_text}")
+        logger.error(f"【P189Client】获取下载链接最终失败: fileId={fid_text}, last_err={last_err}")
         return None
 
     async def rapid_upload(self, parent_id: str, filename: str, size: int, md5: str, slice_md5: str) -> bool:
