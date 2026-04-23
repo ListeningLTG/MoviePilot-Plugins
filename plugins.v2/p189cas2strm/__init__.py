@@ -140,8 +140,13 @@ class p189cas2strm(_PluginBase):
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
-                                        "component": "VTextField",
-                                        "props": {"model": "p189_target_path", "label": "网盘秒传缓存目录"},
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "bulk_save_enabled",
+                                            "label": "启用整目录批量转存",
+                                            "hint": "开启后优先一次性转存分享目录，再并发读取 CAS；关闭则按文件逐个转存",
+                                            "persistent-hint": True,
+                                        },
                                     }
                                 ],
                             },
@@ -151,7 +156,33 @@ class p189cas2strm(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VTextField",
-                                        "props": {"model": "cleanup_cron", "label": "定时清理 Cron"},
+                                        "props": {
+                                            "model": "max_concurrency",
+                                            "label": "CAS 并发处理数",
+                                            "type": "number",
+                                            "hint": "建议 2-4，过高可能触发风控",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "cleanup_cron",
+                                            "label": "定时清理周期 (Cron)",
+                                            "hint": "自动清理网盘缓存及回收站的周期间隔，默认为每天凌晨 2 点 (0 2 * * *)",
+                                            "persistent-hint": True,
+                                        },
                                     }
                                 ],
                             },
@@ -168,6 +199,8 @@ class p189cas2strm(_PluginBase):
             "cleanup_cron": "0 2 * * *",
             "moviepilot_transfer": True,
             "tmdb_extract": False,
+            "bulk_save_enabled": False,
+            "max_concurrency": 2,
             "moviepilot_address_custom": "",
         }
 
@@ -183,8 +216,10 @@ class p189cas2strm(_PluginBase):
             task_queue.set_notify_callback(self._send_notify)
 
             if configer.enabled:
+                # 启动异步刷新任务，不再手动启动 Thread 避免 loop 冲突
+                # APScheduler 会自动处理线程和 loop
                 task_queue.start()
-                logger.info(f"【P189Cas2Strm】插件已启动，异步任务工作线程就绪。[P189PATCH-20260421] version={self.plugin_version} file={__file__}")
+                logger.info(f"【P189Cas2Strm】插件已启动 [P189PATCH-20260421] version={self.plugin_version}")
             else:
                 task_queue.stop()
                 logger.info(f"【P189Cas2Strm】插件服务已停止。[P189PATCH-20260421] version={self.plugin_version} file={__file__}")
@@ -227,6 +262,13 @@ class p189cas2strm(_PluginBase):
                 "trigger": trigger,
                 "func": self._do_cleanup,
                 "kwargs": {}
+            },
+            {
+                "id": "p189_keepalive",
+                "name": "189会话定期刷新",
+                "trigger": CronTrigger.from_crontab("0 */6 * * *"),
+                "func": self._do_reauth,
+                "kwargs": {}
             }
         ]
 
@@ -252,24 +294,77 @@ class p189cas2strm(_PluginBase):
 
     def get_page(self) -> List[dict]:
         """
-        插件数据展示页
+        插件数据展示页 (Dashboard)
         """
         try:
             queue_size = task_queue._queue.qsize() if task_queue._queue else 0
-            processing = task_queue.processing_count
+            processing_count = task_queue.processing_count
+            is_running = task_queue._running
+
             return [
                 {
                     "component": "VCard",
+                    "props": {"variant": "outlined", "class": "mb-4"},
                     "content": [
                         {
                             "component": "VCardTitle",
+                            "props": {"class": "pa-4 pb-0"},
                             "text": "任务监控看板",
                         },
                         {
                             "component": "VCardText",
+                            "props": {"class": "pa-4"},
                             "content": [
-                                {"component": "div", "text": f"当前排队任务数: {queue_size}"},
-                                {"component": "div", "text": f"当前正在处理: {processing}"},
+                                {
+                                    "component": "VRow",
+                                    "content": [
+                                        {
+                                            "component": "VCol",
+                                            "props": {"cols": 6, "md": 3},
+                                            "content": [
+                                                {
+                                                    "component": "VChip",
+                                                    "props": {
+                                                        "color": "success" if is_running else "default",
+                                                        "variant": "tonal",
+                                                        "prepend-icon": "mdi-check-circle" if is_running else "mdi-stop-circle",
+                                                    },
+                                                    "text": "监控中" if is_running else "已停止",
+                                                }
+                                            ],
+                                        },
+                                        {
+                                            "component": "VCol",
+                                            "props": {"cols": 6, "md": 3},
+                                            "content": [
+                                                {
+                                                    "component": "VChip",
+                                                    "props": {
+                                                        "color": "primary" if processing_count > 0 else "default",
+                                                        "variant": "tonal",
+                                                        "prepend-icon": "mdi-cog-sync",
+                                                    },
+                                                    "text": f"正在转换: {processing_count}",
+                                                }
+                                            ],
+                                        },
+                                        {
+                                            "component": "VCol",
+                                            "props": {"cols": 6, "md": 3},
+                                            "content": [
+                                                {
+                                                    "component": "VChip",
+                                                    "props": {
+                                                        "color": "warning" if queue_size > 0 else "default",
+                                                        "variant": "tonal",
+                                                        "prepend-icon": "mdi-format-list-numbered",
+                                                    },
+                                                    "text": f"排队待处理: {queue_size}",
+                                                }
+                                            ],
+                                        },
+                                    ],
+                                },
                             ],
                         },
                     ],
@@ -339,10 +434,47 @@ class p189cas2strm(_PluginBase):
 
         target_id = await client.fs_get_path_id(configer.p189_target_path)
         if target_id and target_id != "-11":
-            await client.fs_delete(target_id, is_folder=True)
-            await client.fs_empty_recycle()
+            deleted = await client.fs_delete(target_id, is_folder=True)
+            if deleted:
+                logger.info(f"【P189Cas2Strm】缓存目录 {configer.p189_target_path} 删除成功")
+            else:
+                logger.warning(f"【P189Cas2Strm】缓存目录 {configer.p189_target_path} 删除失败或超时")
+            
+            recycled = await client.fs_empty_recycle()
+            if recycled:
+                logger.info("【P189Cas2Strm】回收站清空任务执行成功")
+            else:
+                logger.warning("【P189Cas2Strm】回收站清空任务执行失败或超时")
+
             cas_record_manager.clear()
-            logger.info("【P189Cas2Strm】定时清理完成")
+            logger.info("【P189Cas2Strm】定时清理流程执行完毕")
+
+    async def _do_reauth(self, **kwargs):
+        """
+        强制刷新会话
+        """
+        if not configer.enabled:
+            return
+        logger.info("【P189Cas2Strm】正在触发会话保持/刷新...")
+        client = P189ClientWrapper(configer.username, configer.password)
+        # 强制登录以确保 Cookie 最新并落地
+        ok = await client.login(force=True)
+        if ok:
+            logger.info("【P189Cas2Strm】会话刷新成功")
+        else:
+            logger.error("【P189Cas2Strm】会话刷新失败，请检查配置")
+
+    def _run_async(self, coro):
+        """
+        辅助方法：在同步线程中运行异步协程
+        """
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
     def stop_service(self):
         """

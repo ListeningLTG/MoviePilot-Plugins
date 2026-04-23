@@ -31,6 +31,8 @@ class ConfigManager(BaseModel):
     cleanup_cron: str = Field(default="0 2 * * *", description="定时清理 Cron 表达式")
     moviepilot_transfer: bool = Field(default=True, description="STRM 交由 MP 整理")
     tmdb_extract: bool = Field(default=False, description="自动提取 TMDB ID")
+    bulk_save_enabled: bool = Field(default=False, description="是否启用整目录批量转存")
+    max_concurrency: int = Field(default=2, description="CAS 并发处理数")
     moviepilot_address_custom: Optional[str] = Field(default=None, description="MoviePilot 地址 (手动配置优先)")
     
     @property

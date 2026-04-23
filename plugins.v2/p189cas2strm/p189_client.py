@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 from urllib.parse import quote
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Tuple
 from app.log import logger
 from p189client import P189Client, P189APIClient, check_response
 from p189client.exception import P189OSError
@@ -302,12 +302,15 @@ class P189ClientWrapper:
         if err is not None:
             text_parts.append(str(err))
         if isinstance(payload, dict):
+            # 兼容 189 各种 API 的返回字段
             text_parts.extend([
                 str(payload.get("msg") or ""),
                 str(payload.get("message") or ""),
                 str(payload.get("res_message") or ""),
                 str(payload.get("code") or ""),
                 str(payload.get("res_code") or ""),
+                str(payload.get("errorCode") or ""),
+                str(payload.get("errorMsg") or ""),
             ])
             if isinstance(payload.get("data"), dict):
                 data = payload.get("data") or {}
@@ -320,7 +323,17 @@ class P189ClientWrapper:
                 ])
 
         merged = " | ".join([x for x in text_parts if x]).lower()
-        return ("decrypt encryptiontext failed" in merged) or ("invalidsessionkey" in merged)
+        
+        # 诊断 IP 变动
+        if "check ip error" in merged:
+            logger.warning("【P189Client】检测到出口 IP 变动导致的会话失效 (check ip error)，建议固定容器出口 IP。")
+            
+        return (
+            ("decrypt encryptiontext failed" in merged) 
+            or ("invalidsessionkey" in merged) 
+            or ("cookieusersession" in merged and "invalid" in merged)
+            or ("session" in merged and "null" in merged)
+        )
 
     def _is_transient_upload_unavailable(self, payload: Any, err: Optional[Exception] = None) -> bool:
         text_parts = []
@@ -455,6 +468,42 @@ class P189ClientWrapper:
         logger.error(f"【P189Client】重认证失败 reason={reason}")
         return False
 
+    async def _protected_client_call(self, attr_name: str, *args, **kwargs) -> Any:
+        """
+        带自动重认证机制的 API 调用封装
+        """
+        method = getattr(self.client, attr_name, None)
+        if not method:
+            raise AttributeError(f"P189Client has no method {attr_name}")
+
+        res = None
+        err = None
+        try:
+            import asyncio
+            # 优先判断是否为协程函数
+            if asyncio.iscoroutinefunction(method):
+                res = await method(*args, **kwargs)
+            else:
+                # 尝试调用
+                res_or_coro = method(*args, **kwargs)
+                if asyncio.iscoroutine(res_or_coro):
+                    res = await res_or_coro
+                else:
+                    res = res_or_coro
+        except Exception as e:
+            err = e
+
+        if self._is_session_invalid_payload(res, err):
+            logger.warning(f"【P189Client】调用 {attr_name} 时检测到会话失效，尝试强制重认证...")
+            if await self._reauth_and_reinit_client(reason=f"api_{attr_name}_invalid"):
+                # 重置方法引用，因为 self.client 已被重新初始化
+                method = getattr(self.client, attr_name, None)
+                return await method(*args, **kwargs)
+
+        if err:
+            raise err
+        return res
+
     async def _reauth_for_upload(self) -> bool:
         return await self._reauth_and_reinit_client(reason="upload_session_invalid")
 
@@ -482,7 +531,7 @@ class P189ClientWrapper:
 
     async def share_list_all(self, share_id: str, access_code: str, share_code: str = "") -> List[dict]:
         """
-        获取分享内的所有文件列表（递归平铺）
+        获取分享内的所有文件列表（递归平铺，支持分页）
         """
 
         def _collect_entries(resp: Any) -> tuple[List[dict], List[dict]]:
@@ -511,44 +560,59 @@ class P189ClientWrapper:
 
             return files, folders
 
-        async def _list_dir(file_id: Optional[str]) -> tuple[List[dict], List[dict]]:
-            open_err = None
-            open_resp = None
+        async def _list_dir_open(file_id: Optional[str], page_num: int, page_size: int) -> tuple[List[dict], List[dict]]:
+            payload = {"shareId": share_id, "pageNum": page_num, "pageSize": page_size}
+            if file_id:
+                payload["fileId"] = file_id
+            if access_code:
+                payload["accessCode"] = access_code
+            resp = await self.client.share_fs_list(payload, async_=True)
+            check_response(resp)
+            return _collect_entries(resp)
 
-            try:
-                payload = {"shareId": share_id}
-                if file_id:
-                    payload["fileId"] = file_id
-                if access_code:
-                    payload["accessCode"] = access_code
-                open_resp = await self.client.share_fs_list(payload, async_=True)
-                check_response(open_resp)
-                files, folders = _collect_entries(open_resp)
-                if files or folders:
-                    return files, folders
-            except Exception as e:
-                open_err = e
+        async def _list_dir_portal(file_id: Optional[str], page_num: int, page_size: int) -> tuple[List[dict], List[dict]]:
+            if not share_code:
+                return [], []
+            payload = {"shortCode": share_code, "pageNum": page_num, "pageSize": page_size}
+            if file_id:
+                payload["fileId"] = file_id
+            if access_code:
+                payload["accessCode"] = access_code
+            resp = await self.client.share_fs_list_portal(payload, async_=True)
+            check_response(resp)
+            return _collect_entries(resp)
 
-            try:
-                if not share_code:
-                    return [], []
-                payload = {"shortCode": share_code}
-                if file_id:
-                    payload["fileId"] = file_id
-                if access_code:
-                    payload["accessCode"] = access_code
-                portal_resp = await self.client.share_fs_list_portal(payload, async_=True)
-                check_response(portal_resp)
-                files, folders = _collect_entries(portal_resp)
-                if files or folders:
-                    return files, folders
-            except Exception as pe:
-                logger.warning(f"【P189Client】目录列表 open/portal 均失败 fileId={file_id}: open={open_err} portal={pe}")
+        async def _list_dir_all_pages(file_id: Optional[str]) -> tuple[List[dict], List[dict]]:
+            page_num = 1
+            page_size = 100
+            all_files: List[dict] = []
+            all_folders: List[dict] = []
 
-            if open_resp is not None:
-                files, folders = _collect_entries(open_resp)
-                return files, folders
-            return [], []
+            while True:
+                files: List[dict] = []
+                folders: List[dict] = []
+                open_err = None
+
+                try:
+                    files, folders = await _list_dir_open(file_id, page_num, page_size)
+                except Exception as e:
+                    open_err = e
+                    try:
+                        files, folders = await _list_dir_portal(file_id, page_num, page_size)
+                    except Exception as pe:
+                        logger.warning(
+                            f"【P189Client】目录列表分页失败 fileId={file_id} page={page_num}: open={open_err} portal={pe}"
+                        )
+                        break
+
+                all_files.extend(files)
+                all_folders.extend(folders)
+
+                if len(files) + len(folders) < page_size:
+                    break
+                page_num += 1
+
+            return all_files, all_folders
 
         try:
             logger.info(f"【P189Client】正在列出分享文件，shareId={share_id}")
@@ -564,11 +628,11 @@ class P189ClientWrapper:
 
             all_items: List[dict] = []
             seen_ids = set()
-            queue = [str(root_file_id)] if root_file_id else [None]
+            queue = [(str(root_file_id), "")] if root_file_id else [(None, "")]
 
             while queue:
-                curr_id = queue.pop(0)
-                files, folders = await _list_dir(curr_id)
+                curr_id, curr_rel_path = queue.pop(0)
+                files, folders = await _list_dir_all_pages(curr_id)
 
                 for item in files:
                     if not isinstance(item, dict):
@@ -578,7 +642,9 @@ class P189ClientWrapper:
                         continue
                     if iid:
                         seen_ids.add(iid)
-                    all_items.append(item)
+                    copied = dict(item)
+                    copied["_rel_dir"] = curr_rel_path
+                    all_items.append(copied)
 
                 for folder in folders:
                     if not isinstance(folder, dict):
@@ -586,10 +652,17 @@ class P189ClientWrapper:
                     fid = str(folder.get("id") or folder.get("fileId") or folder.get("folderId") or "")
                     if fid and fid in seen_ids:
                         continue
+
+                    folder_name = str(folder.get("name") or folder.get("folderName") or "").strip()
+                    next_rel = f"{curr_rel_path}/{folder_name}".strip("/") if folder_name else curr_rel_path
+
+                    copied = dict(folder)
+                    copied["_rel_dir"] = curr_rel_path
+                    all_items.append(copied)
+
                     if fid:
                         seen_ids.add(fid)
-                        queue.append(fid)
-                    all_items.append(folder)
+                        queue.append((fid, next_rel))
 
             logger.info(f"【P189Client】列表拉取完成，共发现 {len(all_items)} 个项目。")
             return all_items
@@ -597,41 +670,71 @@ class P189ClientWrapper:
             logger.error(f"【P189Client】获取分享列表异常: {e}")
             return []
 
-    async def share_save_to_local(self, share_id: str, file_id: str, access_code: str, target_folder_id: str, expected_name: str = "") -> Optional[str]:
+    async def share_save_to_local(
+        self,
+        share_id: str,
+        share_code: str,
+        file_id: str,
+        access_code: str,
+        target_folder_id: str,
+        expected_name: str = "",
+        is_folder: bool = False,
+    ) -> Optional[str]:
         """
-        将分享文件转存到指定目录，返回新文件 ID
+        将分享文件或目录转存到指定目录，返回新资源 ID
         """
         try:
-            logger.info(f"【P189Client】正在发起转存任务: fileId={file_id} -> folderId={target_folder_id}")
+            logger.info(
+                f"【P189Client】正在发起转存任务: fileId={file_id} is_folder={is_folder} -> folderId={target_folder_id}"
+            )
+            task_name = (expected_name or "").strip() or "."
             payload = {
                 "type": "SHARE_SAVE",
                 "shareId": str(share_id),
-                "targetFolderId": str(target_folder_id),
+                "shareCode": str(share_code),
+                "targetFolderId": str(target_folder_id) if target_folder_id else "-11",
                 "taskInfos": [{
                     "fileId": str(file_id),
-                    "fileName": ".",
-                    "isFolder": 0,
-                }],
+                    "fileName": task_name,
+                    "isFolder": 1 if is_folder else 0,
+                }]
             }
-            res = await self.client.fs_batch(payload, async_=True)
-            check_response(res)
-
-            if isinstance(res, dict):
-                res_code = str(res.get("res_code", "")).strip()
-                if res_code and res_code not in ("0", "SUCCESS"):
-                    raise RuntimeError(f"share_save create failed: {res}")
 
             task_id = None
-            if isinstance(res, dict):
-                task_id = res.get("taskId") or res.get("taskID") or res.get("id")
-                if not task_id and isinstance(res.get("data"), dict):
-                    task_id = (res.get("data") or {}).get("taskId") or (res.get("data") or {}).get("taskID")
+            final_check = None
+            for create_try in range(1, 4):
+                try:
+                    res = await self._protected_client_call("fs_batch", payload, async_=True)
+                    check_response(res)
+                    if isinstance(res, dict):
+                        res_code = str(res.get("res_code", "")).strip()
+                        if res_code and res_code not in ("0", "SUCCESS"):
+                            # 如果受保护调用后依然返回失效（理论上极少发生），则记录后退出
+                            if self._is_session_invalid_payload(res):
+                                logger.error(f"【P189Client】重认证后 API 依然失效: {res}")
+                                return None
+                            raise RuntimeError(f"share_save create failed: {res}")
+                    if isinstance(res, dict):
+                        task_id = res.get("taskId") or res.get("taskID") or res.get("id")
+                        if not task_id and isinstance(res.get("data"), dict):
+                            task_id = (res.get("data") or {}).get("data", {}).get("taskId") or (res.get("data") or {}).get("taskId")
+                    if task_id:
+                        break
+                    logger.error(f"【P189Client】转存创建成功但未返回 taskId: {res}")
+                    return None
+                except Exception as ce:
+                    msg = str(ce)
+                    if "ShareSaveTaskIsAlreadyExist" in msg and create_try < 3:
+                        await asyncio.sleep(0.8 * create_try)
+                        continue
+                    logger.error(f"【P189Client】转存操作失败: {ce}")
+                    return None
+
             if not task_id:
-                logger.error(f"【P189Client】转存创建成功但未返回 taskId: {res}")
+                logger.error(f"【P189Client】转存创建失败且未拿到 taskId fileId={file_id}")
                 return None
 
-            final_check = None
-            for _ in range(15):
+            for _ in range(20):
                 check = await self.client.fs_batch_check({"taskId": task_id, "type": "SHARE_SAVE"}, async_=True)
                 check_response(check)
                 final_check = check
@@ -658,29 +761,53 @@ class P189ClientWrapper:
 
                 await asyncio.sleep(0.6)
 
-            await asyncio.sleep(0.8)
-            listing = await self.client.fs_list({"folderId": str(target_folder_id), "pageNum": 1, "pageSize": 200}, async_=True)
-            check_response(listing)
-            files = listing.get('fileListAO', {}).get('fileList', []) or listing.get('fileList', [])
-
             expected_name_norm = (expected_name or "").strip()
-            if expected_name_norm:
-                for f in files:
-                    fname = str(f.get('name') or f.get('fileName') or '').strip()
-                    if fname == expected_name_norm:
-                        return f.get('id') or f.get('fileId')
+            for _ in range(6):
+                page_num = 1
+                page_size = 100
+                while True:
+                    listing = await self._protected_client_call(
+                        "fs_list",
+                        {"folderId": str(target_folder_id), "pageNum": page_num, "pageSize": page_size},
+                        async_=True,
+                    )
+                    check_response(listing)
 
-            for f in files:
-                old_id = str(f.get('oldFileId') or '')
-                new_file_id = str(f.get('fileId') or f.get('id') or '')
-                if old_id == str(file_id) or new_file_id == str(file_id):
-                    return f.get('id') or f.get('fileId')
+                    files = listing.get("fileListAO", {}).get("fileList", []) or listing.get("fileList", [])
+                    folders = listing.get("fileListAO", {}).get("folderList", []) or listing.get("folderList", [])
 
-            if files:
-                logger.warning(f"【P189Client】转存结果未命中 expected_name/oldFileId，返回首个文件。taskCheck={final_check}")
-                return files[0].get('id') or files[0].get('fileId')
+                    if is_folder:
+                        if expected_name_norm:
+                            for fd in folders:
+                                fname = str(fd.get("name") or fd.get("folderName") or "").strip()
+                                if fname == expected_name_norm:
+                                    return str(fd.get("id") or fd.get("folderId") or fd.get("fileId") or "")
+                        for fd in folders:
+                            old_id = str(fd.get("oldFileId") or "")
+                            new_id = str(fd.get("id") or fd.get("folderId") or fd.get("fileId") or "")
+                            if old_id == str(file_id) or new_id == str(file_id):
+                                return new_id
+                    else:
+                        if expected_name_norm:
+                            for f in files:
+                                fname = str(f.get("name") or f.get("fileName") or "").strip()
+                                if fname == expected_name_norm:
+                                    return str(f.get("id") or f.get("fileId") or "")
+                        for f in files:
+                            old_id = str(f.get("oldFileId") or "")
+                            new_file_id = str(f.get("fileId") or f.get("id") or "")
+                            if old_id == str(file_id) or new_file_id == str(file_id):
+                                return new_file_id
 
-            logger.error(f"【P189Client】转存任务完成但目标目录无文件: folderId={target_folder_id}, taskCheck={final_check}")
+                    if len(files) + len(folders) < page_size:
+                        break
+                    page_num += 1
+
+                await asyncio.sleep(0.5)
+
+            logger.error(
+                f"【P189Client】转存任务完成但目标目录未识别到结果: folderId={target_folder_id}, is_folder={is_folder}, taskCheck={final_check}"
+            )
             return None
         except Exception as e:
             logger.error(f"【P189Client】转存操作失败: {e}")
@@ -720,7 +847,7 @@ class P189ClientWrapper:
                 "parentFolderId": str(parent_id),
                 "folderName": name
             }
-            res = self.client.fs_mkdir(payload)
+            res = await self._protected_client_call("fs_mkdir", payload)
             check_response(res)
             return str(res.get("id") or res.get("folderId"))
         except Exception as e:
@@ -761,10 +888,10 @@ class P189ClientWrapper:
 
     async def fs_delete(self, file_id: str, is_folder: bool = False) -> bool:
         """
-        物理删除
+        删除资源并等待任务完成
         """
         try:
-            logger.info(f"【P189Client】正在执行物理删除: ID={file_id}")
+            logger.info(f"【P189Client】正在执行删除任务: ID={file_id} is_folder={is_folder}")
             payload = {
                 "type": "DELETE",
                 "taskInfos": [{
@@ -772,24 +899,149 @@ class P189ClientWrapper:
                     "isFolder": 1 if is_folder else 0
                 }]
             }
-            res = self.client.fs_batch(payload)
+            res = await self.client.fs_batch(payload, async_=True)
             check_response(res)
-            return True
+
+            task_id = None
+            if isinstance(res, dict):
+                task_id = res.get("taskId") or res.get("taskID") or res.get("id")
+                if not task_id and isinstance(res.get("data"), dict):
+                    task_id = (res.get("data") or {}).get("taskId") or (res.get("data") or {}).get("taskID")
+
+            if not task_id:
+                logger.warning(f"【P189Client】删除任务未返回 taskId，按提交成功处理: {res}")
+                return True
+
+            final_check = None
+            for _ in range(20):
+                check = await self.client.fs_batch_check({"taskId": task_id, "type": "DELETE"}, async_=True)
+                check_response(check)
+                final_check = check
+
+                status_raw = check.get("taskStatus") if isinstance(check, dict) else None
+                try:
+                    status = int(status_raw) if status_raw is not None else None
+                except Exception:
+                    status = status_raw
+
+                failed = int((check or {}).get("failedCount") or 0) if isinstance(check, dict) else 0
+                sub_count = int((check or {}).get("subTaskCount") or 0) if isinstance(check, dict) else 0
+                finished = (
+                    int((check or {}).get("successedCount") or 0)
+                    + int((check or {}).get("failedCount") or 0)
+                    + int((check or {}).get("skipCount") or 0)
+                ) if isinstance(check, dict) else 0
+
+                if status in (-1, 2):
+                    logger.error(f"【P189Client】删除任务失败 taskId={task_id}, check={check}")
+                    return False
+
+                if status == 4 or (sub_count > 0 and finished >= sub_count):
+                    if failed > 0:
+                        logger.error(f"【P189Client】删除任务完成但存在失败 taskId={task_id}, check={check}")
+                        return False
+                    logger.info(f"【P189Client】删除任务完成 taskId={task_id}")
+                    return True
+
+                await asyncio.sleep(0.5)
+
+            logger.error(f"【P189Client】删除任务等待超时 taskId={task_id}, check={final_check}")
+            return False
         except Exception as e:
             logger.error(f"【P189Client】删除失败: {e}")
             return False
 
     async def get_download_url(self, file_id: str) -> Optional[str]:
         """
-        获取 302 下载链接
+        获取 302 下载链接（兼容 download_url_info / download_url 多种返回）
         """
-        try:
-            resp = self.client.download_url_info({"fileId": str(file_id)})
-            check_response(resp)
-            return resp.get("fileDownloadUrl") or resp.get("downloadUrl")
-        except Exception as e:
-            logger.error(f"【P189Client】获取下载链接失败: {e}")
+        fid_text = str(file_id or "").strip()
+        if not fid_text:
             return None
+
+        def _extract_url(resp: Any) -> Optional[str]:
+            if isinstance(resp, str) and resp.strip():
+                return resp.strip()
+            if not isinstance(resp, dict):
+                return None
+
+            # 优先取业务载荷中的真实下载地址（如 normal.url）
+            preferred_nodes: List[dict] = []
+            for key in ("normal", "data", "result", "res", "body"):
+                val = resp.get(key)
+                if isinstance(val, dict):
+                    preferred_nodes.append(val)
+            preferred_nodes.append(resp)
+
+            for node in preferred_nodes:
+                for key in ("fileDownloadUrl", "downloadUrl", "url"):
+                    url = node.get(key)
+                    if isinstance(url, str) and url.strip():
+                        return url.strip()
+            return None
+
+        async def _resolve_location(url: str) -> Optional[str]:
+            raw_url = str(url or "").strip()
+            if not raw_url:
+                return None
+            try:
+                import httpx
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0"
+                }
+                cookies = self.client.cookies or None
+                async with httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers, cookies=cookies) as client:
+                    resp = await client.get(raw_url)
+                    location = resp.headers.get("location") or resp.headers.get("Location")
+                    if isinstance(location, str) and location.strip():
+                        return location.strip()
+                    logger.warning(
+                        f"【P189Client】302解引用未返回Location fileId={fid_text} status={resp.status_code} url={raw_url[:120]}"
+                    )
+                    return None
+            except Exception as e:
+                logger.warning(f"【P189Client】解析302 Location失败 fileId={fid_text}: {e}")
+                return None
+
+        payloads: List[Union[dict, str, int]] = [{"fileId": fid_text}]
+        try:
+            payloads.append({"fileId": int(fid_text)})
+        except Exception:
+            pass
+        payloads.append(fid_text)
+
+        attempts: List[Tuple[str, Union[dict, str, int]]] = []
+        for p in payloads:
+            attempts.append(("download_url_info", p))
+        for p in payloads:
+            attempts.append(("download_url", p))
+        for p in payloads:
+            attempts.append(("download_url_video_portal", p))
+
+        for method_name, payload in attempts:
+            method = getattr(self.client, method_name, None)
+            if not method:
+                continue
+            try:
+                resp = method(payload)
+                if isinstance(resp, dict):
+                    try:
+                        check_response(resp)
+                    except Exception:
+                        pass
+                url = _extract_url(resp)
+                if url:
+                    final_url = await _resolve_location(url)
+                    if final_url:
+                        logger.info(f"【P189Client】获取下载链接成功 method={method_name} fileId={fid_text}")
+                        return final_url
+                    logger.warning(f"【P189Client】下载链接解302失败 method={method_name} fileId={fid_text} first_url={url[:120]}")
+                logger.warning(f"【P189Client】下载接口无直链字段 method={method_name} fileId={fid_text}, resp={resp}")
+            except Exception as e:
+                logger.warning(f"【P189Client】下载接口调用失败 method={method_name} fileId={fid_text}: {e}")
+
+        logger.error(f"【P189Client】获取下载链接失败，所有路径均未返回直链: fileId={fid_text}")
+        return None
 
     async def rapid_upload(self, parent_id: str, filename: str, size: int, md5: str, slice_md5: str) -> bool:
         """
@@ -1010,12 +1262,62 @@ class P189ClientWrapper:
 
     async def fs_empty_recycle(self) -> bool:
         """
-        清空回收站
+        清空回收站并等待任务完成
         """
         try:
-            res = self.client.recyclebin_clear({})
+            logger.info("【P189Client】正在执行清空回收站任务...")
+            payload = {
+                "type": "EMPTY_RECYCLE",
+                "taskInfos": []
+            }
+            res = await self._protected_client_call("fs_batch", payload, async_=True)
             check_response(res)
-            return True
+
+            task_id = None
+            if isinstance(res, dict):
+                task_id = res.get("taskId") or res.get("taskID") or res.get("id")
+                if not task_id and isinstance(res.get("data"), dict):
+                    task_id = (res.get("data") or {}).get("taskId") or (res.get("data") or {}).get("taskID")
+
+            if not task_id:
+                logger.warning(f"【P189Client】清空回收站任务未返回 taskId，按提交成功处理: {res}")
+                return True
+
+            final_check = None
+            for _ in range(40):  # 增加尝试次数，清空可能较慢
+                check = await self._protected_client_call("fs_batch_check", {"taskId": task_id, "type": "EMPTY_RECYCLE"}, async_=True)
+                check_response(check)
+                final_check = check
+
+                status_raw = check.get("taskStatus") if isinstance(check, dict) else None
+                try:
+                    status = int(status_raw) if status_raw is not None else None
+                except Exception:
+                    status = status_raw
+
+                failed = int((check or {}).get("failedCount") or 0) if isinstance(check, dict) else 0
+                sub_count = int((check or {}).get("subTaskCount") or 0) if isinstance(check, dict) else 0
+                finished = (
+                    int((check or {}).get("successedCount") or 0)
+                    + int((check or {}).get("failedCount") or 0)
+                    + int((check or {}).get("skipCount") or 0)
+                ) if isinstance(check, dict) else 0
+
+                if status in (-1, 2):
+                    logger.error(f"【P189Client】清空回收站任务失败 taskId={task_id}, check={check}")
+                    return False
+
+                if status == 4 or (sub_count > 0 and finished >= sub_count):
+                    if failed > 0:
+                        logger.error(f"【P189Client】清空回收站任务完成但存在失败 taskId={task_id}, check={check}")
+                        return False
+                    logger.info(f"【P189Client】清空回收站任务完成 taskId={task_id}")
+                    return True
+
+                await asyncio.sleep(0.5)
+
+            logger.error(f"【P189Client】清空回收站任务等待超时 taskId={task_id}, check={final_check}")
+            return False
         except Exception as e:
             logger.error(f"【P189Client】清空回收站失败: {e}")
             return False

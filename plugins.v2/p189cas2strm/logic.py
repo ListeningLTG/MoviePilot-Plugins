@@ -27,7 +27,6 @@ async def cas_redirect(c: str = Query(..., description="Base64 encoded CAS info"
     """
     try:
         logger.info("【P189Cas2Strm】收到 STRM 播控请求，开始解析元数据...")
-        # 1. 解析 CAS 信息（兼容 URL 传参导致的空格/缺失补位/urlsafe 变体）
         raw_c = (c or "").strip().replace(" ", "+")
         padded_c = raw_c + ("=" * ((4 - len(raw_c) % 4) % 4))
         try:
@@ -39,60 +38,91 @@ async def cas_redirect(c: str = Query(..., description="Base64 encoded CAS info"
         except Exception as de:
             logger.error(f"【P189Cas2Strm】CAS 参数解码失败: {de}; c_prefix={raw_c[:48]}")
             return Response(content="Invalid CAS payload", status_code=400)
-        
+
         filename = cas_data.get('name')
         size = cas_data.get('size')
         md5 = cas_data.get('md5')
         slice_md5 = cas_data.get('sliceMd5')
-        
+
         logger.info(f"【P189Cas2Strm】任务解析: 文件={filename}, 大小={size}, MD5={md5}")
-        
+
         if not all([filename, size, md5, slice_md5]):
             logger.error(f"【P189Cas2Strm】无效的 CAS 数据块: {cas_data}")
             return Response(content="Invalid CAS data", status_code=400)
-            
-        # 2. 初始化天翼云客户端（优先复用本地持久化会话）
+
         client = P189ClientWrapper(
             configer.username,
             configer.password,
             cookie_store_path=configer.cookie_store_path,
         )
         await client.ensure_logged_in()
-        
-        # 3. 确定秒传目标目录
-        target_root_id = await client.fs_get_path_id(configer.p189_target_path)
-        if not target_root_id:
-            logger.error(f"【P189Cas2Strm】无法定位或创建远程路径: {configer.p189_target_path}")
-            return Response(content="Failed to access target root", status_code=500)
-        
-        # 4. 执行秒传（带时间戳文件夹防止冲突）
-        timestamp = int(now_time() * 1000)
-        timestamp_folder_id = await client.fs_mkdir(target_root_id, str(timestamp))
-        logger.info(f"【P189Cas2Strm】准备在临时目录 {timestamp} 中执行秒传...")
-        
-        success = await client.rapid_upload(timestamp_folder_id, filename, size, md5, slice_md5)
-        if not success:
-            logger.error(f"【P189Cas2Strm】秒传执行失败，请检查网盘空间或账号状态: {filename}")
-            return Response(content="Rapid upload failed", status_code=500)
-            
-        # 获取新生成的直链
-        listing = client.client.fs_list(timestamp_folder_id)
-        files = listing.get('fileListAO', {}).get('fileList', []) or listing.get('fileList', [])
-        new_file_id = None
-        for f in files:
-            if f.get('name') == filename:
-                new_file_id = f.get('id') or f.get('fileId')
-                break
-        
-        if not new_file_id:
-            logger.error("【P189Cas2Strm】秒传成功但列表轮询未发现文件，可能是 API 延迟")
-            return Response(content="Upload success but file not found", status_code=500)
 
-        download_url = await client.get_download_url(new_file_id)
+        candidate_ids: List[str] = []
+        cached_file_id = cas_record_manager.get(str(md5))
+        if cached_file_id:
+            candidate_ids.append(str(cached_file_id))
+            logger.info(f"【P189Cas2Strm】命中复用记录 fileId={cached_file_id} md5={md5}")
+
+        download_url = None
+        tried = set()
+        for fid in candidate_ids:
+            if fid in tried:
+                continue
+            tried.add(fid)
+            download_url = await client.get_download_url(fid)
+            if download_url:
+                logger.info(f"【P189Cas2Strm】复用 fileId 获取下载链接成功 fileId={fid}")
+                break
+
         if not download_url:
-            logger.error(f"【P189Cas2Strm】获取下载链接失败，fileId={new_file_id}")
+            lock = _redirect_upload_locks.setdefault(str(md5), asyncio.Lock())
+            async with lock:
+                # 再查一次，避免并发请求重复秒传
+                latest_file_id = cas_record_manager.get(str(md5))
+                if latest_file_id and str(latest_file_id) not in tried:
+                    download_url = await client.get_download_url(str(latest_file_id))
+                    if download_url:
+                        logger.info(f"【P189Cas2Strm】并发复用成功 fileId={latest_file_id} md5={md5}")
+
+                if not download_url:
+                    target_root_id = await client.fs_get_path_id(configer.p189_target_path)
+                    if not target_root_id:
+                        logger.error(f"【P189Cas2Strm】无法定位或创建远程路径: {configer.p189_target_path}")
+                        return Response(content="Failed to access target root", status_code=500)
+
+                    timestamp = int(now_time() * 1000)
+                    timestamp_folder_id = await client.fs_mkdir(target_root_id, str(timestamp))
+                    logger.info(f"【P189Cas2Strm】准备在临时目录 {timestamp} 中执行秒传...")
+
+                    success = await client.rapid_upload(timestamp_folder_id, filename, size, md5, slice_md5)
+                    if not success:
+                        logger.error(f"【P189Cas2Strm】秒传执行失败，请检查网盘空间或账号状态: {filename}")
+                        return Response(content="Rapid upload failed", status_code=500)
+
+                    list_file_id = None
+                    for attempt in range(1, 6):
+                        listing = client.client.fs_list(timestamp_folder_id)
+                        files = listing.get('fileListAO', {}).get('fileList', []) or listing.get('fileList', [])
+                        for f in files:
+                            if f.get('name') == filename:
+                                list_file_id = f.get('id') or f.get('fileId')
+                                if list_file_id:
+                                    break
+                        if list_file_id:
+                            logger.info(f"【P189Cas2Strm】列表命中上传文件 fileId={list_file_id} attempt={attempt}")
+                            break
+                        await asyncio.sleep(0.6)
+
+                    if list_file_id:
+                        list_file_id = str(list_file_id)
+                        cas_record_manager.add(str(md5), list_file_id)
+                        if list_file_id not in tried:
+                            download_url = await client.get_download_url(list_file_id)
+
+        if not download_url:
+            logger.error(f"【P189Cas2Strm】获取下载链接失败，candidate_file_ids={candidate_ids}")
             return Response(content="Failed to get download URL", status_code=500)
-            
+
         logger.info(f"【P189Cas2Strm】重定向成功 -> {download_url[:50]}...")
         return RedirectResponse(url=download_url)
     except Exception as e:
@@ -100,6 +130,8 @@ async def cas_redirect(c: str = Query(..., description="Base64 encoded CAS info"
         return Response(content=str(e), status_code=500)
 
 # --- 记录管理类 ---
+_redirect_upload_locks: Dict[str, asyncio.Lock] = {}
+
 class CasRecordManager:
     def __init__(self, record_path: str):
         self.record_path = record_path
@@ -249,7 +281,19 @@ class ShareTaskQueue:
 async def process_share_cas(share_code: str, access_code: str, arg_str: str = "") -> Dict[str, Any]:
     """核心处理逻辑"""
     logger.info(f"【P189Cas2Strm】[逻辑层] 正在准备客户端...")
-    
+
+    video_exts = {
+        ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".ts", ".m2ts", ".webm", ".m4v"
+    }
+
+    def _is_video_cas(name: str) -> bool:
+        n = str(name or "").strip()
+        if not n.lower().endswith(".cas"):
+            return False
+        src_name = n[:-4]
+        src_ext = os.path.splitext(src_name)[1].lower()
+        return src_ext in video_exts
+
     client = P189ClientWrapper(
         configer.username,
         configer.password,
@@ -259,6 +303,13 @@ async def process_share_cas(share_code: str, access_code: str, arg_str: str = ""
     if not login_ok:
         logger.error("【P189Cas2Strm】[逻辑层] 客户端登录失败，请检查配置中的账号密码。")
         return {"status": False, "msg": "登录失败"}
+
+    # 会话有效性预检
+    try:
+        # 使用轻量级接口验证当前 Cookie 是否真的可用
+        await client._protected_client_call("user_info_brief", async_=True)
+    except Exception as e:
+        logger.warning(f"【P189Cas2Strm】[逻辑层] 会话预检异常: {e}")
 
     # 1. 验证分享
     logger.info(f"【P189Cas2Strm】[逻辑层] 正在请求分享校验 (share_code={share_code})...")
@@ -273,19 +324,43 @@ async def process_share_cas(share_code: str, access_code: str, arg_str: str = ""
     # 2. 列出文件
     logger.info("【P189Cas2Strm】[逻辑层] 正在递归列出分享内文件...")
     files = await client.share_list_all(share_id, access_code, share_code=share_code)
-    cas_files = [f for f in files if f.get("name", "").endswith(".cas")]
-    
+
+    video_exts = {
+        ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".ts", ".m2ts", ".webm", ".m4v"
+    }
+
+    cas_files = []
+    skipped_non_video = 0
+    for f in files:
+        name = str(f.get("name", "") or "").strip()
+        if not name.lower().endswith(".cas"):
+            continue
+
+        src_name = name[:-4]
+        src_ext = os.path.splitext(src_name)[1].lower()
+        if src_ext not in video_exts:
+            skipped_non_video += 1
+            continue
+
+        cas_files.append(f)
+
     if not cas_files:
-        logger.warning(f"【P189Cas2Strm】[逻辑层] 未在分享中发现任何 .cas 描述文件: {share_code}")
+        logger.warning(f"【P189Cas2Strm】[逻辑层] 未发现可处理的视频 CAS 文件: {share_code}，跳过非视频 CAS={skipped_non_video}")
         return {"status": True, "count": 0}
 
-    logger.info(f"【P189Cas2Strm】[逻辑层] 发现 {len(cas_files)} 个 .cas 文件，进入处理循环...")
+    logger.info(
+        f"【P189Cas2Strm】[逻辑层] 发现 {len(cas_files)} 个可处理视频 CAS，跳过非视频 CAS={skipped_non_video}，进入处理循环..."
+    )
     
     # 准备基础目录
     temp_dir_id = await client.fs_get_path_id(f"/P189CasTemp/{share_code}")
     strm_save_path = configer.strm_save_path
     if not os.path.exists(strm_save_path):
         os.makedirs(strm_save_path, exist_ok=True)
+
+    bulk_enabled = bool(getattr(configer, "bulk_save_enabled", False))
+    max_concurrency = int(getattr(configer, "max_concurrency", 2) or 2)
+    max_concurrency = max(1, min(max_concurrency, 6))
         
     count = 0
     generated_strm_paths: List[Path] = []
@@ -306,44 +381,259 @@ async def process_share_cas(share_code: str, access_code: str, arg_str: str = ""
         except Exception as e:
             logger.warning(f"【P189Cas2Strm】TMDB 提取/识别失败，回退默认整理: {e}")
 
-    for f_info in cas_files:
-        name = f_info["name"]
-        fid = f_info["id"]
-        
-        # 转存 -> 读取 -> 删除
-        logger.info(f"【P189Cas2Strm】-- 正在转换: {name} --")
-        local_fid = await client.share_save_to_local(share_id, fid, access_code, temp_dir_id, expected_name=name)
-        if not local_fid:
-            logger.error(f"【P189Cas2Strm】文件转存失败: {name}")
-            continue
-            
-        logger.info(f"【P189Cas2Strm】已成功转存至本地临时 ID: {local_fid}，正在读取内容...")
-        content = await client.fs_read_content(local_fid)
-        
-        logger.info(f"【P189Cas2Strm】正在清理网盘临时文件 (ID: {local_fid})...")
-        await client.fs_delete(local_fid)
-        
-        if not content:
-            logger.error(f"【P189Cas2Strm】文件内容读取为空: {name}")
-            continue
-            
+    async def _list_local_cas(folder_id: str, rel_dir: str = "") -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        page_num = 1
+        page_size = 100
+        while True:
+            listing = await client.client.fs_list(
+                {"folderId": str(folder_id), "pageNum": page_num, "pageSize": page_size},
+                async_=True,
+            )
+            files = listing.get("fileListAO", {}).get("fileList", []) or listing.get("fileList", [])
+            folders = listing.get("fileListAO", {}).get("folderList", []) or listing.get("folderList", [])
+
+            for file_item in files:
+                name = str(file_item.get("name") or file_item.get("fileName") or "").strip()
+                fid = file_item.get("id") or file_item.get("fileId")
+                if not fid or not _is_video_cas(name):
+                    continue
+                items.append({
+                    "name": name,
+                    "id": str(fid),
+                    "_rel_dir": rel_dir,
+                    "_bulk_local": True,
+                })
+
+            for folder in folders:
+                sub_id = folder.get("id") or folder.get("folderId") or folder.get("fileId")
+                folder_name = str(folder.get("name") or folder.get("folderName") or "").strip()
+                if not sub_id:
+                    continue
+                next_rel = f"{rel_dir}/{folder_name}".strip("/") if folder_name else rel_dir
+                items.extend(await _list_local_cas(str(sub_id), next_rel))
+
+            if len(files) + len(folders) < page_size:
+                break
+            page_num += 1
+        return items
+
+    async def _process_one_cas(f_info: Dict[str, Any], sem: asyncio.Semaphore) -> Optional[Path]:
+        name = str(f_info.get("name") or "").strip()
+        rel_dir = str(f_info.get("_rel_dir") or "").strip().strip("/")
+
+        async with sem:
+            try:
+                local_fid = None
+                if f_info.get("_bulk_local"):
+                    local_fid = str(f_info.get("id") or "").strip()
+                else:
+                    fid = f_info.get("id")
+                    if not fid:
+                        logger.error(f"【P189Cas2Strm】CAS 缺少文件 ID: {name}")
+                        return None
+                    logger.info(f"【P189Cas2Strm】-- 正在转换: {name} --")
+                    local_fid = await client.share_save_to_local(share_id, share_code, fid, access_code, temp_dir_id, expected_name=name)
+
+                if not local_fid:
+                    logger.error(f"【P189Cas2Strm】文件转存失败: {name}")
+                    return None
+
+                logger.info(f"【P189Cas2Strm】已就绪临时文件 ID: {local_fid}，正在读取内容...")
+                content = await client.fs_read_content(local_fid)
+
+                if not content:
+                    logger.error(f"【P189Cas2Strm】文件内容读取为空: {name}")
+                    return None
+
+                content = content.strip()
+                strm_name = os.path.splitext(name)[0] + ".strm"
+                target_dir = os.path.join(strm_save_path, rel_dir) if rel_dir else strm_save_path
+                if not os.path.exists(target_dir):
+                    os.makedirs(target_dir, exist_ok=True)
+                strm_file = os.path.join(target_dir, strm_name)
+
+                redirect_host = configer.moviepilot_address
+                strm_content = f"{redirect_host.rstrip('/')}/api/v1/plugin/p189cas2strm/redirect?c={content}"
+
+                with open(strm_file, "w", encoding="utf-8") as sf:
+                    sf.write(strm_content)
+
+                logger.info(f"【P189Cas2Strm】✅ STRM 写入成功: {strm_name}")
+                return Path(strm_file)
+            except Exception as e:
+                logger.error(f"【P189Cas2Strm】处理 CAS 异常: {name}, {e}")
+                return None
+
+    share_root_name = str(info.get("fileName") or info.get("name") or "").strip().strip("/")
+
+    def _normalize_rel_dir(rel_dir: str) -> str:
+        rel = str(rel_dir or "").strip().strip("/")
+        if share_root_name:
+            if rel == share_root_name:
+                rel = ""
+            elif rel.startswith(f"{share_root_name}/"):
+                rel = rel[len(share_root_name) + 1:]
+        return rel
+
+    def _canonical_key(name: str, rel_dir: str) -> str:
+        rel = _normalize_rel_dir(rel_dir)
+        nm = str(name or "").strip()
+        return f"{rel}/{nm}".strip("/").lower()
+
+    def _target_rel_dir(item: Dict[str, Any]) -> str:
+        rel = _normalize_rel_dir(item.get("_rel_dir") or "")
+        return f"{share_root_name}/{rel}".strip("/") if share_root_name else rel
+
+    target_by_key: Dict[str, Dict[str, Any]] = {}
+    for item in cas_files:
+        key = _canonical_key(item.get("name") or item.get("fileName") or "", item.get("_rel_dir") or "")
+        if key and key not in target_by_key:
+            target_by_key[key] = item
+
+    expected_total = len(target_by_key)
+    process_items = []
+    bulk_mode_active = False
+
+    async def _build_bulk_candidates(folder_id: str) -> Tuple[List[Dict[str, Any]], set]:
+        local_items = await _list_local_cas(str(folder_id), "")
+        matched_items: List[Dict[str, Any]] = []
+        matched_keys = set()
+        for local_item in local_items:
+            key = _canonical_key(local_item.get("name") or local_item.get("fileName") or "", local_item.get("_rel_dir") or "")
+            if not key or key in matched_keys:
+                continue
+            target_item = target_by_key.get(key)
+            if not target_item:
+                continue
+            local_id = str(local_item.get("id") or local_item.get("fileId") or "").strip()
+            if not local_id:
+                continue
+            matched_keys.add(key)
+            matched_items.append(
+                {
+                    "name": str(target_item.get("name") or target_item.get("fileName") or "").strip(),
+                    "id": local_id,
+                    "_rel_dir": _target_rel_dir(target_item),
+                    "_bulk_local": True,
+                    "_cas_key": key,
+                }
+            )
+        return matched_items, matched_keys
+
+    if bulk_enabled:
         try:
-            content = content.strip()
-            # 生成 STRM
-            strm_name = os.path.splitext(name)[0] + ".strm"
-            strm_file = os.path.join(strm_save_path, strm_name)
-            
-            redirect_host = configer.moviepilot_address
-            strm_content = f"{redirect_host.rstrip('/')}/api/v1/plugin/p189cas2strm/redirect?c={content}"
-            
-            with open(strm_file, "w", encoding="utf-8") as sf:
-                sf.write(strm_content)
-            
+            share_root_id = str(info.get("fileId") or info.get("shareDirFileId") or info.get("shareId") or "").strip()
+            if share_root_id:
+                logger.info(f"【P189Cas2Strm】启用整目录批量转存，shareRootId={share_root_id}")
+                local_root_id = await client.share_save_to_local(
+                    share_id,
+                    share_code,
+                    share_root_id,
+                    access_code,
+                    temp_dir_id,
+                    expected_name=share_root_name,
+                    is_folder=True,
+                )
+                if local_root_id:
+                    wait_interval = 10
+                    max_wait_seconds = 60
+                    waited = 0
+
+                    best_items, best_keys = await _build_bulk_candidates(str(temp_dir_id))
+                    last_count = len(best_keys)
+
+                    while last_count < expected_total and waited < max_wait_seconds:
+                        logger.info(
+                            f"【P189Cas2Strm】批量转存可见性检查: {last_count}/{expected_total}，{wait_interval}s 后复查"
+                        )
+                        await asyncio.sleep(wait_interval)
+                        waited += wait_interval
+
+                        current_items, current_keys = await _build_bulk_candidates(str(temp_dir_id))
+                        current_count = len(current_keys)
+
+                        if current_count > len(best_keys):
+                            best_items, best_keys = current_items, current_keys
+
+                        if current_count <= last_count:
+                            logger.info(
+                                f"【P189Cas2Strm】批量转存可见性无增长({current_count})，提前结束等待"
+                            )
+                            break
+                        last_count = current_count
+
+                    bulk_items = best_items
+                    bulk_keys = best_keys
+                    missing_keys = [k for k in target_by_key.keys() if k not in bulk_keys]
+                    fill_items = []
+                    for key in missing_keys:
+                        target_item = target_by_key[key]
+                        fill = dict(target_item)
+                        fill["_rel_dir"] = _target_rel_dir(target_item)
+                        fill["_cas_key"] = key
+                        fill_items.append(fill)
+
+                    process_items = bulk_items + fill_items
+                    bulk_mode_active = True
+                    logger.info(
+                        f"【P189Cas2Strm】批量转存完成，目标={expected_total}，本地命中={len(bulk_keys)}，缺口补齐={len(fill_items)}"
+                    )
+                else:
+                    logger.warning("【P189Cas2Strm】批量转存未成功，回退逐文件转存模式")
+            else:
+                logger.warning("【P189Cas2Strm】未获取到分享根目录 ID，回退逐文件转存模式")
+        except Exception as be:
+            logger.warning(f"【P189Cas2Strm】批量转存模式异常，回退逐文件: {be}")
+
+    if not bulk_mode_active:
+        process_items = []
+        for item in cas_files:
+            key = _canonical_key(item.get("name") or item.get("fileName") or "", item.get("_rel_dir") or "")
+            fallback = dict(item)
+            fallback["_rel_dir"] = _target_rel_dir(item)
+            fallback["_cas_key"] = key
+            process_items.append(fallback)
+
+    deduped_items: List[Dict[str, Any]] = []
+    seen_keys = set()
+    for item in process_items:
+        key = item.get("_cas_key") or _canonical_key(item.get("name") or item.get("fileName") or "", item.get("_rel_dir") or "")
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        item["_cas_key"] = key
+        deduped_items.append(item)
+
+    if len(deduped_items) != expected_total:
+        logger.warning(
+            f"【P189Cas2Strm】待处理去重后数量异常: unique={len(deduped_items)} expected={expected_total}"
+        )
+    process_items = deduped_items
+
+    if bulk_mode_active:
+        results = []
+        bulk_items = [item for item in process_items if item.get("_bulk_local")]
+        fill_items = [item for item in process_items if not item.get("_bulk_local")]
+
+        if bulk_items:
+            sem = asyncio.Semaphore(max_concurrency)
+            results.extend(await asyncio.gather(*[_process_one_cas(item, sem) for item in bulk_items]))
+
+        if fill_items:
+            logger.info(f"【P189Cas2Strm】开始逐文件补齐缺口 CAS={len(fill_items)}")
+            for item in fill_items:
+                p = await _process_one_cas(item, asyncio.Semaphore(1))
+                results.append(p)
+    else:
+        results = []
+        for item in process_items:
+            p = await _process_one_cas(item, asyncio.Semaphore(1))
+            results.append(p)
+    for p in results:
+        if p:
             count += 1
-            generated_strm_paths.append(Path(strm_file))
-            logger.info(f"【P189Cas2Strm】✅ STRM 写入成功: {strm_name}")
-        except Exception as e:
-            logger.error(f"【P189Cas2Strm】文件写入 IO 异常: {name}, {e}")
+            generated_strm_paths.append(p)
 
     if generated_strm_paths and configer.moviepilot_transfer:
         logger.info(f"【P189Cas2Strm】开始批量整理 STRM，共 {len(generated_strm_paths)} 个文件")
@@ -397,6 +687,21 @@ async def process_share_cas(share_code: str, access_code: str, arg_str: str = ""
                 logger.info("【P189Cas2Strm】STRM 批量整理完成")
         except Exception as te:
             logger.warning(f"【P189Cas2Strm】STRM 整理阶段异常，已跳过: {te}")
+
+    try:
+        if temp_dir_id and str(temp_dir_id) not in ("", "-11"):
+            logger.info(f"【P189Cas2Strm】提交分享码目录删除任务: {share_code}")
+            deleted = await client.fs_delete(temp_dir_id, is_folder=True)
+            if not deleted:
+                await asyncio.sleep(1.5)
+                logger.warning(f"【P189Cas2Strm】分享码目录删除首次失败，准备重试: {share_code}")
+                deleted = await client.fs_delete(temp_dir_id, is_folder=True)
+            if deleted:
+                logger.info(f"【P189Cas2Strm】已删除分享码临时目录: {share_code}")
+            else:
+                logger.warning(f"【P189Cas2Strm】分享码目录删除失败，等待定时清理兜底: {share_code}")
+    except Exception as e:
+        logger.warning(f"【P189Cas2Strm】删除分享码临时目录失败 share_code={share_code}: {e}")
 
     logger.info(f"【P189Cas2Strm】🎉 任务圆满完成，共生成 {count} 个文件")
     return {"status": True, "count": count}
