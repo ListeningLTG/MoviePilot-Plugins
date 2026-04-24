@@ -163,11 +163,12 @@
   "p189cas2strm": {
     "name": "cas生成strm",
     "description": "cas生成strm",
-    "version": "1.0.6.5",
+    "version": "1.0.6.6",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/p189.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.6.6": "优化获取媒体播放链接",
       "v1.0.6.5": "修复获取媒体播放链接的问题",
       "v1.0.6.4": "修复",
       "v1.0.6.3": "修复",

@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import re
+import time
 from pathlib import Path
 from urllib.parse import quote
 from typing import Optional, List, Dict, Any, Union, Tuple
@@ -28,6 +29,9 @@ class P189ClientWrapper:
         
         self.client = P189Client(cookies=cookie_text)
         self.session_key: Optional[str] = None
+        self._play_url_cache: Dict[str, Tuple[float, str]] = {}
+        self._play_url_inflight: Dict[str, asyncio.Future] = {}
+        self._play_url_cache_ttl = 60.0
 
     def _cache_session_key_from_payload(self, payload: Any):
         sk = self._pick_session_key(payload)
@@ -977,12 +981,33 @@ class P189ClientWrapper:
 
     async def get_media_play_url(self, file_id: str) -> Optional[str]:
         """
-        获取媒体播放直链（对齐 cloud189-auto-save：视频接口 + 302 Location）。
+        获取媒体播放直链（对齐 cloud189-auto-save：短缓存 + 并发合并 + 视频接口 + 302 Location）。
         """
         fid_text = str(file_id or "").strip()
         if not fid_text:
             return None
 
+        now_ts = time.time()
+        cached = self._play_url_cache.get(fid_text)
+        if cached and cached[0] > now_ts and cached[1]:
+            return cached[1]
+
+        pending = self._play_url_inflight.get(fid_text)
+        if pending:
+            return await pending
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_task(self._resolve_media_play_url(fid_text))
+        self._play_url_inflight[fid_text] = fut
+        try:
+            resolved = await fut
+            if resolved:
+                self._play_url_cache[fid_text] = (time.time() + self._play_url_cache_ttl, resolved)
+            return resolved
+        finally:
+            self._play_url_inflight.pop(fid_text, None)
+
+    async def _resolve_media_play_url(self, fid_text: str) -> Optional[str]:
         try:
             payload = {
                 "fileId": fid_text,
@@ -1015,11 +1040,7 @@ class P189ClientWrapper:
                     logger.info(f"【P189Client】获取播放直链成功(视频接口) fileId={fid_text}")
                     return str(location).strip()
 
-                if 200 <= int(r.status_code) < 300:
-                    logger.info(f"【P189Client】视频接口未跳转，返回原始 URL fileId={fid_text}")
-                    return str(portal_url).strip()
-
-                logger.error(f"【P189Client】视频接口解析直链失败: fileId={fid_text}, status={r.status_code}")
+                logger.error(f"【P189Client】视频接口响应未包含 Location: fileId={fid_text}, status={r.status_code}")
                 return None
         except Exception as e:
             logger.error(f"【P189Client】获取播放直链异常: fileId={fid_text}, error={e}")
