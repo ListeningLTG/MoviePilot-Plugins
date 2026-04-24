@@ -957,7 +957,7 @@ class P189ClientWrapper:
 
     async def get_download_url(self, file_id: str) -> Optional[str]:
         """
-        获取文件下载直链（仅通用下载接口）。
+        获取文件下载直链（通用下载接口，供 CAS 文件内容读取使用）。
         """
         fid_text = str(file_id or "").strip()
         if not fid_text:
@@ -973,6 +973,56 @@ class P189ClientWrapper:
             return None
         except Exception as e:
             logger.error(f"【P189Client】通用下载接口获取异常: fileId={fid_text}, error={e}")
+            return None
+
+    async def get_media_play_url(self, file_id: str) -> Optional[str]:
+        """
+        获取媒体播放直链（对齐 cloud189-auto-save：视频接口 + 302 Location）。
+        """
+        fid_text = str(file_id or "").strip()
+        if not fid_text:
+            return None
+
+        try:
+            payload = {
+                "fileId": fid_text,
+                "type": 2,
+                "dt": 1,
+            }
+            resp = await self._protected_client_call("download_url_video_portal", payload, async_=True)
+            check_response(resp)
+
+            normal = (resp or {}).get("normal") if isinstance(resp, dict) else None
+            code = (normal or {}).get("code") if isinstance(normal, dict) else None
+            if str(code) not in ("1",):
+                msg = (normal or {}).get("message") if isinstance(normal, dict) else None
+                logger.error(f"【P189Client】视频播放接口返回异常: fileId={fid_text}, code={code}, msg={msg}, resp={resp}")
+                return None
+
+            portal_url = (normal or {}).get("url") if isinstance(normal, dict) else None
+            if not portal_url:
+                logger.error(f"【P189Client】视频播放接口未返回 URL: fileId={fid_text}, resp={resp}")
+                return None
+
+            import httpx
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+            }
+            async with httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as client:
+                r = await client.get(str(portal_url))
+                location = r.headers.get("location") or r.headers.get("Location")
+                if location:
+                    logger.info(f"【P189Client】获取播放直链成功(视频接口) fileId={fid_text}")
+                    return str(location).strip()
+
+                if 200 <= int(r.status_code) < 300:
+                    logger.info(f"【P189Client】视频接口未跳转，返回原始 URL fileId={fid_text}")
+                    return str(portal_url).strip()
+
+                logger.error(f"【P189Client】视频接口解析直链失败: fileId={fid_text}, status={r.status_code}")
+                return None
+        except Exception as e:
+            logger.error(f"【P189Client】获取播放直链异常: fileId={fid_text}, error={e}")
             return None
 
     async def rapid_upload(self, parent_id: str, filename: str, size: int, md5: str, slice_md5: str) -> bool:

@@ -69,7 +69,7 @@ async def cas_redirect(c: str = Query(..., description="Base64 encoded CAS info"
             if fid in tried:
                 continue
             tried.add(fid)
-            download_url = await client.get_download_url(fid)
+            download_url = await client.get_media_play_url(fid)
             if download_url:
                 logger.info(f"【P189Cas2Strm】复用 fileId 获取下载链接成功 fileId={fid}")
                 break
@@ -80,7 +80,7 @@ async def cas_redirect(c: str = Query(..., description="Base64 encoded CAS info"
                 # 再查一次，避免并发请求重复秒传
                 latest_file_id = cas_record_manager.get(str(md5))
                 if latest_file_id and str(latest_file_id) not in tried:
-                    download_url = await client.get_download_url(str(latest_file_id))
+                    download_url = await client.get_media_play_url(str(latest_file_id))
                     if download_url:
                         logger.info(f"【P189Cas2Strm】并发复用成功 fileId={latest_file_id} md5={md5}")
 
@@ -117,7 +117,7 @@ async def cas_redirect(c: str = Query(..., description="Base64 encoded CAS info"
                         list_file_id = str(list_file_id)
                         cas_record_manager.add(str(md5), list_file_id)
                         if list_file_id not in tried:
-                            download_url = await client.get_download_url(list_file_id)
+                            download_url = await client.get_media_play_url(list_file_id)
 
         if not download_url:
             logger.error(f"【P189Cas2Strm】获取下载链接失败，candidate_file_ids={candidate_ids}")
