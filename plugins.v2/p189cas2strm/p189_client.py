@@ -957,47 +957,22 @@ class P189ClientWrapper:
 
     async def get_download_url(self, file_id: str) -> Optional[str]:
         """
-        获取直链链接。
-        逻辑完全对齐 MediaHelp 项目。
+        获取文件下载直链（仅通用下载接口）。
         """
         fid_text = str(file_id or "").strip()
         if not fid_text:
             return None
 
+        payload = {"fileId": fid_text}
         try:
-            payload = {
-                "fileId": fid_text,
-                "type": 2,
-                "dt": 1
-            }
-            resp = await self._protected_client_call("download_url_video_portal", payload, async_=True)
-            
-            url = None
-            if isinstance(resp, dict):
-                normal = resp.get("normal", {})
-                url = normal.get("url")
-
-            if not url:
-                logger.error(f"【P189Client】获取初始链接失败: {resp}")
-                return None
-
-            import httpx
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
-            }
-            # 严格对齐 MediaHelp：解析 302 时不携带任何 Cookie 和 Referer，以获取公开 OSS 链接
-            async with httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as client:
-                res = await client.get(url)
-                location = res.headers.get("location") or res.headers.get("Location")
-                if location:
-                    logger.info(f"【P189Client】获取下载链接成功 fileId={fid_text}")
-                    return location.strip()
-                
-                logger.error(f"【P189Client】302 响应未包含 Location (Status: {res.status_code})")
-                return None
-
+            direct_url = await self._protected_client_call("download_url", payload, async_=True)
+            if isinstance(direct_url, str) and direct_url.strip():
+                logger.info(f"【P189Client】获取下载链接成功(通用接口) fileId={fid_text}")
+                return direct_url.strip()
+            logger.error(f"【P189Client】通用下载接口返回空链接: fileId={fid_text}, resp={direct_url}")
+            return None
         except Exception as e:
-            logger.error(f"【P189Client】获取下载链接异常: fileId={fid_text}, error={e}")
+            logger.error(f"【P189Client】通用下载接口获取异常: fileId={fid_text}, error={e}")
             return None
 
     async def rapid_upload(self, parent_id: str, filename: str, size: int, md5: str, slice_md5: str) -> bool:
