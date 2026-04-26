@@ -276,6 +276,12 @@ class ShareTaskQueue:
     def stop(self):
         self._running = False
         self._runner.stop()
+        try:
+            while True:
+                self._queue.get_nowait()
+                self._queue.task_done()
+        except Empty:
+            pass
 
     @property
     def processing_count(self):

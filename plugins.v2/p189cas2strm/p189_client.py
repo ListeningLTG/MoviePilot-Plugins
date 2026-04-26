@@ -100,8 +100,27 @@ class P189ClientWrapper:
         logger.info(f"【P189Client】正在尝试登录账号: {username}")
         errors: List[str] = []
 
+        async def _retry_on_closed_loop(coro_factory, stage: str, max_attempts: int = 2):
+            last_err = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return await coro_factory()
+                except RuntimeError as e:
+                    last_err = e
+                    if "Event loop is closed" not in str(e):
+                        raise
+                    if attempt >= max_attempts:
+                        raise
+                    logger.warning(f"【P189Client】{stage} 遇到已关闭事件循环，重试 attempt={attempt + 1}")
+                    await asyncio.sleep(0.3)
+            if last_err:
+                raise last_err
+
         try:
-            resp = await self.client.login(username, password, async_=True)
+            resp = await _retry_on_closed_loop(
+                lambda: self.client.login(username, password, async_=True),
+                "primary",
+            )
             self._cache_session_key_from_payload(resp)
             if isinstance(resp, dict) and resp.get("cookies"):
                 self.client.cookies = resp.get("cookies") or {}
@@ -114,7 +133,10 @@ class P189ClientWrapper:
             errors.append(f"primary:{type(e).__name__}:{e}")
 
         try:
-            resp = await P189Client.login_with_password2(username, password, async_=True)
+            resp = await _retry_on_closed_loop(
+                lambda: P189Client.login_with_password2(username, password, async_=True),
+                "fallback2",
+            )
             self._cache_session_key_from_payload(resp)
             if isinstance(resp, dict):
                 cookies = resp.get("cookies") or {}
@@ -131,7 +153,10 @@ class P189ClientWrapper:
             errors.append(f"fallback2:{type(e).__name__}:{e}")
 
         try:
-            resp = await P189APIClient.login_with_password(username, password, async_=True)
+            resp = await _retry_on_closed_loop(
+                lambda: P189APIClient.login_with_password(username, password, async_=True),
+                "fallback3",
+            )
             self._cache_session_key_from_payload(resp)
             if isinstance(resp, dict):
                 cookies = resp.get("cookies") or {}
@@ -160,14 +185,20 @@ class P189ClientWrapper:
 
             if to_url:
                 try:
-                    sess = await P189Client.login_session_pc(to_url, async_=True)
+                    sess = await _retry_on_closed_loop(
+                        lambda: P189Client.login_session_pc(to_url, async_=True),
+                        "fallback4_login_session_pc",
+                    )
                     self._cache_session_key_from_payload(sess)
                     if isinstance(sess, dict):
                         sess_cookies = sess.get("cookies") or {}
                         if sess_cookies:
                             self.client.cookies = sess_cookies
                         elif sess.get("sessionKey"):
-                            sso_resp = await P189Client.login_sso(sess.get("sessionKey"), async_=True)
+                            sso_resp = await _retry_on_closed_loop(
+                                lambda: P189Client.login_sso(sess.get("sessionKey"), async_=True),
+                                "fallback4_login_sso",
+                            )
                             self._cache_session_key_from_payload(sso_resp)
                             if isinstance(sso_resp, dict) and sso_resp.get("cookies"):
                                 self.client.cookies = sso_resp.get("cookies") or {}
