@@ -24,7 +24,7 @@ class subscribeairstime(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/subscribe_reminder.png"
     # 插件版本
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -94,24 +94,45 @@ class subscribeairstime(_PluginBase):
 
         return self._country_timezone_map.get(str(country).strip().lower())
 
-    def __convert_airs_time(self, airs_time: str, air_date: str, tvdb_data: dict) -> str:
+    def __convert_to_local_datetime(self, airs_time: str, air_date: str, tvdb_data: dict) -> Optional[datetime]:
         if not airs_time or not air_date or not tvdb_data:
-            return airs_time
+            return None
 
         source_timezone = self.__get_source_timezone(tvdb_data)
         if not source_timezone:
-            return airs_time
+            return None
 
         try:
             source_tz = pytz.timezone(source_timezone)
             target_tz = pytz.timezone(settings.TZ)
             local_time = datetime.strptime(f"{air_date} {airs_time}", "%Y-%m-%d %H:%M")
             localized_time = source_tz.localize(local_time)
-            converted_time = localized_time.astimezone(target_tz)
-            return converted_time.strftime("%H:%M")
+            return localized_time.astimezone(target_tz)
         except Exception as err:
-            logger.warning(f"转换TVDB播出时间失败 ({airs_time}, {source_timezone}): {err}")
-            return airs_time
+            logger.warning(f"转换TVDB播出时间失败 ({air_date} {airs_time}, {source_timezone}): {err}")
+            return None
+
+    def __convert_airs_time(self, airs_time: str, air_date: str, tvdb_data: dict) -> str:
+        converted_time = self.__convert_to_local_datetime(airs_time=airs_time, air_date=air_date, tvdb_data=tvdb_data)
+        if converted_time:
+            return converted_time.strftime("%H:%M")
+        return airs_time
+
+    def __is_episode_airing_today(self, episode_air_date: str, current_date: str,
+                                  airs_time: str, tvdb_data: dict) -> bool:
+        if not episode_air_date:
+            return False
+
+        if not airs_time or not tvdb_data:
+            return episode_air_date == current_date
+
+        converted_time = self.__convert_to_local_datetime(airs_time=airs_time,
+                                                          air_date=episode_air_date,
+                                                          tvdb_data=tvdb_data)
+        if not converted_time:
+            return episode_air_date == current_date
+
+        return converted_time.strftime("%Y-%m-%d") == current_date
 
     def init_plugin(self, config: dict = None):
         self.subscribe_oper = SubscribeOper()
@@ -203,31 +224,43 @@ class subscribeairstime(_PluginBase):
                     continue
 
                 episodes = []
-                # 遍历集，筛选当前日期发布的剧集
+                episode_air_dates = []
+                tvdb_data = None
+                tvdb_airs_time = ""
+
+                if subscribe.tvdbid:
+                    for i in range(3):
+                        try:
+                            tvdb_data = self.media.tvdb_info(tvdbid=subscribe.tvdbid)
+                            if tvdb_data:
+                                tvdb_airs_time = tvdb_data.get("airsTime") or ""
+                            break
+                        except Exception as e:
+                            if i < 2:
+                                logger.warning(f"获取TVDB播出时间失败 ({subscribe.name})，10秒后重试 ({i + 1}/3): {e}")
+                                time.sleep(10)
+                                continue
+                            logger.warning(f"获取TVDB播出时间失败 ({subscribe.name}): {e}")
+
+                # 遍历集，筛选换算到系统时区后当前日期发布的剧集
                 for episode in episodes_info:
-                    if episode and episode.air_date and str(episode.air_date) == current_date:
+                    if not episode or not episode.air_date:
+                        continue
+                    if self.__is_episode_airing_today(episode_air_date=str(episode.air_date),
+                                                      current_date=current_date,
+                                                      airs_time=tvdb_airs_time,
+                                                      tvdb_data=tvdb_data):
                         episodes.append(episode.episode_number)
+                        episode_air_dates.append(str(episode.air_date))
 
                 if episodes:
-                    # 尝试从 TVDB 获取系列级播出时间，并转换到系统时区
                     airs_time = ""
-                    if subscribe.tvdbid:
-                        for i in range(3):
-                            try:
-                                tvdb_data = self.media.tvdb_info(tvdbid=subscribe.tvdbid)
-                                if tvdb_data:
-                                    airs_time = self.__convert_airs_time(
-                                        airs_time=tvdb_data.get("airsTime") or "",
-                                        air_date=current_date,
-                                        tvdb_data=tvdb_data
-                                    )
-                                break
-                            except Exception as e:
-                                if i < 2:
-                                    logger.warning(f"获取TVDB播出时间失败 ({subscribe.name})，10秒后重试 ({i + 1}/3): {e}")
-                                    time.sleep(10)
-                                    continue
-                                logger.warning(f"获取TVDB播出时间失败 ({subscribe.name}): {e}")
+                    if tvdb_airs_time and tvdb_data:
+                        airs_time = self.__convert_airs_time(
+                            airs_time=tvdb_airs_time,
+                            air_date=episode_air_dates[0],
+                            tvdb_data=tvdb_data
+                        )
                     current_tv_subscribe.append({
                         'name': f"{subscribe.name} ({subscribe.year})",
                         'season': f"S{str(subscribe.season).rjust(2, '0')}",
