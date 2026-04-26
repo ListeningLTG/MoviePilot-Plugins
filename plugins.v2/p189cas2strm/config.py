@@ -34,6 +34,8 @@ class ConfigManager(BaseModel):
     bulk_save_enabled: bool = Field(default=False, description="是否启用整目录批量转存")
     max_concurrency: int = Field(default=2, description="CAS 并发处理数")
     moviepilot_address_custom: Optional[str] = Field(default=None, description="MoviePilot 地址 (手动配置优先)")
+    play_proxy_enabled: bool = Field(default=False, description="是否启用直链代理加速")
+    play_proxy_prefix: str = Field(default="", description="直链代理地址前缀")
     
     @property
     def plugin_data_path(self) -> str:

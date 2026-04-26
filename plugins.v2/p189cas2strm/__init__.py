@@ -21,7 +21,7 @@ class p189cas2strm(_PluginBase):
     plugin_name = "cas生成strm"
     plugin_desc = "将含有cas文件的天翼云盘分享链接生成STRM，支持播放时自动秒传"
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/p189.png"
-    plugin_version = "1.0.6.7"
+    plugin_version = "1.0.6.8"
     plugin_author = "ListeningLTG"
     author_url = "https://github.com/ListeningLTG"
     plugin_config_prefix = "p189cas2strm_"
@@ -176,6 +176,39 @@ class p189cas2strm(_PluginBase):
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "play_proxy_enabled",
+                                            "label": "直链代理加速",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "play_proxy_prefix",
+                                            "label": "加速地址前缀",
+                                            "hint": "填写后系统会将直链编码为 ?url=... 并跳转到该地址（例如 https://cdn.example.com/proxy）",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
                                         "component": "VTextField",
                                         "props": {
                                             "model": "cleanup_cron",
@@ -202,6 +235,8 @@ class p189cas2strm(_PluginBase):
             "bulk_save_enabled": False,
             "max_concurrency": 2,
             "moviepilot_address_custom": "",
+            "play_proxy_enabled": False,
+            "play_proxy_prefix": "",
         }
 
     def init_plugin(self, config: dict = None):

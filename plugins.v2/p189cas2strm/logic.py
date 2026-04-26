@@ -3,6 +3,7 @@ import os
 import re
 import base64
 import asyncio
+from urllib.parse import quote
 from typing import Dict, Any, List, Optional, Callable, Tuple
 from time import time as now_time, sleep
 from threading import Thread, Lock, Event
@@ -123,8 +124,17 @@ async def cas_redirect(c: str = Query(..., description="Base64 encoded CAS info"
             logger.error(f"【P189Cas2Strm】获取下载链接失败，candidate_file_ids={candidate_ids}")
             return Response(content="Failed to get download URL", status_code=500)
 
-        logger.info(f"【P189Cas2Strm】重定向成功 -> {download_url[:50]}...")
-        return RedirectResponse(url=download_url)
+        redirect_url = download_url
+        if getattr(configer, "play_proxy_enabled", False):
+            proxy_prefix = str(getattr(configer, "play_proxy_prefix", "") or "").strip()
+            if proxy_prefix:
+                if not proxy_prefix.startswith("http://") and not proxy_prefix.startswith("https://"):
+                    proxy_prefix = f"https://{proxy_prefix}"
+                connector = "&" if "?" in proxy_prefix else "?"
+                redirect_url = f"{proxy_prefix}{connector}url={quote(download_url, safe='')}"
+
+        logger.info(f"【P189Cas2Strm】重定向成功 -> {redirect_url[:50]}...")
+        return RedirectResponse(url=redirect_url)
     except Exception as e:
         logger.error(f"【P189Cas2Strm】重定向接口全局异常: {e}", exc_info=True)
         return Response(content=str(e), status_code=500)
