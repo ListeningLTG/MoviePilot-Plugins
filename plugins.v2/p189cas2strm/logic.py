@@ -130,8 +130,18 @@ async def cas_redirect(c: str = Query(..., description="Base64 encoded CAS info"
             if proxy_prefix:
                 if not proxy_prefix.startswith("http://") and not proxy_prefix.startswith("https://"):
                     proxy_prefix = f"https://{proxy_prefix}"
-                connector = "&" if "?" in proxy_prefix else "?"
-                redirect_url = f"{proxy_prefix}{connector}url={quote(download_url, safe='')}"
+
+                encoded_url = quote(download_url, safe="")
+                if "{url}" in proxy_prefix:
+                    redirect_url = proxy_prefix.replace("{url}", encoded_url)
+                elif "?url=" in proxy_prefix or "&url=" in proxy_prefix:
+                    redirect_url = f"{proxy_prefix}{encoded_url}"
+                elif proxy_prefix.endswith("/") and "?" not in proxy_prefix:
+                    # 兼容 Worker 路径模式: https://worker.domain/<source_url>
+                    redirect_url = f"{proxy_prefix}{download_url}"
+                else:
+                    connector = "&" if "?" in proxy_prefix else "?"
+                    redirect_url = f"{proxy_prefix}{connector}url={encoded_url}"
 
         logger.info(f"【P189Cas2Strm】重定向成功 -> {redirect_url[:50]}...")
         return RedirectResponse(url=redirect_url)
