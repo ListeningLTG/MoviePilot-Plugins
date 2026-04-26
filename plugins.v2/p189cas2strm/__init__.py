@@ -21,7 +21,7 @@ class p189cas2strm(_PluginBase):
     plugin_name = "cas生成strm"
     plugin_desc = "将含有cas文件的天翼云盘分享链接生成STRM，支持播放时自动秒传"
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/p189.png"
-    plugin_version = "1.0.6.6"
+    plugin_version = "1.0.6.7"
     plugin_author = "ListeningLTG"
     author_url = "https://github.com/ListeningLTG"
     plugin_config_prefix = "p189cas2strm_"
@@ -471,17 +471,7 @@ class p189cas2strm(_PluginBase):
         """
         辅助方法：在同步上下文调度异步协程。
         """
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            loop.create_task(coro)
-            return
-
-        asyncio.run(coro)
+        task_queue.run_async(coro)
 
     def stop_service(self):
         """

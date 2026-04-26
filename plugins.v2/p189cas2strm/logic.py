@@ -5,7 +5,7 @@ import base64
 import asyncio
 from typing import Dict, Any, List, Optional, Callable, Tuple
 from time import time as now_time, sleep
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 from queue import Queue, Empty
 from pathlib import Path
 
@@ -164,6 +164,67 @@ class CasRecordManager:
         self.records = {}
         self.save()
 
+class AsyncRunner:
+    """独立常驻事件循环运行器。"""
+
+    def __init__(self):
+        self._thread: Optional[Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._ready = Event()
+        self._lock = Lock()
+
+    def start(self):
+        with self._lock:
+            if self._thread and self._thread.is_alive() and self._loop and not self._loop.is_closed():
+                return
+
+            self._ready.clear()
+
+            def _run_loop():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self._loop = loop
+                self._ready.set()
+                try:
+                    loop.run_forever()
+                finally:
+                    pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                    for t in pending:
+                        t.cancel()
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    loop.close()
+
+            self._thread = Thread(target=_run_loop, daemon=True, name="p189cas2strm-async-runner")
+            self._thread.start()
+
+        if not self._ready.wait(timeout=3):
+            raise RuntimeError("async runner start timeout")
+
+    def submit(self, coro, timeout: Optional[float] = None):
+        self.start()
+        loop = self._loop
+        if not loop or loop.is_closed():
+            raise RuntimeError("async runner loop unavailable")
+
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        if timeout is None:
+            return fut.result()
+        return fut.result(timeout=timeout)
+
+    def stop(self):
+        with self._lock:
+            loop = self._loop
+            thread = self._thread
+            self._loop = None
+            self._thread = None
+
+        if loop and not loop.is_closed():
+            loop.call_soon_threadsafe(loop.stop)
+        if thread and thread.is_alive():
+            thread.join(timeout=3)
+
+
 # --- 任务队列类 (Thread 增强版) ---
 class ShareTaskQueue:
     _DEDUP_WINDOW = 60
@@ -177,6 +238,7 @@ class ShareTaskQueue:
         self._notify_callback = None
         self._recent_tasks = {}
         self._task_file = os.path.join(configer.plugin_data_path, "tasks.json")
+        self._runner = AsyncRunner()
 
     def set_notify_callback(self, callback: Callable):
         self._notify_callback = callback
@@ -185,13 +247,15 @@ class ShareTaskQueue:
         with self._lock:
             if not self._running:
                 self._running = True
+                self._runner.start()
                 self._worker_thread = Thread(target=self._worker, daemon=True)
                 self._worker_thread.start()
-                logger.info("【P189Cas2Strm】任务队列工作线程已启动 (Thread 模式)")
+                logger.info("【P189Cas2Strm】任务队列工作线程已启动 (Thread + AsyncRunner 模式)")
                 self._load_pending_tasks()
 
     def stop(self):
         self._running = False
+        self._runner.stop()
 
     @property
     def processing_count(self):
@@ -212,6 +276,9 @@ class ShareTaskQueue:
         logger.info(f"【P189Cas2Strm】任务已压入队列: {share_code}，当前排队数: {self._queue.qsize()}")
         return True
 
+    def run_async(self, coro, timeout: Optional[float] = None):
+        return self._runner.submit(coro, timeout=timeout)
+
     def _worker(self):
         while self._running:
             try:
@@ -222,8 +289,8 @@ class ShareTaskQueue:
                 self._notify(user_id, "【189分享STRM】", f"🚀 开始处理分享: {share_code}")
                 
                 try:
-                    # 在线程中运行异步逻辑
-                    res = asyncio.run(process_share_cas(share_code, access_code, arg_str))
+                    # 在线程中运行异步逻辑（统一调度到常驻事件循环）
+                    res = self._runner.submit(process_share_cas(share_code, access_code, arg_str))
                     if res.get("status"):
                         self._notify(user_id, "【189分享STRM】完成", f"✅ 处理完成，生成 {res.get('count')} 个 STRM")
                     else:
