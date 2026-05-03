@@ -47,6 +47,10 @@ class ConfigManager(BaseModel):
         default="srt,ass,ssa",
         description="字幕文件后缀",
     )
+    wait_organize_timeout: int = Field(
+        default=120,
+        description="STRM 整理等待超时时间（秒），若队列任务过多建议调低"
+    )
 
     @property
     def moviepilot_address(self) -> str:

@@ -826,10 +826,13 @@ def process_share_strm(
                     logger.warning(f"【P115ShareStrm】STRM 整理入队失败: {strm_file_path.name}: {e}")
             logger.info("【P115ShareStrm】STRM 已全部入队，等待整理完成...")
 
-            # 2. 轮询等待所有 STRM 整理完成，超时时间 10 分钟
+            # 2. 轮询等待所有 STRM 整理完成
+            # 优化：只有在需要下载并放置字幕，且本次分享确实包含字幕文件时，才需要等待以获取目标路径
+            need_wait = configer.download_subtitle and subtitle_files
+            
             pending = set(strm_file_path.as_posix() for strm_file_path in generated_strm_paths)
             
-            # 优化：在开始等待前先清理已经存在的记录（针对“已整理过”的文件）
+            # 即使不需要等待放置字幕，也可以先通过预扫描清理掉已经整理过的记录（保持状态准确）
             for src in list(pending):
                 history = _th_oper.get_by_src(src, "local")
                 if history and history.dest:
@@ -837,30 +840,47 @@ def process_share_strm(
                     pending.remove(src)
             
             if pending:
-                logger.info(f"【P115ShareStrm】剩余 {len(pending)} 个文件等待整理...")
-                timeout = 600
-                interval = 2
-                waited = 0
-                while pending and waited < timeout:
-                    finished = set()
-                    for src in pending:
-                        history = _th_oper.get_by_src(src, "local")
-                        if history and history.dest:
-                            strm_source_to_target[src] = Path(history.dest)
-                            finished.add(src)
-                    
-                    if finished:
-                        logger.info(f"【P115ShareStrm】整理完成新进度: {len(finished)} 个")
-                        pending -= finished
+                if need_wait:
+                    # 动态调整超时时间：如果队列积压严重，缩短等待时间
+                    qsize = task_queue.get_queue_size()
+                    base_timeout = configer.wait_organize_timeout
+                    if qsize > 50:
+                        timeout = min(base_timeout, 30)
+                    elif qsize > 20:
+                        timeout = min(base_timeout, 60)
+                    elif qsize > 10:
+                        timeout = min(base_timeout, 120)
+                    else:
+                        timeout = base_timeout
+
+                    logger.info(f"【P115ShareStrm】剩余 {len(pending)} 个文件等待整理 (积压: {qsize}，超时: {timeout}s)...")
+                    interval = 2
+                    waited = 0
+                    while pending and waited < timeout:
+                        finished = set()
+                        for src in pending:
+                            history = _th_oper.get_by_src(src, "local")
+                            if history and history.dest:
+                                strm_source_to_target[src] = Path(history.dest)
+                                finished.add(src)
+                        
+                        if finished:
+                            logger.info(f"【P115ShareStrm】整理完成新进度: {len(finished)} 个")
+                            pending -= finished
+                        
+                        if pending:
+                            sleep(interval)
+                            waited += interval
                     
                     if pending:
-                        sleep(interval)
-                        waited += interval
-                
-                if pending:
-                    logger.warning(f"【P115ShareStrm】部分 STRM 整理超时未完成（可能路径映射不匹配）: {pending}")
+                        if waited >= timeout:
+                            logger.warning(f"【P115ShareStrm】STRM 整理等待超时 ({timeout}s)，跳过后续等待（STRM 将在后台继续整理，但字幕可能无法自动归位）: {pending}")
+                        else:
+                            logger.warning(f"【P115ShareStrm】部分 STRM 整理异常未完成: {pending}")
+                    else:
+                        logger.info("【P115ShareStrm】STRM 批量整理全部完成")
                 else:
-                    logger.info("【P115ShareStrm】STRM 批量整理全部完成")
+                    logger.info("【P115ShareStrm】无需放置字幕，跳过整理等待")
             else:
                 logger.info("【P115ShareStrm】所有文件均已整理过，无需等待")
 
@@ -1115,6 +1135,10 @@ class ShareTaskQueue:
             ))
             logger.info(f"【P115ShareStrm】已恢复任务: {share_code} (重试次数: {t.get('retry_count', 0)})")
 
+    def get_queue_size(self) -> int:
+        """返回当前队列待处理任务数"""
+        return self._queue.qsize()
+
     # ── 工作线程 ──────────────────────────────────────────────
 
     def _worker(self):
@@ -1123,8 +1147,11 @@ class ShareTaskQueue:
                 task = self._queue.get(timeout=10)
                 task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str = task
 
-                # 稍作等待，确保"已入队"通知先到达用户
-                sleep(0.8)
+                # 稍作等待，确保"已入队"通知先到达用户（积压时减小延迟）
+                if self._queue.qsize() > 10:
+                    sleep(0.2)
+                else:
+                    sleep(0.8)
                 self._processing_count += 1
                 self._notify(user_id, "【115分享STRM】", f"🚀 开始处理分享: {share_code}")
 
@@ -1176,7 +1203,13 @@ class ShareTaskQueue:
 
                 self._queue.task_done()
                 self._processing_count = max(0, self._processing_count - 1)
-                sleep(2)
+                
+                # 动态调整任务间隔：积压时加快速度
+                qsize = self._queue.qsize()
+                if qsize > 10:
+                    sleep(0.5)
+                else:
+                    sleep(2)
 
             except Empty:
                 continue
