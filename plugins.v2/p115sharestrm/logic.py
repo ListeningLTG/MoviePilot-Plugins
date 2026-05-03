@@ -818,26 +818,41 @@ def process_share_strm(
 
             # 2. 轮询等待所有 STRM 整理完成，超时时间 10 分钟
             pending = set(strm_file_path.as_posix() for strm_file_path in generated_strm_paths)
-            timeout = 600
-            interval = 2
-            waited = 0
-            while pending and waited < timeout:
-                finished = set()
-                for src in pending:
-                    history = _th_oper.get_by_src(src, "local")
-                    if history and history.dest:
-                        strm_source_to_target[src] = Path(history.dest)
-                        finished.add(src)
-                if finished:
-                    logger.info(f"【P115ShareStrm】已完成 {len(finished)} 个 STRM 整理")
-                pending -= finished
-                if pending:
-                    sleep(interval)
-                    waited += interval
+            
+            # 优化：在开始等待前先清理已经存在的记录（针对“已整理过”的文件）
+            for src in list(pending):
+                history = _th_oper.get_by_src(src, "local")
+                if history and history.dest:
+                    strm_source_to_target[src] = Path(history.dest)
+                    pending.remove(src)
+            
             if pending:
-                logger.warning(f"【P115ShareStrm】部分 STRM 整理超时未完成: {pending}")
+                logger.info(f"【P115ShareStrm】剩余 {len(pending)} 个文件等待整理...")
+                timeout = 600
+                interval = 2
+                waited = 0
+                while pending and waited < timeout:
+                    finished = set()
+                    for src in pending:
+                        history = _th_oper.get_by_src(src, "local")
+                        if history and history.dest:
+                            strm_source_to_target[src] = Path(history.dest)
+                            finished.add(src)
+                    
+                    if finished:
+                        logger.info(f"【P115ShareStrm】整理完成新进度: {len(finished)} 个")
+                        pending -= finished
+                    
+                    if pending:
+                        sleep(interval)
+                        waited += interval
+                
+                if pending:
+                    logger.warning(f"【P115ShareStrm】部分 STRM 整理超时未完成（可能路径映射不匹配）: {pending}")
+                else:
+                    logger.info("【P115ShareStrm】STRM 批量整理全部完成")
             else:
-                logger.info("【P115ShareStrm】STRM 批量整理完成")
+                logger.info("【P115ShareStrm】所有文件均已整理过，无需等待")
 
             # 3. 构建 媒体 stem → STRM 整理目标路径 映射，供字幕放置使用
             for stem, strm_path in media_stem_to_strm_path.items():
@@ -909,7 +924,9 @@ class ShareTaskQueue:
         self._running = False
         self._processing_count: int = 0  # 当前正在处理中的任务数
         self._notify_callback: Optional[Callable[[Optional[str], str, str], None]] = None
-        # 去重缓存：{share_code: 最后入队时间戳}
+        # 正在队列中等待或处理的分享码（全量去重）
+        self._pending_codes: Set[str] = set()
+        # 去重缓存：{share_code: 最后入队时间戳}，用于短期防抖
         self._recent_tasks: Dict[str, float] = {}
         # 持久化文件路径，在 start() 中通过 settings 初始化
         self._persist_path: Optional[Path] = None
@@ -1033,19 +1050,27 @@ class ShareTaskQueue:
         task_id = _task_id or str(uuid4())
 
         with self._lock:
+            # 1. 全量去重：如果已经在队列中，直接忽略
+            if share_code in self._pending_codes:
+                logger.warning(f"【P115ShareStrm】任务已在队列中，忽略重复入队: {share_code}")
+                return False
+
+            # 2. 短期防抖：同一 share_code 在 _DEDUP_WINDOW 秒内重复入队时忽略
             if not _skip_dedup:
                 last_time = self._recent_tasks.get(share_code)
                 if last_time is not None and now - last_time < self._DEDUP_WINDOW:
                     logger.warning(
-                        f"【P115ShareStrm】重复任务已忽略（去重窗口 {self._DEDUP_WINDOW}s）: {share_code}"
+                        f"【P115ShareStrm】触发防抖限制（窗口 {self._DEDUP_WINDOW}s），忽略: {share_code}"
                     )
                     return False
                 self._recent_tasks[share_code] = now
                 # 新任务才写持久化，恢复任务已在文件中
                 self._persist_add(task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str)
 
+            self._pending_codes.add(share_code)
+
         self._queue.put((task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str))
-        logger.info(f"【P115ShareStrm】新任务已入队: {share_code} (id={task_id})")
+        logger.info(f"【P115ShareStrm】新任务已入队: {share_code} (id={task_id})，当前队列待处理: {self._queue.qsize()}")
         return True
 
     def _restore_persisted_tasks(self) -> None:
@@ -1055,22 +1080,27 @@ class ShareTaskQueue:
             return
         logger.info(f"【P115ShareStrm】从持久化文件恢复 {len(tasks)} 个待处理任务")
         for t in tasks:
+            share_code = t.get("share_code")
             if t.get("retry_count", 0) >= self._MAX_RETRY:
                 logger.warning(
-                    f"【P115ShareStrm】任务已达最大重试次数，跳过: {t.get('share_code')} (id={t.get('task_id')})"
+                    f"【P115ShareStrm】任务已达最大重试次数，跳过: {share_code} (id={t.get('task_id')})"
                 )
                 self._persist_remove(t["task_id"])
                 continue
+            
+            with self._lock:
+                self._pending_codes.add(share_code)
+                
             self._queue.put((
                 t["task_id"],
-                t["share_code"],
+                share_code,
                 t["receive_code"],
                 t.get("user_id"),
                 t.get("tmdbid"),
                 t.get("mtype"),
                 t.get("arg_str"),
             ))
-            logger.info(f"【P115ShareStrm】已恢复任务: {t['share_code']} (重试次数: {t.get('retry_count', 0)})")
+            logger.info(f"【P115ShareStrm】已恢复任务: {share_code} (重试次数: {t.get('retry_count', 0)})")
 
     # ── 工作线程 ──────────────────────────────────────────────
 
@@ -1118,6 +1148,9 @@ class ShareTaskQueue:
                             "【115分享STRM】失败",
                             f"❌ {share_code}\n原因: {result.get('msg')}\n将在重启后自动重试 (第 {retry_count}/{self._MAX_RETRY} 次)",
                         )
+
+                with self._lock:
+                    self._pending_codes.discard(share_code)
 
                 self._queue.task_done()
                 self._processing_count = max(0, self._processing_count - 1)
