@@ -21,7 +21,14 @@ from .config import configer
 from .utils import StrmUrlTemplateResolver
 
 
+
+class ShareLinkExpiredError(Exception):
+    """分享链接已失效或被拒绝"""
+    pass
+
+
 class ShareP115Client(P115Client):
+
     """
     分享专用 115 客户端，扩展 share/snap 接口
     """
@@ -73,6 +80,9 @@ class _EndpointPool:
                     return data.get("list", [])
                 except Exception as e:
                     last_exc = e
+                    # 4100009: 链接已失效 / 分享已拒绝，属于不可恢复错误，直接终止重试
+                    if "4100009" in str(e):
+                        raise ShareLinkExpiredError(f"分享链接已失效 ({e})") from e
                     logger.warning(
                         f"【P115ShareStrm】端点 [{ep_name}] 失败，切换到下一个: {e}"
                     )
@@ -901,6 +911,9 @@ def process_share_strm(
             "subtitle_fail_count": subtitle_fail_count,
         }
 
+    except ShareLinkExpiredError as e:
+        logger.warning(f"【P115ShareStrm】分享链接已失效: {share_code}")
+        return {"status": False, "msg": str(e), "terminal": True}
     except Exception as e:
         logger.error(f"【P115ShareStrm】逻辑执行异常: {e}", exc_info=True)
         return {"status": False, "msg": str(e)}
@@ -1131,23 +1144,32 @@ class ShareTaskQueue:
                     # 成功：从持久化文件移除
                     self._persist_remove(task_id)
                 else:
-                    retry_count = self._persist_increment_retry(task_id)
-                    if retry_count >= self._MAX_RETRY:
-                        logger.error(
-                            f"【P115ShareStrm】任务失败且已达最大重试次数 ({self._MAX_RETRY})，放弃: {share_code}"
-                        )
+                    if result.get("terminal"):
+                        logger.warning(f"【P115ShareStrm】任务遇到不可恢复错误，放弃: {share_code}")
                         self._persist_remove(task_id)
                         self._notify(
                             user_id,
                             "【115分享STRM】放弃",
-                            f"❌ {share_code}\n已重试 {self._MAX_RETRY} 次，放弃处理\n原因: {result.get('msg')}",
+                            f"❌ {share_code}\n原因: {result.get('msg')}",
                         )
                     else:
-                        self._notify(
-                            user_id,
-                            "【115分享STRM】失败",
-                            f"❌ {share_code}\n原因: {result.get('msg')}\n将在重启后自动重试 (第 {retry_count}/{self._MAX_RETRY} 次)",
-                        )
+                        retry_count = self._persist_increment_retry(task_id)
+                        if retry_count >= self._MAX_RETRY:
+                            logger.error(
+                                f"【P115ShareStrm】任务失败且已达最大重试次数 ({self._MAX_RETRY})，放弃: {share_code}"
+                            )
+                            self._persist_remove(task_id)
+                            self._notify(
+                                user_id,
+                                "【115分享STRM】放弃",
+                                f"❌ {share_code}\n已重试 {self._MAX_RETRY} 次，放弃处理\n原因: {result.get('msg')}",
+                            )
+                        else:
+                            self._notify(
+                                user_id,
+                                "【115分享STRM】失败",
+                                f"❌ {share_code}\n原因: {result.get('msg')}\n将在重启后自动重试 (第 {retry_count}/{self._MAX_RETRY} 次)",
+                            )
 
                 with self._lock:
                     self._pending_codes.discard(share_code)
