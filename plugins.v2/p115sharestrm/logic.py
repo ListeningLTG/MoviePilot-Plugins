@@ -580,6 +580,67 @@ def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
         return None
 
 
+def _resolve_mtype_by_imdb(imdbid: str, arg_str: str) -> Optional[Tuple[int, str]]:
+    """
+    通过 IMDB ID 查询 TMDB 信息，返回对应的 TMDB ID 和媒体类型。
+
+    使用 TMDB Find API 的 find_by_imdb_id 方法查询。
+
+    :param imdbid: IMDB ID，格式如 tt1234567
+    :param arg_str: 原始消息文本，用于辅助推断类型
+    :return: (tmdbid, mtype) 元组，其中 mtype 为 "tv" / "movie" / "collection"；失败时返回 None
+    """
+    import re
+    try:
+        from app.modules.themoviedb.tmdbapi import TmdbApi
+        from app.modules.themoviedb.tmdbv3api import Find
+
+        tmdb = TmdbApi()
+        find_api = Find()
+
+        # 通过 IMDB ID 查询
+        logger.info(f"【P115ShareStrm】正在通过 IMDB ID 查询 TMDB 信息: {imdbid}")
+        result = find_api.find_by_imdb_id(imdbid)
+
+        if not result:
+            logger.warning(f"【P115ShareStrm】IMDB ID {imdbid} 未查询到结果")
+            return None
+
+        # 解析返回结果，优先使用 movie_results，其次 tv_results
+        movie_results = result.get("movie_results", [])
+        tv_results = result.get("tv_results", [])
+        
+        # 判断返回的媒体类型
+        if movie_results and tv_results:
+            # 两种类型都有结果，通过关键词判断
+            clean_text = re.sub(r'https?://\S+', '', arg_str)
+            if re.search(r'电视剧|剧集|番剧|[美日韩台港英泰]剧|动漫|综艺|Season|S[0-9]+E[0-9]+|S[0-9]+|第[0-9]+[季集]', clean_text, re.I):
+                logger.info(f"【P115ShareStrm】IMDB ID 查询到电影和剧集，根据关键词判断为剧集")
+                tmdbid = tv_results[0].get("id")
+                mtype = "tv"
+            else:
+                logger.info(f"【P115ShareStrm】IMDB ID 查询到电影和剧集，默认优先使用电影")
+                tmdbid = movie_results[0].get("id")
+                mtype = "movie"
+        elif movie_results:
+            tmdbid = movie_results[0].get("id")
+            mtype = "movie"
+            logger.info(f"【P115ShareStrm】IMDB ID 查询到电影: TMDB ID={tmdbid}")
+        elif tv_results:
+            tmdbid = tv_results[0].get("id")
+            mtype = "tv"
+            logger.info(f"【P115ShareStrm】IMDB ID 查询到剧集: TMDB ID={tmdbid}")
+        else:
+            logger.warning(f"【P115ShareStrm】IMDB ID {imdbid} 未查询到有效的电影或剧集结果")
+            return None
+
+        return (tmdbid, mtype)
+
+    except Exception as e:
+        logger.error(f"【P115ShareStrm】通过 IMDB ID 查询失败: {e}", exc_info=True)
+        return None
+
+
 def process_share_strm(
     share_code: str,
     receive_code: str,

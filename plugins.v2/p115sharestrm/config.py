@@ -29,6 +29,7 @@ class ConfigManager(BaseModel):
     strm_save_path: str = Field(default="", description="STRM 保存路径")
     moviepilot_transfer: bool = Field(default=True, description="STRM 交由 MoviePilot 整理")
     tmdb_extract: bool = Field(default=False, description="从文本中自动提取 TMDB ID")
+    imdb_extract: bool = Field(default=False, description="从文本中自动提取 IMDB ID")
     moviepilot_address_custom: Optional[str] = Field(default=None, description="MoviePilot 地址 (手动配置优先)")
 
     strm_url_template_enabled: bool = Field(default=False, description="是否启用 STRM URL 自定义模板")

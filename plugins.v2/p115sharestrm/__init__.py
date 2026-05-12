@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.31"
+    plugin_version = "1.0.32"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -184,6 +184,21 @@ class p115sharestrm(_PluginBase):
                                                             "model": "tmdb_extract",
                                                             "label": "自动提取 TMDB ID",
                                                             "hint": "从指令文本中提取 TMDB ID，格式如 TMDB:123 或 TMDB ID: 123，传给 MP 整理时直接匹配媒体信息",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VSwitch",
+                                                        "props": {
+                                                            "model": "imdb_extract",
+                                                            "label": "自动提取 IMDB ID",
+                                                            "hint": "从指令文本中提取 IMDB ID，格式如 tt1234567 或 IMDB: tt1234567，两个开关同时开启时优先使用 TMDB ID",
                                                             "persistent-hint": True,
                                                         },
                                                     }
@@ -431,6 +446,7 @@ class p115sharestrm(_PluginBase):
             "moviepilot_transfer": True,
             "strm_url_template_enabled": False,
             "tmdb_extract": False,
+            "imdb_extract": False,
             "strm_url_template": "",
             "strm_url_template_custom": "",
             "user_rmt_mediaext": "mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v",
@@ -549,10 +565,13 @@ class p115sharestrm(_PluginBase):
 
         logger.info(f"【P115ShareStrm】收到指令，参数: {arg_str!r}")
 
-        # 仅在开启开关时提取消息中的 TMDB ID 信息以供匹配
+        # 仅在开启开关时提取消息中的 TMDB ID 和 IMDB ID 信息以供匹配
         import re
         tmdbid = None
+        imdbid = None
         mtype = None
+        
+        # 提取 TMDB ID（如果开关打开）
         if configer.tmdb_extract:
             # 优先从 TMDB 链接中提取 ID 和媒体类型，格式如:
             #   https://www.themoviedb.org/tv/289690
@@ -594,6 +613,34 @@ class p115sharestrm(_PluginBase):
                             mtype = verified
                         else:
                             logger.info(f"【P115ShareStrm】TMDB验证确认媒体类型: {mtype}")
+
+        # 提取 IMDB ID（如果开关打开，且未提取到 TMDB ID 时）
+        if configer.imdb_extract and not tmdbid:
+            # 优先从 IMDB 链接中提取 ID，格式如:
+            #   https://www.imdb.com/title/tt1234567/
+            #   https://imdb.com/title/tt1234567
+            imdb_url_match = re.search(r'imdb\.com/title/(tt\d+)', arg_str, re.IGNORECASE)
+            if imdb_url_match:
+                imdbid = imdb_url_match.group(1)
+                logger.info(f"【P115ShareStrm】从 IMDB 链接中提取到 IMDB ID: {imdbid}")
+            else:
+                # 回退：支持格式: IMDB: tt1234567, IMDBID: tt1234567, imdb-tt1234567, 或直接 tt1234567
+                imdb_match = re.search(r'(?:IMDB(?:[\s\-_]*ID)?\s*[：:= \-]+)?(tt\d{7,8})', arg_str, re.IGNORECASE)
+                if imdb_match:
+                    imdbid = imdb_match.group(1)
+                    logger.info(f"【P115ShareStrm】从指令文本中提取到 IMDB ID: {imdbid}")
+            
+            # 如果提取到 IMDB ID，通过 TMDB API 查询媒体信息并推断类型
+            if imdbid:
+                from .logic import _resolve_mtype_by_imdb
+                imdb_result = _resolve_mtype_by_imdb(imdbid, arg_str)
+                if imdb_result:
+                    # imdb_result 返回 (tmdbid, mtype)
+                    tmdbid, mtype = imdb_result
+                    logger.info(f"【P115ShareStrm】通过 IMDB ID 查询到 TMDB ID: {tmdbid}，类型: {mtype}")
+                else:
+                    logger.warning(f"【P115ShareStrm】无法通过 IMDB ID {imdbid} 查询到对应的 TMDB 信息")
+                    imdbid = None  # 查询失败，清空 IMDB ID
 
         if not arg_str:
             logger.warning("【P115ShareStrm】指令参数为空，未提供链接")
