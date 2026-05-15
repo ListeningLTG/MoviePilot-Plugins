@@ -27,6 +27,50 @@ class ShareLinkExpiredError(Exception):
     pass
 
 
+def _truncate_filename(filename: str, max_bytes: int = 240) -> str:
+    """
+    截断文件名以符合文件系统限制 (255 字节)，预留一定空间。
+    """
+    if not filename:
+        return filename
+    try:
+        b_name = filename.encode('utf-8')
+        if len(b_name) <= max_bytes:
+            return filename
+
+        # 尝试保留后缀
+        p = Path(filename)
+        extension = p.suffix
+        stem = p.stem
+
+        b_ext = extension.encode('utf-8')
+        if len(b_ext) >= max_bytes - 10:
+            return b_name[:max_bytes].decode('utf-8', 'ignore')
+
+        b_stem = stem.encode('utf-8')
+        available = max_bytes - len(b_ext)
+        truncated_stem = b_stem[:available].decode('utf-8', 'ignore')
+        return truncated_stem + extension
+    except Exception:
+        return filename[:max_bytes // 2]  # 极其简化的兜底
+
+
+def _safe_path(path: Path) -> Path:
+    """
+    确保路径的每一级组件都不超过 255 字节（Linux 文件系统限制）
+    """
+    if not path:
+        return path
+    parts = list(path.parts)
+    new_parts = []
+    for part in parts:
+        if part in ("/", "\\"):
+            new_parts.append(part)
+        else:
+            new_parts.append(_truncate_filename(part))
+    return Path(*new_parts)
+
+
 class ShareP115Client(P115Client):
 
     """
@@ -336,7 +380,7 @@ def _rename_subtitles_to_match_media(
 
         lang_tag = _extract_subtitle_lang_tag(sub_name)
         file_ext = local_path.suffix
-        new_name = media_stem + lang_tag + file_ext
+        new_name = _truncate_filename(media_stem + lang_tag + file_ext)
         new_path = local_path.with_name(new_name)
 
         if new_path == local_path:
@@ -386,7 +430,7 @@ def _download_subtitles_from_share(
     for item in subtitle_items:
         filename = item.get("name", "")
         full_path = item.get("_full_path", f"/{filename}")
-        local_path = save_path_obj / Path(full_path.lstrip("/"))
+        local_path = save_path_obj / _safe_path(Path(full_path.lstrip("/")))
 
         _max_retries = 3
         _dl_success = False
@@ -813,7 +857,7 @@ def process_share_strm(
                     current_mediainfo = None
 
             full_path = item.get("_full_path", f"/{filename}")
-            relative_path = Path(full_path.lstrip("/"))
+            relative_path = _safe_path(Path(full_path.lstrip("/")))
             strm_relative = relative_path.with_suffix(".strm")
 
             # 扩展名特定规则可能指定不同的保存目录
@@ -973,7 +1017,7 @@ def process_share_strm(
                     strm_target = media_stem_to_target.get(media_stem) if media_stem else None
                     if strm_target:
                         lang_tag = _extract_subtitle_lang_tag(sub_name)
-                        new_name = strm_target.stem + lang_tag + local_path.suffix
+                        new_name = _truncate_filename(strm_target.stem + lang_tag + local_path.suffix)
                         dest_path = strm_target.parent / new_name
                         try:
                             dest_path.parent.mkdir(parents=True, exist_ok=True)
