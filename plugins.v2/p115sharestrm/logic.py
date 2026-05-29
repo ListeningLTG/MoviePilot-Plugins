@@ -124,9 +124,11 @@ class _EndpointPool:
                     return data.get("list", [])
                 except Exception as e:
                     last_exc = e
-                    # 4100009: 链接已失效 / 分享已拒绝，属于不可恢复错误，直接终止重试
-                    if "4100009" in str(e):
-                        raise ShareLinkExpiredError(f"分享链接已失效 ({e})") from e
+                    # 4100009: 链接已失效 / 分享已拒绝
+                    # 4100010: 分享已取消
+                    # 均属于不可恢复错误，直接终止重试
+                    if "4100009" in str(e) or "4100010" in str(e):
+                        raise ShareLinkExpiredError(f"分享链接已失效或已取消 ({e})") from e
                     logger.warning(
                         f"【P115ShareStrm】端点 [{ep_name}] 失败，切换到下一个: {e}"
                     )
