@@ -193,5 +193,14 @@
       "v1.0.1": "优化",
       "v1.0.0": "cas生成strm，首次提交"
     }
+  },
+  "MediaBoardWash": {
+    "name": "影视洗板",
+    "description": "扫描 .strm/视频文件，从文件名解析质量信息，进行洗版。",
+    "labels": "影视洗板",
+    "version": "2.2.0",
+    "icon": "mdi-filmstrip-box-multiple",
+    "author": "Senior Developer",
+    "level": 1
   }
 }

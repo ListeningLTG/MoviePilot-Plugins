@@ -1,0 +1,143 @@
+{
+  "key": "mediaboardwash",
+  "name": "影视洗板",
+  "version": "2.2.0",
+  "description": "扫描 .strm/视频文件，从文件名解析质量信息，按标题+年份+TMDB+季+集精准分组，同集多版本才去重保留最佳。单版本每集自动保留。按集数升序排列展示。评分规则完全可自定义（JSON），HDR10/10+/DV同分。v2.2.0: 修复双重正则、TOCTOU竞态、时区不一致；重构build_form(拆分7个子函数)；新增输入验证；新建pyproject.toml/README/.gitignore；修复clean_title年份移除逻辑；78测试全部通过。",
+  "author": "Senior Developer",
+  "icon": "mdi-filmstrip-box-multiple",
+  "settings": [
+    {
+      "key": "enabled",
+      "name": "启用插件",
+      "type": "boolean",
+      "default": false,
+      "description": "开启后启用影视洗板插件"
+    },
+    {
+      "key": "cron",
+      "name": "执行周期",
+      "type": "text",
+      "default": "",
+      "description": "5位cron表达式，留空则不启用定时任务，仅手动执行"
+    },
+    {
+      "key": "onlyonce",
+      "name": "立即运行一次",
+      "type": "boolean",
+      "default": false,
+      "description": "开启后立即执行一次影视洗板扫描"
+    },
+    {
+      "key": "media_dirs",
+      "name": "媒体目录",
+      "type": "text",
+      "default": "",
+      "description": "要扫描的媒体目录路径，多个用逗号分隔，留空则使用系统媒体库目录"
+    },
+    {
+      "key": "min_size",
+      "name": "最小文件大小(MB)",
+      "type": "number",
+      "default": 100,
+      "description": "小于此大小的视频文件将被跳过（.strm 文件不受此限制，始终收录）"
+    },
+    {
+      "key": "notify",
+      "name": "发送通知",
+      "type": "boolean",
+      "default": true,
+      "description": "扫描完成后发送系统通知"
+    },
+    {
+      "key": "auto_cleanup",
+      "name": "自动清理",
+      "type": "boolean",
+      "default": false,
+      "description": "开启后自动删除低质量版本（请谨慎使用，建议先手动确认）"
+    },
+    {
+      "key": "keep_count",
+      "name": "保留数量",
+      "type": "number",
+      "default": 1,
+      "description": "每组重复影视保留的最佳版本数量，大于1可保留多个高质量版本"
+    },
+    {
+      "key": "min_score",
+      "name": "最低保留分数",
+      "type": "number",
+      "default": 0,
+      "description": "评分低于此分数的文件强制标记删除，不占用保留名额。设为0关闭此功能"
+    },
+    {
+      "key": "trigger_cleanup",
+      "name": "确认清理",
+      "type": "boolean",
+      "default": false,
+      "description": "勾选后保存配置，插件将执行一次低质量文件清理（一次性开关，执行后自动关闭）"
+    },
+    {
+      "key": "dry_run",
+      "name": "Dry-Run 模式（模拟运行）",
+      "type": "boolean",
+      "default": true,
+      "description": "开启后仅展示扫描结果，不会实际删除任何文件。关闭后，确认清理将真实删除文件（建议首次使用保持开启）"
+    },
+    {
+      "key": "res_weight",
+      "name": "分辨率权重",
+      "type": "number",
+      "default": 40,
+      "description": "分辨率在评分中的最大分值（默认40），调整后各分辨率档位按比例缩放"
+    },
+    {
+      "key": "src_weight",
+      "name": "片源权重",
+      "type": "number",
+      "default": 35,
+      "description": "片源类型在评分中的最大分值（默认35），调整后各片源档位按比例缩放"
+    },
+    {
+      "key": "aud_weight",
+      "name": "音频权重",
+      "type": "number",
+      "default": 15,
+      "description": "音频编码在评分中的最大分值（默认15），调整后各音频档位按比例缩放"
+    },
+    {
+      "key": "hdr_weight",
+      "name": "HDR权重",
+      "type": "number",
+      "default": 15,
+      "description": "HDR类型在评分中的最大分值（默认15），调整后各HDR档位按比例缩放"
+    },
+    {
+      "key": "bonus_weight",
+      "name": "加分项权重",
+      "type": "number",
+      "default": 6,
+      "description": "加分特征（Complete/3D/IMAX等）的最大分值（默认6），设为0关闭加分"
+    },
+    {
+      "key": "score_profile",
+      "name": "评分方案",
+      "type": "select",
+      "default": "custom",
+      "options": [
+        {"label": "自定义", "value": "custom"},
+        {"label": "电影(偏重片源)", "value": "movie_source"},
+        {"label": "电影(偏重画质)", "value": "movie_resolution"},
+        {"label": "电视剧(均衡)", "value": "tv_balanced"},
+        {"label": "动漫(偏重画质)", "value": "anime_resolution"}
+      ],
+      "description": "快速选择预设评分方案，选择后自动调整下方权重（选择后需手动保存配置）"
+    },
+    {
+      "key": "custom_rules",
+      "name": "自定义评分规则(JSON)",
+      "type": "text",
+      "default": "",
+      "description": "JSON格式完全自定义各维度评分规则。分辨率resolution/片源source/音频audio/hdr/加分bonus。每项包含pattern(正则)+score(分值)+label(显示名)。留空使用默认规则。示例见插件说明。"
+    }
+  ]
+}
