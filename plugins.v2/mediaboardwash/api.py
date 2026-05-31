@@ -17,7 +17,6 @@ def send_scan_notification(
     total_scanned: int,
     was_auto: bool = False,
     deleted_count: int = 0,
-    dry_run: bool = True,  # P0: Dry-Run 模式标记
 ):
     """
     发送扫描完成通知。
@@ -28,26 +27,22 @@ def send_scan_notification(
         total_scanned: 扫描的文件总数
         was_auto: 是否为自动清理模式
         deleted_count: 自动删除的文件数
-        dry_run: 是否为 Dry-Run 模式
     """
     duplicates = results.get("groups_with_duplicates", 0)
     savings = results.get("potential_savings_gb", 0)
 
-    dry_run_tag = "🧪 [模拟] " if dry_run else ""
-
     if duplicates > 0:
         if was_auto:
             text = (
-                f"{dry_run_tag}共扫描 {total_scanned} 个文件(.strm/视频)\n"
+                f"共扫描 {total_scanned} 个文件(.strm/视频)\n"
                 f"覆盖 {results['total_groups']} 部影视\n"
                 f"发现 {duplicates} 组重复版本\n"
-                + (f"已自动删除 {deleted_count} 个低质量版本\n" if not dry_run else "模拟运行，未删除文件\n")
-                + f"可节省约 {savings} GB 空间"
-                + ("\n\n💡 关闭 Dry-Run 后可执行真实清理" if dry_run else "")
+                f"已自动删除 {deleted_count} 个低质量版本\n"
+                f"可节省约 {savings} GB 空间"
             )
         else:
             text = (
-                f"{dry_run_tag}共扫描 {total_scanned} 个文件(.strm/视频)\n"
+                f"共扫描 {total_scanned} 个文件(.strm/视频)\n"
                 f"覆盖 {results['total_groups']} 部影视\n"
                 f"发现 {duplicates} 组重复版本\n"
                 f"可节省约 {savings} GB 空间\n"

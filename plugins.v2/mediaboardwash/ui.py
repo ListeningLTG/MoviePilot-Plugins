@@ -464,8 +464,6 @@ def _build_basic_settings() -> list:
                 _vswitch_col('md3', 'enabled', '启用插件'),
                 _vswitch_col('md3', 'onlyonce', '立即运行一次'),
                 _vswitch_col('md3', 'notify', '发送通知'),
-                _vswitch_col('md3', 'dry_run', 'Dry-Run模式', 'info',
-                             '开启后仅展示结果，不会实际删除文件'),
             ]
         },
         # 第2行: 确认清理 + 自动清理
@@ -490,12 +488,31 @@ def _build_basic_settings() -> list:
                                type='number'),
             ]
         },
-        # 第3行: 保留版本数 + 最低分数
+        # 第3行: 保留版本数 + 保留策略 + 最低分数
         {
             'component': 'VRow',
             'content': [
                 _textfield_col('md3', 'keep_count', '保留版本数',
                                '每组保留的最佳版本数量', type='number'),
+                {
+                    'component': 'VCol',
+                    'props': {'cols': 12, 'md': 3},
+                    'content': [
+                        {
+                            'component': 'VSelect',
+                            'props': {
+                                'model': 'keep_mode',
+                                'label': '保留策略',
+                                'items': [
+                                    {'title': '按总分保留前N个', 'value': 'top_n'},
+                                    {'title': '每种HDR各保留1个最高分', 'value': 'per_hdr'},
+                                    {'title': '每种HDR+分辨率各保留1个最高分', 'value': 'per_hdr_res'},
+                                ],
+                                'hint': 'top_n=兼容旧版行为; per_hdr=按HDR分组; per_hdr_res=按HDR+分辨率分组'
+                            }
+                        }
+                    ]
+                },
                 _textfield_col('md3', 'min_score', '最低保留分数',
                                '低于此分的版本强制删除，不占用保留名额。0=关闭',
                                type='number', min_val=0),
@@ -511,6 +528,15 @@ def _build_scoring_settings() -> list:
         _section_title_row('🎯 自定义评分机制',
                            '调整每个质量维度的权重分值。数值越大，该维度在总分中的占比越高。'
                            '默认值=原始评分行为，可依据自己的偏好调整。'),
+        # 评分机制说明
+        _info_alert_row(
+            '📖 评分机制说明：\n'
+            '1. 每个维度（分辨率/片源/音频/HDR/视频编码）独立评分\n'
+            '2. 各维度得分 × 权重 = 加权得分\n'
+            '3. 综合得分 = 各维度加权得分之和 + 加分项\n'
+            '4. 同集多版本按综合得分排序，保留前 N 个最佳版本\n'
+            '5. 各档位分值可在下方「各档位分值微调」区域调整'
+        ),
         # 预设方案选择
         {
             'component': 'VRow',
@@ -559,6 +585,14 @@ def _build_tier_adjustments() -> list:
         _divider_row(),
         _section_title_row('🎯 各档位分值微调',
                            '直接修改各档次得分，无需编写JSON。修改保存后立即生效，下次扫描使用新分值。'),
+        # 微调说明
+        _info_alert_row(
+            '📖 各档位分值微调说明：\n'
+            '• 修改某档位的分值后保存，下次扫描生效\n'
+            '• 分值仅为同维度内排序依据，不影响其他维度\n'
+            '• 建议保持各维度内最高档 ≈ 权重值，最低档 = 0\n'
+            '• 例如：分辨率权重=40 时，建议 8K≈50, 4K=40, 1080p=30 ...'
+        ),
         # 分辨率
         _tier_section_header('📺 分辨率各档分值'),
         _tier_input_row([
@@ -691,7 +725,7 @@ def build_form() -> Tuple[List[dict], Dict[str, Any]]:
     ], {
         "enabled": False, "onlyonce": False, "notify": True, "auto_cleanup": False,
         "media_dirs": "", "cron": "", "min_size": 100, "keep_count": 1,
-        "min_score": 0, "dry_run": True,
+        "min_score": 0,
         "score_profile": "custom",
         "res_weight": 40, "src_weight": 35, "aud_weight": 15,
         "hdr_weight": 15, "vid_weight": 12, "bonus_weight": 6,
@@ -703,9 +737,7 @@ def build_form() -> Tuple[List[dict], Dict[str, Any]]:
 # 详情页构建
 # ============================================================
 
-MAX_SHOWS = 200  # 修复 Bug 6: 从50提升到200，支持更大媒体库
-
-
+# 详情页构建
 def _build_quality_detail_row(quality_details: dict) -> list:
     """构建单条质量详情行。"""
     d = quality_details
@@ -871,12 +903,12 @@ def _build_empty_page(action_banner: list) -> list:
 
 def _build_results_page(results: Dict, action_banner: list, progress_banner: list = None) -> list:
     """构建有扫描结果时的详情页。"""
+    progress_banner = progress_banner or []  # 防御 None
     items = results.get("items", {})
     shows = results.get("shows", {})
     stats = _compute_stats(results)
     pending_delete_count = _compute_pending_delete(items)
     has_deleted = _has_deleted_versions(items)
-    is_dry_run = results.get("dry_run", False)
 
     # 统计卡片
     stat_cards = [
@@ -885,33 +917,6 @@ def _build_results_page(results: Dict, action_banner: list, progress_banner: lis
         build_stat_card("🔄", "重复组", str(stats["duplicates"]), "warning"),
         build_stat_card("💾", "可节省", f"{stats['savings_gb']}GB", "error"),
     ]
-
-    # P0: Dry-Run 指示器
-    dry_run_banner = []
-    if is_dry_run:
-        dry_run_banner = [
-            {
-                'component': 'VRow',
-                'props': {'class': 'mb-3'},
-                'content': [
-                    {
-                        'component': 'VCol',
-                        'props': {'cols': 12},
-                        'content': [
-                            {
-                                'component': 'VAlert',
-                                'props': {
-                                    'type': 'info', 'variant': 'tonal',
-                                    'closable': True,
-                                    'title': '🧪 Dry-Run 模式（模拟运行）',
-                                    'text': '当前为模拟模式，仅展示结果不会实际删除任何文件。如需正式清理，请关闭 Dry-Run 后重新扫描。'
-                                }
-                            }
-                        ]
-                    }
-                ]
-            }
-        ]
 
     # 如果有多季，按"all"汇总
     show_seasons = {
@@ -936,7 +941,6 @@ def _build_results_page(results: Dict, action_banner: list, progress_banner: lis
         },
         *action_banner,
         *progress_banner,
-        *dry_run_banner,
         # 统计卡片
         {
             'component': 'VRow',
@@ -1285,11 +1289,18 @@ def _build_search_filter_bar(stats: dict, pending_delete_count: int) -> list:
 def _build_media_panels(shows: Dict, items: Dict, stats: dict) -> list:
     """构建媒体（剧集/电影）折叠面板列表。"""
     media_panels = []
-    show_keys = sorted(shows.keys(), key=lambda k: shows[k]["title"].lower())
+    show_keys = sorted(
+        shows.keys(),
+        key=lambda k: (
+            0 if any(
+                items.get(ek, {}).get("has_duplicates")
+                for ek in shows[k]["episode_keys"]
+            ) else 1,
+            shows[k]["title"].lower(),
+        )
+    )
 
     for idx, show_key in enumerate(show_keys):
-        if idx >= MAX_SHOWS:
-            break
 
         s_data = shows[show_key]
         show_total = len(s_data["episode_keys"])
@@ -1338,15 +1349,6 @@ def _build_media_panels(shows: Dict, items: Dict, stats: dict) -> list:
                     ]
                 }
             ]
-        })
-
-    # 超出限制的提示
-    total_shows = len(shows)
-    if total_shows > MAX_SHOWS:
-        media_panels.append({
-            'component': 'div',
-            'props': {'class': 'text-center pa-4 text-caption wash-text-dim'},
-            'text': f'⋯ 仅展示前 {MAX_SHOWS} 部，共 {total_shows} 部。扫描频率过高时页面可能响应慢，建议减少扫描范围或提高最小文件大小。'
         })
 
     return media_panels

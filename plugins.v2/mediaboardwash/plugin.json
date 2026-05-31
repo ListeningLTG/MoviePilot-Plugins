@@ -1,8 +1,8 @@
 {
   "key": "mediaboardwash",
   "name": "影视洗板",
-  "version": "2.2.0",
-  "description": "扫描 .strm/视频文件，从文件名解析质量信息，按标题+年份+TMDB+季+集精准分组，同集多版本才去重保留最佳。单版本每集自动保留。按集数升序排列展示。评分规则完全可自定义（JSON），HDR10/10+/DV同分。v2.2.0: 修复双重正则、TOCTOU竞态、时区不一致；重构build_form(拆分7个子函数)；新增输入验证；新建pyproject.toml/README/.gitignore；修复clean_title年份移除逻辑；78测试全部通过。",
+  "version": "2.5.0",
+  "description": "扫描 .strm/视频文件，从文件名解析质量信息，按标题+年份+TMDB+季+集精准分组，同集多版本才去重保留最佳。单版本每集自动保留。按集数升序排列展示。评分规则完全可自定义（JSON），HDR10/10+/DV同分。v2.5.0: 移除Dry-Run模式直接真实删除、移除200条显示限制、重复视频优先展示、日志级别提升确保删除操作可见、UI新增评分机制说明。v2.4.0: 多版本保留策略（per_hdr/per_hdr_res）。v2.3.0: 扫描并发锁、正则编译缓存、网络挂载stat超时保护。v2.2.1: 修复元数据过度删除、可变类属性、时区遗漏。",
   "author": "Senior Developer",
   "icon": "mdi-filmstrip-box-multiple",
   "settings": [
@@ -75,13 +75,6 @@
       "type": "boolean",
       "default": false,
       "description": "勾选后保存配置，插件将执行一次低质量文件清理（一次性开关，执行后自动关闭）"
-    },
-    {
-      "key": "dry_run",
-      "name": "Dry-Run 模式（模拟运行）",
-      "type": "boolean",
-      "default": true,
-      "description": "开启后仅展示扫描结果，不会实际删除任何文件。关闭后，确认清理将真实删除文件（建议首次使用保持开启）"
     },
     {
       "key": "res_weight",

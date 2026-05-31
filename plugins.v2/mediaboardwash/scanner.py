@@ -8,12 +8,22 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import pytz
 
 from app.core.config import settings
 from app.log import logger
 
-from .quality import parse_season_episode, format_file_size, TARGET_EXTENSIONS
+from .quality import (
+    parse_season_episode, format_file_size, TARGET_EXTENSIONS,
+    normalize_hdr_label, normalize_res_label,
+)
+
+
+def _now() -> datetime:
+    """返回带 MoviePilot 时区的当前时间（与 __init__.py 保持一致）"""
+    return datetime.now(tz=pytz.timezone(settings.TZ))
 
 
 # ============================================================
@@ -106,9 +116,12 @@ def collect_target_files(directories: List[Path], min_size: int = 100) -> List[P
                         target_files.append(file_path)
                         continue
 
-                    # 视频文件按最小大小过滤
-                    if file_path.stat().st_size >= min_bytes:
-                        target_files.append(file_path)
+                    # 视频文件按最小大小过滤（v2.3.0: 保护网络挂载超时）
+                    try:
+                        if file_path.stat().st_size >= min_bytes:
+                            target_files.append(file_path)
+                    except OSError:
+                        logger.debug(f"影视洗板: 无法读取文件信息（可能网络挂载断开）: {file_path}")
 
         except PermissionError:
             logger.warning(f"影视洗板: 无权限访问目录 {directory}")
@@ -160,7 +173,7 @@ def guess_media_year(file_path: Path) -> Optional[str]:
     year_match = re.search(r'[\(\[（【]?(\d{4})[\)\]）】]?', name)
     if year_match:
         year = int(year_match.group(1))
-        current_year = datetime.now().year
+        current_year = _now().year
         if 1900 <= year <= current_year + 5:
             return str(year)
     return None
@@ -246,7 +259,8 @@ def group_by_media(items: List[Dict]) -> Dict[str, List[Dict]]:
     return groups
 
 
-def make_version_entry(v: Dict, is_best: bool, rank: int, deleted: bool) -> Dict:
+def make_version_entry(v: Dict, is_best: bool, rank: int, deleted: bool,
+                       keep_reason: str = "") -> Dict:
     """构建单一版本条目。"""
     se = v.get("season_episode", {})
     return {
@@ -263,11 +277,69 @@ def make_version_entry(v: Dict, is_best: bool, rank: int, deleted: bool) -> Dict
         "is_best": is_best,
         "rank": rank,
         "deleted": deleted,
+        "keep_reason": keep_reason,
     }
 
 
+def _select_keepers(
+    versions: List[Dict],
+    keep_count: int,
+    keep_mode: str = "top_n",
+) -> List[Tuple[Dict, str]]:
+    """
+    根据保留策略选择要保留的版本。
+
+    Args:
+        versions: 同一集的多个版本（已按 score 降序排列）
+        keep_count: 最大保留数
+        keep_mode:
+            - "top_n": 保留前 N 个最高分（现有逻辑，向后兼容）
+            - "per_hdr": 每种 HDR 类型各保留 1 个最高分
+            - "per_hdr_res": 每 HDR+分辨率 组合各保留 1 个最高分
+
+    Returns:
+        [(version, keep_reason), ...] — 仅返回被保留的版本，非保留版本不在此列表中
+    """
+    if keep_mode == "top_n":
+        # 向后兼容：返回所有版本，前 keep_count 个有 reason
+        return [(v, "总分最高" if i < keep_count else "")
+                for i, v in enumerate(versions)]
+
+    # per_hdr / per_hdr_res: 仅返回被选中保留的版本
+    selected: List[Tuple[Dict, str]] = []
+
+    if keep_mode == "per_hdr":
+        groups: Dict[str, List[Dict]] = {}
+        for v in versions:
+            hdr_raw = v.get("quality_details", {}).get("hdr", {}).get("label", "SDR")
+            hdr = normalize_hdr_label(hdr_raw)
+            groups.setdefault(hdr, []).append(v)
+        for hdr, group in groups.items():
+            best = max(group, key=lambda x: x["quality_score"])
+            selected.append((best, f"HDR {hdr} 最高分"))
+
+    elif keep_mode == "per_hdr_res":
+        groups2: Dict[str, List[Dict]] = {}
+        for v in versions:
+            hdr_raw = v.get("quality_details", {}).get("hdr", {}).get("label", "SDR")
+            res_raw = v.get("quality_details", {}).get("resolution", {}).get("label", "Unknown")
+            hdr = normalize_hdr_label(hdr_raw)
+            res = normalize_res_label(res_raw)
+            key = f"{hdr}|{res}"
+            groups2.setdefault(key, []).append(v)
+        for key, group in groups2.items():
+            best = max(group, key=lambda x: x["quality_score"])
+            selected.append((best, f"HDR {key.replace('|', ' ')} 最高分"))
+
+    # 按总分降序排序，截断到 keep_count
+    selected.sort(key=lambda x: x[0]["quality_score"], reverse=True)
+    selected = selected[:keep_count]
+
+    return selected
+
+
 def compare_and_rank(groups: Dict[str, List[Dict]], keep_count: int = 1,
-                     min_score: int = 0) -> Dict[str, Any]:
+                     min_score: int = 0, keep_mode: str = "top_n") -> Dict[str, Any]:
     """
     按集分组对比版本质量，生成清洗建议。
 
@@ -276,9 +348,11 @@ def compare_and_rank(groups: Dict[str, List[Dict]], keep_count: int = 1,
 
     v2.1.1 增强: 支持 min_score 最低分数阈值。
     评分低于 min_score 的文件强制标记删除，不占用 keep_count 名额。
+
+    v2.4.0 增强: 支持 keep_mode 多版本保留策略。
     """
     results = {
-        "last_scan": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_scan": _now().strftime("%Y-%m-%d %H:%M:%S"),
         "total_items": sum(len(items) for items in groups.values()),
         "total_groups": len(groups),
         "groups_with_duplicates": 0,
@@ -344,14 +418,19 @@ def compare_and_rank(groups: Dict[str, List[Dict]], keep_count: int = 1,
             }
 
             rank = 0
-            # 达标文件中：保留前 keep_count 名
+            # v2.4.0: 使用 _select_keepers 根据保留策略选择要保留的版本
+            keepers = _select_keepers(sorted_qualified, keep_count, keep_mode)
+            keeper_reasons = {id(k[0]): k[1] for k in keepers}
+
             for v in sorted_qualified:
                 rank += 1
-                is_best = rank <= keep_count
+                is_best = bool(keeper_reasons.get(id(v), ""))
+                keep_reason = keeper_reasons.get(id(v), "")
                 if not is_best:
                     results["potential_savings_gb"] += v["size_bytes"] / (1024 ** 3)
                 item_data["versions"].append(
-                    make_version_entry(v, is_best=is_best, rank=rank, deleted=False)
+                    make_version_entry(v, is_best=is_best, rank=rank, deleted=False,
+                                       keep_reason=keep_reason)
                 )
 
             # 不达标文件：全部标记删除（不占用 keep_count 名额）

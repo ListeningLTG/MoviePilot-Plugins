@@ -12,6 +12,92 @@ from app.log import logger
 
 
 # ============================================================
+# HDR / 分辨率 归一化映射（v2.4.0）
+# ============================================================
+
+_HDR_LABEL_MAP = {
+    # Dolby Vision 系列 → 统一为 "Dolby Vision"
+    "DV": "Dolby Vision",
+    "DOVI": "Dolby Vision",
+    "DOLBY VISION": "Dolby Vision",
+    "DOLBYVISION": "Dolby Vision",
+    # HDR10+ 系列
+    "HDR10+": "HDR10+",
+    "HDR10P": "HDR10+",
+    # HDR10 系列
+    "HDR10": "HDR10",
+    "HDR": "HDR10",
+    # 其他保持原样
+    "HLG": "HLG",
+    "SDR": "SDR",
+}
+
+_RES_LABEL_MAP = {
+    "8K": "8K", "4320P": "8K",
+    "4K": "4K", "2160P": "4K", "UHD": "4K",
+    "1080P": "1080p", "FHD": "1080p", "FULLHD": "1080p", "1080I": "1080p",
+    "720P": "720p", "HD": "720p",
+    "540P": "540p", "QHD": "540p",
+    "480P": "480p", "SD": "480p",
+    "360P": "360p", "NHD": "360p",
+}
+
+
+def normalize_hdr_label(raw: str) -> str:
+    """将原始 HDR 标签归一化为标准名称。"""
+    if not raw or not raw.strip():
+        return "SDR"
+    return _HDR_LABEL_MAP.get(raw.upper().strip(), raw.strip())
+
+
+def normalize_res_label(raw: str) -> str:
+    """将原始分辨率标签归一化为标准名称。"""
+    if not raw or not raw.strip():
+        return "Unknown"
+    return _RES_LABEL_MAP.get(raw.upper().strip(), raw.strip())
+
+
+# ============================================================
+# 评分权重默认基准值（用于归一化计算）
+# ============================================================
+
+_DEFAULT_RES_WEIGHT = 40.0
+_DEFAULT_SRC_WEIGHT = 35.0
+_DEFAULT_AUD_WEIGHT = 15.0
+_DEFAULT_HDR_WEIGHT = 15.0
+_DEFAULT_VID_WEIGHT = 15.0  # video 维度基准权重
+_DEFAULT_BONUS_WEIGHT = 6.0
+_FLOAT_ZERO_THRESHOLD = 1e-6  # 浮点零判断阈值
+
+
+# ============================================================
+# 正则编译缓存 (v2.3.0)
+# ============================================================
+
+_compiled_patterns_cache: Dict[str, List[Tuple[re.Pattern, int]]] = {}
+
+
+def clear_patterns_cache() -> None:
+    """清除正则编译缓存（当自定义规则变更时调用）。"""
+    _compiled_patterns_cache.clear()
+
+
+def _get_compiled_patterns(dimension: str, custom_rules: dict = None) -> List[Tuple[re.Pattern, int]]:
+    """
+    获取预编译的正则模式列表（带缓存）。
+    相同 dimension + custom_rules 组合只编译一次。
+    """
+    cache_key = f"{dimension}:{json.dumps(custom_rules or {}, sort_keys=True)}"
+    if cache_key in _compiled_patterns_cache:
+        return _compiled_patterns_cache[cache_key]
+
+    raw_patterns = get_patterns(dimension, custom_rules)
+    compiled = [(re.compile(p, re.IGNORECASE), score) for p, score in raw_patterns]
+    _compiled_patterns_cache[cache_key] = compiled
+    return compiled
+
+
+# ============================================================
 # 公共工具函数
 # ============================================================
 
@@ -497,56 +583,50 @@ def parse_quality(
 
     detected_tags = []
 
-    # 解析分辨率
-    res_patterns = get_patterns("resolution", custom_rules)
-    for pattern, score in res_patterns:
-        match = re.search(pattern, name, re.IGNORECASE)
+    # 解析分辨率（使用预编译正则缓存）
+    for compiled, score in _get_compiled_patterns("resolution", custom_rules):
+        match = compiled.search(name)
         if match:
             result["resolution"] = {"value": score, "label": _extract_match_label(match)}
             detected_tags.append(f"分辨率:{_extract_match_label(match)}")
             break
 
     # 解析片源类型
-    src_patterns = get_patterns("source", custom_rules)
-    for pattern, score in src_patterns:
-        match = re.search(pattern, name, re.IGNORECASE)
+    for compiled, score in _get_compiled_patterns("source", custom_rules):
+        match = compiled.search(name)
         if match:
             result["source"] = {"value": score, "label": _extract_match_label(match)}
             detected_tags.append(f"片源:{_extract_match_label(match)}")
             break
 
     # 解析音频编码
-    aud_patterns = get_patterns("audio", custom_rules)
-    for pattern, score in aud_patterns:
-        match = re.search(pattern, name, re.IGNORECASE)
+    for compiled, score in _get_compiled_patterns("audio", custom_rules):
+        match = compiled.search(name)
         if match:
             result["audio"] = {"value": score, "label": _extract_match_label(match)}
             detected_tags.append(f"音频:{_extract_match_label(match)}")
             break
 
     # 解析HDR类型
-    hdr_patterns = get_patterns("hdr", custom_rules)
-    for pattern, score in hdr_patterns:
-        match = re.search(pattern, name, re.IGNORECASE)
+    for compiled, score in _get_compiled_patterns("hdr", custom_rules):
+        match = compiled.search(name)
         if match:
             result["hdr"] = {"value": score, "label": _extract_match_label(match)}
             detected_tags.append(f"HDR:{_extract_match_label(match)}")
             break
 
     # 解析视频编码
-    vid_patterns = get_patterns("video", custom_rules)
-    for pattern, score in vid_patterns:
-        match = re.search(pattern, name, re.IGNORECASE)
+    for compiled, score in _get_compiled_patterns("video", custom_rules):
+        match = compiled.search(name)
         if match:
             result["video"] = {"value": score, "label": _extract_match_label(match)}
             detected_tags.append(f"编码:{_extract_match_label(match)}")
             break
 
     # 计算加分
-    bonus_patterns = get_patterns("bonus", custom_rules)
     bonus_score = 0
-    for pattern, score in bonus_patterns:
-        match = re.search(pattern, name, re.IGNORECASE)
+    for compiled, score in _get_compiled_patterns("bonus", custom_rules):
+        match = compiled.search(name)
         if match:
             bonus_score += score
             detected_tags.append(f"加分:{_extract_match_label(match)}")
@@ -554,12 +634,12 @@ def parse_quality(
     result["bonus"] = bonus_score
 
     # 使用自定义权重计算最终得分
-    res_mult = res_weight / 40.0 if res_weight > 0 else 0
-    src_mult = src_weight / 35.0 if src_weight > 0 else 0
-    aud_mult = aud_weight / 15.0 if aud_weight > 0 else 0
-    hdr_mult = hdr_weight / 15.0 if hdr_weight > 0 else 0
-    vid_mult = vid_weight / 15.0 if vid_weight > 0 else 0
-    bonus_mult = bonus_weight / 6.0 if bonus_weight > 0 else 0
+    res_mult = res_weight / _DEFAULT_RES_WEIGHT if res_weight > _FLOAT_ZERO_THRESHOLD else 0
+    src_mult = src_weight / _DEFAULT_SRC_WEIGHT if src_weight > _FLOAT_ZERO_THRESHOLD else 0
+    aud_mult = aud_weight / _DEFAULT_AUD_WEIGHT if aud_weight > _FLOAT_ZERO_THRESHOLD else 0
+    hdr_mult = hdr_weight / _DEFAULT_HDR_WEIGHT if hdr_weight > _FLOAT_ZERO_THRESHOLD else 0
+    vid_mult = vid_weight / _DEFAULT_VID_WEIGHT if vid_weight > _FLOAT_ZERO_THRESHOLD else 0
+    bonus_mult = bonus_weight / _DEFAULT_BONUS_WEIGHT if bonus_weight > _FLOAT_ZERO_THRESHOLD else 0
 
     result["score"] = (
         round(result["resolution"]["value"] * res_mult)
