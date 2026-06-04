@@ -110,11 +110,12 @@
   "p115sharestrm": {
     "name": "分享STRM生成助手",
     "description": "发送/sharestrm 115分享链接 给TG机器人，自动生成分享STRM",
-    "version": "1.0.34",
+    "version": "1.0.35",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.35": "更新依赖库版本",
       "v1.0.34": "修复分享链接已取消的处理逻辑",
       "v1.0.33": "修复潜在的URL解析错误",
       "v1.0.32": "添加通过 IMDB ID 查询 TMDB 信息的逻辑",
