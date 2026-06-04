@@ -1,5 +1,5 @@
 """
-影视洗板插件 — 文件清理引擎
+影视洗版插件 — 文件清理引擎
 ================================
 低质量文件删除、关联元数据清理、空目录清理。
 v2.1.0 增强: 支持更全面的元数据清理（包含 .torrent/.retry/字幕/海报等）。
@@ -85,12 +85,12 @@ def delete_metadata_files(filepath: str):
         meta_file = parent / f"{stem}{meta_ext}"
         try:
             os.remove(str(meta_file))
-            logger.info(f"影视洗板: 已删除关联元数据: {meta_file.name}")
+            logger.info(f"影视洗版: 已删除关联元数据: {meta_file.name}")
             deleted_any = True
         except FileNotFoundError:
             pass  # 文件不存在是预期行为
         except Exception as e:
-            logger.info(f"影视洗板: 删除元数据失败 {meta_file.name}: {e}")
+            logger.info(f"影视洗版: 删除元数据失败 {meta_file.name}: {e}")
 
     # 2) 删除 .strm 对应的 .torrent 文件（命名不同: Movie.torrent）
     #    以及同目录下的 .retry 文件
@@ -98,16 +98,16 @@ def delete_metadata_files(filepath: str):
         related_file = parent / f"{stem}{related_ext}"
         try:
             os.remove(str(related_file))
-            logger.info(f"影视洗板: 已删除关联文件: {related_file.name}")
+            logger.info(f"影视洗版: 已删除关联文件: {related_file.name}")
             deleted_any = True
         except FileNotFoundError:
             pass
         except Exception as e:
-            logger.info(f"影视洗板: 删除关联文件失败 {related_file.name}: {e}")
+            logger.info(f"影视洗版: 删除关联文件失败 {related_file.name}: {e}")
 
     # 3) 删除常见的海报/背景图 — 仅在父目录无其他媒体文件时执行（防止误删）
     if not _should_delete_shared_artifacts(parent, filepath):
-        logger.info(f"影视洗板: 父目录仍有其他媒体文件，跳过共享海报清理: {parent}")
+        logger.info(f"影视洗版: 父目录仍有其他媒体文件，跳过共享海报清理: {parent}")
         return
 
     common_images = [
@@ -121,12 +121,12 @@ def delete_metadata_files(filepath: str):
         img_file = parent / img_name
         try:
             os.remove(str(img_file))
-            logger.info(f"影视洗板: 已删除海报/背景图: {img_file.name}")
+            logger.info(f"影视洗版: 已删除海报/背景图: {img_file.name}")
             deleted_any = True
         except FileNotFoundError:
             pass
         except Exception as e:
-            logger.info(f"影视洗板: 删除海报失败 {img_file.name}: {e}")
+            logger.info(f"影视洗版: 删除海报失败 {img_file.name}: {e}")
 
     # 4) 删除同目录下的 season-specifc 图片 (Season01-poster.jpg, ...)
     try:
@@ -137,14 +137,14 @@ def delete_metadata_files(filepath: str):
                 if '-poster' in fname or '-fanart' in fname or '-thumb' in fname or '-landscape' in fname:
                     try:
                         os.remove(str(f))
-                        logger.info(f"影视洗板: 已删除季海报: {f.name}")
+                        logger.info(f"影视洗版: 已删除季海报: {f.name}")
                         deleted_any = True
                     except FileNotFoundError:
                         pass
                     except Exception as e:
-                        logger.info(f"影视洗板: 删除季海报失败 {f.name}: {e}")
+                        logger.info(f"影视洗版: 删除季海报失败 {f.name}: {e}")
     except Exception as e:
-        logger.info(f"影视洗板: 删除季海报目录遍历失败: {e}")
+        logger.info(f"影视洗版: 删除季海报目录遍历失败: {e}")
 
     # 5) 安全删除空目录（修复 Bug 3: 安全检查避免删除非空目录）
     try:
@@ -152,9 +152,9 @@ def delete_metadata_files(filepath: str):
             all_entries = list(parent.iterdir())
             if not all_entries:
                 parent.rmdir()
-                logger.info(f"影视洗板: 删除空目录: {parent}")
+                logger.info(f"影视洗版: 删除空目录: {parent}")
             elif deleted_any:
-                logger.info(f"影视洗板: 目录非空，保留: {parent} ({len(all_entries)} 个文件)")
+                logger.info(f"影视洗版: 目录非空，保留: {parent} ({len(all_entries)} 个文件)")
     except (OSError, PermissionError):
         pass
 
@@ -174,7 +174,7 @@ def execute_cleanup(
         删除的文件数量
     """
     if not items:
-        logger.warning("影视洗板: 没有扫描结果，无法执行清理")
+        logger.warning("影视洗版: 没有扫描结果，无法执行清理")
         return 0
 
     deleted_count = 0
@@ -194,13 +194,13 @@ def execute_cleanup(
             if not file_path_obj.exists():
                 version["deleted"] = True
                 version["delete_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                logger.info(f"影视洗板: 文件已不存在，标记为已删除: {filepath}")
+                logger.info(f"影视洗版: 文件已不存在，标记为已删除: {filepath}")
                 deleted_count += 1
                 continue
 
             try:
                 os.remove(filepath)
-                logger.info(f"影视洗板: 文件已永久删除: {filepath}")
+                logger.info(f"影视洗版: 文件已永久删除: {filepath}")
 
                 # 删除关联的元数据文件
                 delete_metadata_files(filepath)
@@ -216,16 +216,16 @@ def execute_cleanup(
                         all_entries = list(parent_dir.iterdir())
                         if not all_entries:
                             parent_dir.rmdir()
-                            logger.info(f"影视洗板: 删除空目录: {parent_dir}")
+                            logger.info(f"影视洗版: 删除空目录: {parent_dir}")
                 except (OSError, PermissionError):
                     pass
 
             except Exception as e:
-                logger.error(f"影视洗板: 删除文件失败 {filepath}: {str(e)}")
+                logger.error(f"影视洗版: 删除文件失败 {filepath}: {str(e)}")
                 failed_count += 1
 
     logger.info(
-        f"影视洗板清理完成: 成功删除 {deleted_count} 个文件"
+        f"影视洗版清理完成: 成功删除 {deleted_count} 个文件"
         + (f"，失败 {failed_count} 个" if failed_count else "")
     )
 

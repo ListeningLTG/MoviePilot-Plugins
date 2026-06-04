@@ -1,8 +1,8 @@
 {
   "key": "mediaboardwash",
-  "name": "影视洗板",
-  "version": "2.5.0",
-  "description": "扫描 .strm/视频文件，从文件名解析质量信息，按标题+年份+TMDB+季+集精准分组，同集多版本才去重保留最佳。单版本每集自动保留。按集数升序排列展示。评分规则完全可自定义（JSON），HDR10/10+/DV同分。v2.5.0: 移除Dry-Run模式直接真实删除、移除200条显示限制、重复视频优先展示、日志级别提升确保删除操作可见、UI新增评分机制说明。v2.4.0: 多版本保留策略（per_hdr/per_hdr_res）。v2.3.0: 扫描并发锁、正则编译缓存、网络挂载stat超时保护。v2.2.1: 修复元数据过度删除、可变类属性、时区遗漏。",
+  "name": "影视洗版",
+  "version": "2.7.0",
+  "description": "扫描 .strm/视频文件，从文件名解析质量信息，按标题+年份+TMDB+季+集精准分组，同集多版本才去重保留最佳。v2.7.0: 逐目录处理引擎(大库性能修复，峰值内存从391K降至单目录最大)、仅持久化重复项(DB写入从655MB降至<10MB)、删除时间戳副本、UI空状态提示。v2.6.0: 多目录管理、逐目录扫描、仅展示重复项、通知增强。v2.5.0: 移除Dry-Run、日志提升。",
   "author": "Senior Developer",
   "icon": "mdi-filmstrip-box-multiple",
   "settings": [
@@ -11,7 +11,7 @@
       "name": "启用插件",
       "type": "boolean",
       "default": false,
-      "description": "开启后启用影视洗板插件"
+      "description": "开启后启用影视洗版插件"
     },
     {
       "key": "cron",
@@ -25,14 +25,14 @@
       "name": "立即运行一次",
       "type": "boolean",
       "default": false,
-      "description": "开启后立即执行一次影视洗板扫描"
+      "description": "开启后立即执行一次影视洗版扫描"
     },
     {
       "key": "media_dirs",
       "name": "媒体目录",
       "type": "text",
       "default": "",
-      "description": "要扫描的媒体目录路径，多个用逗号分隔，留空则使用系统媒体库目录"
+      "description": "要扫描的媒体目录路径，每行一个目录，留空则使用系统媒体库目录"
     },
     {
       "key": "min_size",

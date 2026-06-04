@@ -1,5 +1,5 @@
 """
-影视洗板插件 (MediaBoardWash)
+影视洗版插件 (MediaBoardWash)
 ==============================
 扫描 .strm 文件 / 视频文件，从文件名解析质量信息，
 自动识别重复和低质量版本，保留最佳版本。
@@ -8,10 +8,11 @@
 支持手动执行和定时扫描，可视化展示对比结果。
 
 Author: Senior Developer
-Version: 2.5.0
+Version: 2.7.0
 """
 
 import json
+import os
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -41,6 +42,7 @@ from .quality import (
     format_file_size,
     get_patterns,
     SCORE_PROFILES,
+    TARGET_EXTENSIONS,
 )
 from .scanner import (
     resolve_scan_directories,
@@ -75,17 +77,17 @@ def _safe_float(value, default: float = 0.0) -> float:
 
 class MediaBoardWash(_PluginBase):
     """
-    影视洗板插件 - 专为 .strm 文件和视频文件设计
+    影视洗版插件 - 专为 .strm 文件和视频文件设计
     """
 
     # ============================================================
     # 插件元数据
     # ============================================================
-    plugin_name = "影视洗板"
+    plugin_name = "影视洗版"
     plugin_desc = "扫描 .strm/视频文件，从文件名解析质量信息，去重留优。适用于云盘挂载后清理重复.strm文件。"
     plugin_icon = "mdi-filmstrip-box-multiple"
-    plugin_version = "2.5.0"
-    plugin_author = "Dave ."
+    plugin_version = "2.7.0"
+    plugin_author = "Senior Developer"
     author_url = "https://github.com/"
     plugin_config_prefix = "mediaboardwash_"
     plugin_order = 20
@@ -181,14 +183,14 @@ class MediaBoardWash(_PluginBase):
         # 启动服务 — 修复: trigger_cleanup 独立于 enabled/onlyonce 执行
         if self._enabled or self._onlyonce:
             if self._onlyonce:
-                logger.info("影视洗板插件触发立即执行")
+                logger.info("影视洗版插件触发立即执行")
                 self._set_action_message("🔄 扫描任务已提交，约5秒后开始...")
                 self._scheduler = BackgroundScheduler(timezone=settings.TZ)
                 self._scheduler.add_job(
                     func=lambda: self._scan_and_wash(auto_delete=False),
                     trigger="date",
                     run_date=_now() + timedelta(seconds=5),
-                    name="影视洗板_立即执行"
+                    name="影视洗版_立即执行"
                 )
                 if self._scheduler.get_jobs():
                     self._scheduler.start()
@@ -196,11 +198,11 @@ class MediaBoardWash(_PluginBase):
                 self.__update_config()
 
             if self._enabled and self._cron:
-                logger.info(f"影视洗板定时任务已设置: {self._cron}")
+                logger.info(f"影视洗版定时任务已设置: {self._cron}")
 
         # 确认清理触发器 — 修复 Bug: 独立于插件状态执行
         if self._trigger_cleanup:
-            logger.info("影视洗板插件触发确认清理")
+            logger.info("影视洗版插件触发确认清理")
             self._trigger_cleanup = False
             self._set_action_message("🔄 清理任务已提交，正在执行...")
             if not hasattr(self, '_scheduler') or not self._scheduler:
@@ -209,7 +211,7 @@ class MediaBoardWash(_PluginBase):
                 func=lambda: self._execute_cleanup_and_notify(),
                 trigger="date",
                 run_date=_now() + timedelta(seconds=3),
-                name="影视洗板_确认清理"
+                name="影视洗版_确认清理"
             )
             if self._scheduler.get_jobs():
                 self._scheduler.start()
@@ -224,7 +226,7 @@ class MediaBoardWash(_PluginBase):
                     self._scheduler.shutdown()
                 self._scheduler = None
         except Exception as e:
-            logger.error(f"影视洗板停止服务出错: {str(e)}")
+            logger.error(f"影视洗版停止服务出错: {str(e)}")
 
     def get_state(self) -> bool:
         """获取插件状态"""
@@ -302,8 +304,14 @@ class MediaBoardWash(_PluginBase):
     def _resolve_scan_directories(self) -> List[Path]:
         return resolve_scan_directories(self._media_dirs)
 
-    def _collect_target_files(self, directories: List[Path]) -> List[Path]:
-        return collect_target_files(directories, self._min_size)
+    def _collect_target_files(
+        self,
+        directories: List[Path],
+        min_size: int = 0,
+        progress_callback: Optional[callable] = None,
+    ) -> Tuple[List[Path], Dict[str, int]]:
+        size = min_size if min_size > 0 else self._min_size
+        return collect_target_files(directories, size, progress_callback)
 
     @staticmethod
     def _guess_media_title(file_path: Path) -> str:
@@ -350,131 +358,275 @@ class MediaBoardWash(_PluginBase):
     def _clear_results(self):
         """v2.1.1: 清除旧扫描结果，确保每次扫描只显示本次记录"""
         self.save_data("wash_results", None)
-        logger.info("影视洗板: 已清除上次扫描结果")
+        logger.info("影视洗版: 已清除上次扫描结果")
+
+    def _process_single_directory(
+        self,
+        directory: Path,
+        dir_index: int,
+        total_dirs: int,
+    ) -> Tuple[Dict[str, Any], int]:
+        """
+        v2.7.0: 处理单个目录：扫描→解析→分组→排名，返回仅含重复项的结果。
+
+        Args:
+            directory: 要处理的目录路径
+            dir_index: 当前目录索引（0-based）
+            total_dirs: 总目录数
+
+        Returns:
+            (该目录的重复项 results, 该目录的总文件数)
+        """
+        dir_name = directory.name
+        self._set_progress(dir_index, total_dirs, f"处理目录 {dir_index + 1}/{total_dirs}: {dir_name}...")
+
+        # 1. 扫描该目录文件
+        min_bytes = self._min_size * 1024 * 1024
+        dir_files = []
+        try:
+            for root, _, files in os.walk(directory):
+                root_path = Path(root)
+                for f in files:
+                    file_path = root_path / f
+                    ext = file_path.suffix.lower()
+                    if ext not in TARGET_EXTENSIONS:
+                        continue
+                    if ext == ".strm":
+                        dir_files.append(file_path)
+                        continue
+                    try:
+                        if file_path.stat().st_size >= min_bytes:
+                            dir_files.append(file_path)
+                    except OSError:
+                        logger.debug(f"影视洗版: 无法读取文件信息: {file_path}")
+        except PermissionError:
+            logger.warning(f"影视洗版: 无权限访问目录 {directory}")
+            return {}, 0
+        except Exception as e:
+            logger.warning(f"影视洗版: 扫描目录 {directory} 出错: {str(e)}")
+            return {}, 0
+
+        if not dir_files:
+            logger.info(f"影视洗版: 目录 [{dir_name}] 无目标文件")
+            return {}, 0
+
+        logger.info(f"影视洗版: 目录 [{dir_name}] 发现 {len(dir_files)} 个文件，开始解析...")
+
+        # 2. 多线程解析质量
+        scanned_items = []
+        def _parse_single_file(file_path):
+            try:
+                quality = self._parse_quality(file_path.name)
+                se = self._parse_season_episode(file_path.name)
+                return {
+                    "filepath": str(file_path),
+                    "filename": file_path.name,
+                    "parent_dir": str(file_path.parent),
+                    "size_bytes": file_path.stat().st_size,
+                    "size_display": self._format_file_size(file_path.stat().st_size),
+                    "quality_score": quality["score"],
+                    "quality_details": quality,
+                    "media_title": self._guess_media_title(file_path),
+                    "media_year": self._guess_media_year(file_path),
+                    "tmdbid": self._parse_tmdb_id(file_path),
+                    "season_episode": se,
+                    "season_num": se.get("season_num", 0),
+                    "episode_num": se.get("episode_num", 0),
+                    "is_movie": se.get("is_movie", True),
+                }
+            except Exception as e:
+                logger.debug(f"解析文件质量出错 {file_path.name}: {str(e)}")
+                return None
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(_parse_single_file, fp): fp for fp in dir_files}
+            done_count = 0
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    scanned_items.append(result)
+                done_count += 1
+
+        # 3. 分组 + 排名
+        grouped = self._group_by_media(scanned_items)
+        dir_results = self._compare_and_rank(grouped)
+
+        # 4. 仅保留有重复的条目，释放非重复项内存
+        dir_dup_items = {}
+        for gk, item_data in dir_results.get("items", {}).items():
+            if item_data.get("has_duplicates"):
+                dir_dup_items[gk] = item_data
+
+        dup_count = dir_results.get("groups_with_duplicates", 0)
+        logger.info(f"影视洗版: 目录 [{dir_name}] 处理完成，共 {len(dir_files)} 文件，{dup_count} 组重复")
+
+        return dir_dup_items, len(dir_files)
 
     def _scan_and_wash(self, auto_delete: bool = False):
-        """执行影视洗板扫描"""
+        """执行影视洗版扫描（v2.7.0: 逐目录处理，仅持久化重复项）"""
         # v2.3.0: 并发锁，防止 APScheduler 定时任务和手动触发同时执行
         acquired = MediaBoardWash._scan_lock.acquire(blocking=False)
         if not acquired:
-            logger.info("影视洗板: 扫描正在进行中，跳过本次触发")
+            logger.info("影视洗版: 扫描正在进行中，跳过本次触发")
             self.post_message(
-                title="影视洗板",
+                title="影视洗版",
                 text="扫描正在进行中，请稍后再试",
                 mtype=NotificationType.Plugin
             )
             return
 
         try:
-            logger.info("=== 影视洗板: 开始扫描 === 模式=%s", "自动清理" if auto_delete else "仅扫描展示")
+            logger.info("=== 影视洗版: 开始扫描 === 模式=%s", "自动清理" if auto_delete else "仅扫描展示")
             self._scan_mode = "auto" if auto_delete else "manual"
-
-            # v2.1.1: 清除旧结果，确保每次扫描只显示本次记录
             self._clear_results()
 
             try:
                 scan_dirs = self._resolve_scan_directories()
                 if not scan_dirs:
-                    logger.warning("影视洗板: 没有可扫描的目录")
+                    logger.warning("影视洗版: 没有可扫描的目录")
                     self._clear_progress()
                     self.post_message(
-                        title="影视洗板扫描失败",
+                        title="影视洗版扫描失败",
                         text="未配置媒体目录，请在插件设置中添加媒体目录路径",
                         mtype=NotificationType.Manual
                     )
                     return
 
-                logger.info(f"影视洗板: 扫描目录共 {len(scan_dirs)} 个: {scan_dirs}")
-                self._set_progress(0, 1, "扫描目录中...")
+                logger.info(f"影视洗版: 扫描目录共 {len(scan_dirs)} 个")
+                self._set_progress(0, len(scan_dirs), "开始逐目录处理...")
 
-                all_files = self._collect_target_files(scan_dirs)
-                if not all_files:
-                    logger.warning("影视洗板: 未找到任何 .strm 或视频文件")
+                # v2.7.0: 逐目录处理，仅收集重复项
+                global_items: Dict[str, Any] = {}
+                global_total_files = 0
+                global_total_groups = 0
+                global_duplicates = 0
+                global_savings = 0.0
+                dir_stats: Dict[str, int] = {}
+
+                for idx, directory in enumerate(scan_dirs):
+                    dir_results, dir_file_count = self._process_single_directory(
+                        directory, idx, len(scan_dirs),
+                    )
+
+                    # 合并统计
+                    global_total_files += dir_file_count
+                    dir_stats[directory.name] = dir_file_count
+
+                    if dir_results:
+                        global_total_groups += len(dir_results)
+                        global_duplicates += sum(
+                            1 for v in dir_results.values() if v.get("has_duplicates")
+                        )
+                        global_savings += sum(
+                            sum(ver["size_bytes"] for ver in v.get("versions", []) if not ver.get("is_best"))
+                            for v in dir_results.values()
+                        )
+
+                        # 仅合并重复项到全局
+                        global_items.update(dir_results)
+
+                if global_total_files == 0:
+                    logger.warning("影视洗版: 未找到任何 .strm 或视频文件")
                     self._clear_progress()
                     self.post_message(
-                        title="影视洗板扫描完成",
+                        title="影视洗版扫描完成",
                         text="未找到任何 .strm 或视频文件，请检查媒体目录路径是否正确",
                         mtype=NotificationType.Plugin
                     )
                     return
 
-                logger.info(f"影视洗板: 共发现 {len(all_files)} 个目标文件（.strm / 视频）")
-                self._set_progress(0, len(all_files), "解析文件质量中...")
+                logger.info(f"影视洗版: 全部目录处理完成，共 {global_total_files} 个文件")
 
-                # 多线程解析文件质量
-                scanned_items = []
-                def _parse_single_file(file_path):
-                    try:
-                        quality = self._parse_quality(file_path.name)
-                        se = self._parse_season_episode(file_path.name)
-                        return {
-                            "filepath": str(file_path),
-                            "filename": file_path.name,
-                            "parent_dir": str(file_path.parent),
-                            "size_bytes": file_path.stat().st_size,
-                            "size_display": self._format_file_size(file_path.stat().st_size),
-                            "quality_score": quality["score"],
-                            "quality_details": quality,
-                            "media_title": self._guess_media_title(file_path),
-                            "media_year": self._guess_media_year(file_path),
-                            "tmdbid": self._parse_tmdb_id(file_path),
-                            "season_episode": se,
-                            "season_num": se.get("season_num", 0),
-                            "episode_num": se.get("episode_num", 0),
-                            "is_movie": se.get("is_movie", True),
+                # 构建 show 索引（仅从重复项构建）
+                global_shows: Dict[str, Any] = {}
+                for gk, gd in global_items.items():
+                    show_key = f"{gd['title']}|{gd['year']}|{gd['tmdbid'] or ''}"
+                    if show_key not in global_shows:
+                        global_shows[show_key] = {
+                            "title": gd["title"], "year": gd["year"], "tmdbid": gd["tmdbid"],
+                            "episode_keys": [], "season_count": 0, "seasons": {}
                         }
-                    except Exception as e:
-                        logger.debug(f"解析文件质量出错 {file_path.name}: {str(e)}")
-                        return None
+                    global_shows[show_key]["episode_keys"].append(gk)
+                    sn = gd.get("season_num", 0)
+                    if sn not in global_shows[show_key]["seasons"]:
+                        global_shows[show_key]["seasons"][sn] = []
+                    global_shows[show_key]["seasons"][sn].append(gk)
 
-                with ThreadPoolExecutor(max_workers=10) as executor:
-                    futures = {executor.submit(_parse_single_file, fp): fp for fp in all_files}
-                    done_count = 0
-                    total_files = len(all_files)
-                    for future in as_completed(futures):
-                        result = future.result()
-                        if result:
-                            scanned_items.append(result)
-                        done_count += 1
-                        if done_count % max(1, total_files // 10) == 0 or done_count == total_files:
-                            self._set_progress(done_count, total_files, "解析文件质量中...")
+                # 每部剧的集数按季+集升序排列
+                for show_data in global_shows.values():
+                    show_data["episode_keys"].sort(key=lambda k: (
+                        global_items[k].get("season_num", 0),
+                        global_items[k].get("episode_num", 0)
+                    ))
+                    show_data["season_count"] = len(show_data["seasons"])
 
-                grouped = self._group_by_media(scanned_items)
-                results = self._compare_and_rank(grouped)
-                # v2.5.0: 移除 Dry-Run 模式，直接执行真实操作
-                results["scan_mode"] = self._scan_mode
-                self._save_scan_results(results, len(scanned_items))
+                # items 排序（有重复的靠前）
+                items_sorted = sorted(
+                    global_items.values(),
+                    key=lambda x: (
+                        0 if x["has_duplicates"] else 1,
+                        -(max(v["quality_score"] for v in x["versions"]) if x["versions"] else 0)
+                    )
+                )
+                items_ordered = [it["media_group_key"] for it in items_sorted]
+
+                # 计算待删数量
+                pending_delete_count = sum(
+                    1 for item in global_items.values()
+                    for ver in item.get("versions", [])
+                    if not ver.get("is_best")
+                )
+
+                # 组装最终 results（仅含重复项 + 汇总统计）
+                results = {
+                    "last_scan": _now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "total_items": global_total_files,
+                    "total_groups": global_total_groups,
+                    "groups_with_duplicates": global_duplicates,
+                    "potential_savings_gb": round(global_savings / (1024 ** 3), 1),
+                    "items": global_items,
+                    "shows": global_shows,
+                    "items_ordered": items_ordered,
+                    "scan_mode": self._scan_mode,
+                    "scanned_directories": [d.name for d in scan_dirs],
+                    "dir_stats": dir_stats,
+                    "pending_delete_count": pending_delete_count,
+                }
+
+                self._save_scan_results(results, global_total_files)
 
                 # 自动清理（仅定时任务模式）
                 deleted_count = 0
                 if auto_delete:
                     deleted_count = self._execute_cleanup(results)
                     if deleted_count > 0:
-                        logger.info(f"影视洗板: 自动清理完成，删除了 {deleted_count} 个低质量文件")
+                        logger.info(f"影视洗版: 自动清理完成，删除了 {deleted_count} 个低质量文件")
                         results["last_cleanup"] = _now().strftime("%Y-%m-%d %H:%M:%S")
                         results["last_cleanup_count"] = deleted_count
                         self.save_data("wash_results", results)
                 else:
-                    logger.info(f"影视洗板: 手动模式，待用户确认删除（共 {results['groups_with_duplicates']} 组重复）")
+                    logger.info(f"影视洗版: 手动模式，待用户确认删除（共 {global_duplicates} 组重复）")
 
                 if self._notify:
                     send_scan_notification(
                         self.post_message,
-                        results, len(scanned_items),
+                        results, global_total_files,
                         auto_delete, deleted_count,
+                        scanned_directories=results.get("scanned_directories"),
+                        pending_delete_count=results.get("pending_delete_count", 0),
                     )
 
-                logger.info("=== 影视洗板: 扫描完成 ===")
+                logger.info("=== 影视洗版: 扫描完成 ===")
                 self._clear_progress()
 
             except Exception as e:
-                logger.error(f"影视洗板扫描出错: {str(e)}")
+                logger.error(f"影视洗版扫描出错: {str(e)}")
                 import traceback
                 logger.error(traceback.format_exc())
                 self._clear_progress()
                 if self._notify:
                     self.post_message(
-                        title="影视洗板扫描出错",
+                        title="影视洗版扫描出错",
                         text=f"扫描过程发生错误: {str(e)}",
                         mtype=NotificationType.Manual
                     )
@@ -486,12 +638,8 @@ class MediaBoardWash(_PluginBase):
     # ============================================================
 
     def _save_scan_results(self, results: Dict[str, Any], total_scanned: int):
-        """保存扫描结果"""
+        """v2.7.0: 保存扫描结果（仅重复项 + 汇总统计，不再保存时间戳副本）"""
         self.save_data("wash_results", results)
-
-        scan_tag = _now().strftime("scan_%Y%m%d_%H%M%S")
-        self.save_data(scan_tag, results)
-        self._cleanup_old_scans(scan_tag)
 
         today = _now().strftime("%Y-%m-%d")
         history = self.get_data(f"wash_history_{today}") or {}
@@ -500,31 +648,19 @@ class MediaBoardWash(_PluginBase):
             "total_scanned": total_scanned,
             "total_groups": results["total_groups"],
             "duplicates_found": results["groups_with_duplicates"],
+            "pending_delete_count": results.get("pending_delete_count", 0),
             "potential_savings_gb": results["potential_savings_gb"],
         })
         self.save_data(f"wash_history_{today}", history)
 
         logger.info(
-            f"影视洗板扫描结果: 共扫描 {total_scanned} 个文件, "
+            f"影视洗版扫描结果: 共扫描 {total_scanned} 个文件, "
             f"{results['total_groups']} 组媒体, "
             f"{results['groups_with_duplicates']} 组有重复, "
+            f"{results.get('pending_delete_count', 0)} 个文件待清理, "
             f"可节省 {results['potential_savings_gb']} GB"
         )
 
-    def _cleanup_old_scans(self, current_tag: str):
-        """清理超过10条的旧扫描记录"""
-        try:
-            tags = self.get_data("_scan_tags") or []
-            tags.append(current_tag)
-            tags = sorted(set(tags))[-10:]
-            self.save_data("_scan_tags", tags)
-            for old_tag in tags[:-10]:
-                try:
-                    self.save_data(old_tag, None)
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
     def _set_action_message(self, msg: str):
         """设置操作反馈消息"""
@@ -550,7 +686,7 @@ class MediaBoardWash(_PluginBase):
         if results is None:
             results = self.get_data("wash_results")
         if not results or "items" not in results:
-            logger.warning("影视洗板: 没有扫描结果，无法执行清理")
+            logger.warning("影视洗版: 没有扫描结果，无法执行清理")
             return 0
 
         deleted = execute_cleanup(results["items"])
@@ -565,9 +701,9 @@ class MediaBoardWash(_PluginBase):
         """执行清理并发送通知"""
         results = self.get_data("wash_results")
         if not results:
-            logger.warning("影视洗板: 触发清理但无扫描结果")
+            logger.warning("影视洗版: 触发清理但无扫描结果")
             self.post_message(
-                title="影视洗板清理",
+                title="影视洗版清理",
                 text="没有扫描结果，请先执行扫描",
                 mtype=NotificationType.Manual
             )
@@ -576,13 +712,13 @@ class MediaBoardWash(_PluginBase):
         deleted = self._execute_cleanup(results)
         if deleted > 0:
             self.post_message(
-                title="影视洗板清理完成",
+                title="影视洗版清理完成",
                 text=f"已确认删除 {deleted} 个低质量文件",
                 mtype=NotificationType.Manual
             )
         else:
             self.post_message(
-                title="影视洗板清理",
+                title="影视洗版清理",
                 text="没有需要清理的文件",
                 mtype=NotificationType.Manual
             )
@@ -600,7 +736,7 @@ class MediaBoardWash(_PluginBase):
     # ============================================================
 
     def get_page(self) -> List[dict]:
-        """插件详情页面 - 展示影视洗板对比结果"""
+        """插件详情页面 - 展示影视洗版对比结果"""
         results = self.get_data("wash_results")
         action_msg = self._get_action_message()
         # P1: 获取扫描进度
@@ -617,13 +753,13 @@ class MediaBoardWash(_PluginBase):
             try:
                 return [{
                     "id": "MediaBoardWash",
-                    "name": "影视洗板定时扫描",
+                    "name": "影视洗版定时扫描",
                     "trigger": CronTrigger.from_crontab(self._cron),
                     "func": lambda: self._scan_and_wash(auto_delete=True),
                     "kwargs": {}
                 }]
             except Exception as e:
-                logger.error(f"影视洗板定时任务配置错误: {str(e)}")
+                logger.error(f"影视洗版定时任务配置错误: {str(e)}")
         return []
 
     # ============================================================
@@ -637,22 +773,22 @@ class MediaBoardWash(_PluginBase):
             {
                 "cmd": "/media_wash",
                 "event": EventType.PluginAction,
-                "desc": "影视洗板扫描",
-                "category": "影视洗板",
+                "desc": "影视洗版扫描",
+                "category": "影视洗版",
                 "data": {"action": "media_wash_scan"}
             },
             {
                 "cmd": "/media_wash_cleanup",
                 "event": EventType.PluginAction,
-                "desc": "影视洗板清理",
-                "category": "影视洗板",
+                "desc": "影视洗版清理",
+                "category": "影视洗版",
                 "data": {"action": "media_wash_cleanup"}
             },
             {
                 "cmd": "/media_wash_status",
                 "event": EventType.PluginAction,
-                "desc": "影视洗板状态",
-                "category": "影视洗板",
+                "desc": "影视洗版状态",
+                "category": "影视洗版",
                 "data": {"action": "media_wash_status"}
             }
         ]
@@ -663,7 +799,7 @@ class MediaBoardWash(_PluginBase):
 
     def action_scan(self) -> dict:
         """前端按钮「🔄 扫描」"""
-        logger.info("影视洗板: 前端触发立即扫描")
+        logger.info("影视洗版: 前端触发立即扫描")
         if not self._enabled:
             return {"msg": "⚠️ 插件未启用，请先在配置中启用", "code": 400}
         thread = threading.Thread(target=lambda: self._scan_and_wash(auto_delete=False), daemon=True)
@@ -672,7 +808,7 @@ class MediaBoardWash(_PluginBase):
 
     def action_cleanup(self) -> dict:
         """前端按钮「🗑️ 删除」"""
-        logger.info("影视洗板: 前端触发确认清理")
+        logger.info("影视洗版: 前端触发确认清理")
         if not self._enabled:
             return {"msg": "⚠️ 插件未启用，请先在配置中启用", "code": 400}
         results = self.get_data("wash_results")
@@ -681,7 +817,7 @@ class MediaBoardWash(_PluginBase):
         deleted = self._execute_cleanup(results)
         if deleted > 0:
             msg = f"✅ 已删除 {deleted} 个文件，刷新页面查看"
-            self.post_message(title="影视洗板清理完成", text=msg, mtype=NotificationType.Manual)
+            self.post_message(title="影视洗版清理完成", text=msg, mtype=NotificationType.Manual)
             return {"msg": msg, "code": 200}
         return {"msg": "ℹ️ 没有需要清理的文件", "code": 200}
 
@@ -697,7 +833,7 @@ class MediaBoardWash(_PluginBase):
                 "endpoint": self.api_scan,
                 "methods": ["GET", "POST"],
                 "auth": "bear",
-                "summary": "触发影视洗板扫描（手动模式，仅展示结果）",
+                "summary": "触发影视洗版扫描（手动模式，仅展示结果）",
                 "description": "手动触发一次影视质量对比扫描，不删除文件"
             },
             {
@@ -714,7 +850,7 @@ class MediaBoardWash(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "获取扫描结果",
-                "description": "获取最近一次的影视洗板扫描结果"
+                "description": "获取最近一次的影视洗版扫描结果"
             },
             {
                 "path": "/history",
@@ -734,7 +870,7 @@ class MediaBoardWash(_PluginBase):
         thread.start()
         return {
             "success": True,
-            "message": "影视洗板扫描已启动（手动模式），请在插件详情页查看结果，确认后点击删除",
+            "message": "影视洗版扫描已启动（手动模式），请在插件详情页查看结果，确认后点击删除",
             "redirect": "/plugins/mediaboardwash"
         }
 
@@ -779,10 +915,10 @@ class MediaBoardWash(_PluginBase):
         action = event.event_data.get("action")
 
         if action == "media_wash_scan":
-            logger.info("收到命令: 影视洗板扫描（手动模式）")
+            logger.info("收到命令: 影视洗版扫描（手动模式）")
             self.post_message(
                 channel=event.event_data.get("channel"),
-                title="影视洗板扫描",
+                title="影视洗版扫描",
                 text="开始扫描媒体库质量对比（仅展示结果，不会删除文件）...",
                 userid=event.event_data.get("user")
             )
@@ -790,26 +926,26 @@ class MediaBoardWash(_PluginBase):
             thread.start()
 
         elif action == "media_wash_cleanup":
-            logger.info("收到命令: 影视洗板确认删除")
+            logger.info("收到命令: 影视洗版确认删除")
             results = self.get_data("wash_results")
             if not results:
                 self.post_message(
                     channel=event.event_data.get("channel"),
-                    title="影视洗板清理",
+                    title="影视洗版清理",
                     text="没有扫描结果，请先执行 /media_wash 扫描",
                     userid=event.event_data.get("user")
                 )
                 return
             self.post_message(
                 channel=event.event_data.get("channel"),
-                title="影视洗板清理",
+                title="影视洗版清理",
                 text="开始执行低质量文件清理...",
                 userid=event.event_data.get("user")
             )
             deleted = self._execute_cleanup(results)
             self.post_message(
                 channel=event.event_data.get("channel"),
-                title="影视洗板清理完成",
+                title="影视洗版清理完成",
                 text=f"成功处理 {deleted} 个文件",
                 userid=event.event_data.get("user")
             )
@@ -819,7 +955,7 @@ class MediaBoardWash(_PluginBase):
             text = build_status_text(results)
             self.post_message(
                 channel=event.event_data.get("channel"),
-                title="影视洗板状态",
+                title="影视洗版状态",
                 text=text,
                 userid=event.event_data.get("user")
             )

@@ -196,14 +196,15 @@
     }
   },
   "MediaBoardWash": {
-    "name": "影视洗板",
+    "name": "影视洗版",
     "description": "扫描 .strm/视频文件，从文件名解析质量信息，进行洗版。",
-    "labels": "影视洗板",
-    "version": "2.5.0",
+    "labels": "影视洗版",
+    "version": "2.7.0",
     "icon": "mdi-filmstrip-box-multiple",
     "author": "Senior Developer",
     "level": 1,
     "history": {
+      "v2.7.0": "优化",
       "v2.5.0": "优化",
       "v2.2.0": "首次提交代码"
     }

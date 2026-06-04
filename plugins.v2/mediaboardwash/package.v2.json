@@ -1,8 +1,8 @@
 {
   "MediaBoardWash": {
-    "name": "影视洗板",
+    "name": "影视洗版",
     "description": "扫描 .strm/视频文件，从文件名解析质量信息，按标题+年份+TMDB+季+集精准分组，同集多版本才去重保留最佳。单版本每集自动保留。v2.2.0: 修复双重正则/TOCTOU竞态/时区不一致；重构build_form；新增输入验证；新建工程基础设施。78测试全部通过。",
-    "labels": "影视洗板",
+    "labels": "影视洗版",
     "version": "2.2.0",
     "icon": "mdi-filmstrip-box-multiple",
     "author": "Senior Developer",

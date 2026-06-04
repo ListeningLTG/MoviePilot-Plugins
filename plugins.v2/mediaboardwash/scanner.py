@@ -1,5 +1,5 @@
 """
-影视洗板插件 — 扫描与分组引擎
+影视洗版插件 — 扫描与分组引擎
 ================================
 文件扫描、媒体信息提取、分组对比、质量排名。
 """
@@ -43,16 +43,16 @@ def resolve_scan_directories(media_dirs: str = "") -> List[Path]:
     """
     dirs: List[Path] = []
 
-    # 优先使用用户配置的目录
+    # 优先使用用户配置的目录（兼容逗号和换行分隔）
     if media_dirs:
-        for d in media_dirs.split(","):
+        for d in media_dirs.replace(",", "\n").split("\n"):
             d = d.strip()
             if d:
                 path = Path(d)
                 if path.exists() and path.is_dir():
                     dirs.append(path)
                 else:
-                    logger.warning(f"影视洗板: 配置的目录不存在: {d}")
+                    logger.warning(f"影视洗版: 配置的目录不存在: {d}")
 
     # 如果未配置，使用系统媒体库目录
     if not dirs:
@@ -83,24 +83,47 @@ def resolve_scan_directories(media_dirs: str = "") -> List[Path]:
     return dirs
 
 
-def collect_target_files(directories: List[Path], min_size: int = 100) -> List[Path]:
+def collect_target_files(
+    directories: List[Path],
+    min_size: int = 100,
+    progress_callback: Optional[callable] = None,
+) -> Tuple[List[Path], Dict[str, int]]:
     """
     收集目录下的所有 .strm 和视频文件。
 
     .strm 文件没有文件大小下限，
     视频文件默认需 >= min_size MB。
 
+    v2.6.0: 支持多目录串行扫描，逐目录上报进度和统计。
+
     Args:
         directories: 要扫描的目录列表
         min_size: 视频文件最小大小(MB)
+        progress_callback: 进度回调函数 (phase, message, current, total)
 
     Returns:
-        目标文件路径列表
+        (目标文件路径列表, 目录统计字典 {"目录名": 文件数})
     """
     target_files = []
     min_bytes = min_size * 1024 * 1024
+    dir_stats: Dict[str, int] = {}
 
-    for directory in directories:
+    for idx, directory in enumerate(directories):
+        dir_name = directory.name
+
+        # 进度上报
+        if progress_callback:
+            try:
+                progress_callback(
+                    phase="scanning",
+                    message=f"扫描目录 {idx + 1}/{len(directories)}: {dir_name}...",
+                    current=idx,
+                    total=len(directories),
+                )
+            except Exception:
+                pass
+
+        dir_count = 0
         try:
             for root, _, files in os.walk(directory):
                 root_path = Path(root)
@@ -114,21 +137,26 @@ def collect_target_files(directories: List[Path], min_size: int = 100) -> List[P
                     # .strm 文件始终收录
                     if ext == ".strm":
                         target_files.append(file_path)
+                        dir_count += 1
                         continue
 
                     # 视频文件按最小大小过滤（v2.3.0: 保护网络挂载超时）
                     try:
                         if file_path.stat().st_size >= min_bytes:
                             target_files.append(file_path)
+                            dir_count += 1
                     except OSError:
-                        logger.debug(f"影视洗板: 无法读取文件信息（可能网络挂载断开）: {file_path}")
+                        logger.debug(f"影视洗版: 无法读取文件信息（可能网络挂载断开）: {file_path}")
 
         except PermissionError:
-            logger.warning(f"影视洗板: 无权限访问目录 {directory}")
+            logger.warning(f"影视洗版: 无权限访问目录 {directory}")
         except Exception as e:
-            logger.warning(f"影视洗板: 扫描目录 {directory} 出错: {str(e)}")
+            logger.warning(f"影视洗版: 扫描目录 {directory} 出错: {str(e)}")
 
-    return target_files
+        dir_stats[dir_name] = dir_count
+        logger.info(f"影视洗版: 目录 [{dir_name}] 扫描完成，共 {dir_count} 个文件")
+
+    return target_files, dir_stats
 
 
 # ============================================================

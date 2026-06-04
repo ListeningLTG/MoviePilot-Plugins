@@ -1,5 +1,5 @@
 """
-影视洗板插件 — UI 渲染模块
+影视洗版插件 — UI 渲染模块
 ================================
 配置表单和结果展示页的 Vuetify JSON 结构构建。
 """
@@ -478,9 +478,24 @@ def _build_basic_settings() -> list:
         {
             'component': 'VRow',
             'content': [
-                _textfield_col('md6', 'media_dirs', '媒体目录',
-                               '留空则使用系统媒体库，多个用逗号分隔',
-                               '例如: /media/movies,/media/tv'),
+                {
+                    'component': 'VCol',
+                    'props': {'cols': 12, 'md': 6},
+                    'content': [
+                        {
+                            'component': 'VTextarea',
+                            'props': {
+                                'model': 'media_dirs',
+                                'label': '媒体目录',
+                                'rows': 4,
+                                'placeholder': '/media/movies\n/media/tv\n/media/anime',
+                                'hint': '每行一个目录路径，留空则使用系统媒体库目录',
+                                'persistent-hint': True,
+                                'clearable': True,
+                            }
+                        }
+                    ]
+                },
                 _textfield_col('md3', 'cron', '执行周期(Cron)',
                                '5位cron表达式', '留空则仅手动执行'),
                 _textfield_col('md3', 'min_size', '最小文件(MB)',
@@ -912,10 +927,10 @@ def _build_results_page(results: Dict, action_banner: list, progress_banner: lis
 
     # 统计卡片
     stat_cards = [
-        build_stat_card("🎬", "文件数", str(stats["total_items"]), "primary"),
-        build_stat_card("📁", "媒体组", str(stats["total_groups"]), "success"),
-        build_stat_card("🔄", "重复组", str(stats["duplicates"]), "warning"),
-        build_stat_card("💾", "可节省", f"{stats['savings_gb']}GB", "error"),
+        build_stat_card("🎬", "总文件", str(stats["total_items"]), "primary"),
+        build_stat_card("📁", "重复组", str(stats["duplicates"]), "warning"),
+        build_stat_card("🗑️", "待删", str(stats.get("pending_delete_count", 0)), "error"),
+        build_stat_card("💾", "可节省", f"{stats['savings_gb']}GB", "success"),
     ]
 
     # 如果有多季，按"all"汇总
@@ -925,7 +940,27 @@ def _build_results_page(results: Dict, action_banner: list, progress_banner: lis
     }
 
     # 构建媒体列表面板（每部剧为一个折叠面板）
-    media_panels = _build_media_panels(shows, items, stats)
+    media_panels = _build_media_panels(shows, items, stats, filter_duplicates_only=True)
+
+    # v2.7.0: 无重复项的空状态提示
+    no_dup_alert = []
+    if not media_panels and stats["total_items"] > 0:
+        no_dup_alert = [
+            {
+                'component': 'VAlert',
+                'props': {
+                    'type': 'success',
+                    'variant': 'tonal',
+                    'class': 'mb-4',
+                },
+                'content': [
+                    {
+                        'component': 'span',
+                        'text': f'扫描 {stats["total_items"]:,} 个文件，未发现重复版本，无需清理'
+                    }
+                ]
+            }
+        ]
 
     cleanup_info = ""
     if stats["last_cleanup"]:
@@ -941,6 +976,8 @@ def _build_results_page(results: Dict, action_banner: list, progress_banner: lis
         },
         *action_banner,
         *progress_banner,
+        # v2.7.0: 无重复项空状态提示
+        *no_dup_alert,
         # 统计卡片
         {
             'component': 'VRow',
@@ -991,6 +1028,8 @@ def _build_results_page(results: Dict, action_banner: list, progress_banner: lis
                 }
             ]
         },
+        # v2.6.0: 无重复项隐藏提示
+    ] + (_hidden_no_dup_alert(stats) if stats.get("hidden_no_dup_count", 0) > 0 else []) + [
         # 媒体列表面板
         {
             'component': 'VRow',
@@ -1062,7 +1101,7 @@ def _build_results_page(results: Dict, action_banner: list, progress_banner: lis
 
 
 def _compute_stats(results: Dict) -> dict:
-    """从扫描结果中计算统计汇总。"""
+    """v2.7.0: 从扫描结果中计算统计汇总（total_items 为扫描的总文件数）。"""
     return {
         "last_scan": results.get("last_scan", "未知"),
         "total_items": results.get("total_items", 0),
@@ -1071,6 +1110,7 @@ def _compute_stats(results: Dict) -> dict:
         "savings_gb": results.get("potential_savings_gb", 0),
         "last_cleanup": results.get("last_cleanup", None),
         "last_cleanup_count": results.get("last_cleanup_count", 0),
+        "pending_delete_count": results.get("pending_delete_count", 0),
     }
 
 
@@ -1286,8 +1326,39 @@ def _build_search_filter_bar(stats: dict, pending_delete_count: int) -> list:
     ]
 
 
-def _build_media_panels(shows: Dict, items: Dict, stats: dict) -> list:
-    """构建媒体（剧集/电影）折叠面板列表。"""
+def _hidden_no_dup_alert(stats: dict) -> list:
+    """v2.6.0: 构建无重复项已隐藏的提示组件。"""
+    hidden = stats.get("hidden_no_dup_count", 0)
+    if hidden <= 0:
+        return []
+    return [
+        {
+            'component': 'VAlert',
+            'props': {
+                'type': 'info',
+                'variant': 'tonal',
+                'density': 'compact',
+                'class': 'mb-2',
+            },
+            'content': [
+                {
+                    'component': 'span',
+                    'text': f'另有 {hidden} 部影视无重复版本（已隐藏），仅展示有重复的项目'
+                }
+            ]
+        }
+    ]
+
+
+def _build_media_panels(shows: Dict, items: Dict, stats: dict, filter_duplicates_only: bool = True) -> list:
+    """构建媒体（剧集/电影）折叠面板列表。
+
+    Args:
+        shows: show 索引字典
+        items: item 索引字典
+        stats: 统计信息
+        filter_duplicates_only: True 时仅展示有重复的 show
+    """
     media_panels = []
     show_keys = sorted(
         shows.keys(),
@@ -1299,6 +1370,17 @@ def _build_media_panels(shows: Dict, items: Dict, stats: dict) -> list:
             shows[k]["title"].lower(),
         )
     )
+
+    # v2.6.0: 默认过滤掉无重复的 show
+    if filter_duplicates_only:
+        original_count = len(show_keys)
+        show_keys = [
+            k for k in show_keys
+            if any(items.get(ek, {}).get("has_duplicates") for ek in shows[k]["episode_keys"])
+        ]
+        stats["hidden_no_dup_count"] = original_count - len(show_keys)
+    else:
+        stats["hidden_no_dup_count"] = 0
 
     for idx, show_key in enumerate(show_keys):
 
