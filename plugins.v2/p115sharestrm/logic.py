@@ -152,19 +152,31 @@ def _make_endpoint_pool(client: ShareP115Client) -> _EndpointPool:
       1. https://proapi.115.com  (App 接口)
       2. http://pro.api.115.com  (App 接口，HTTP)
       3. https://webapi.115.com  (Cookie 接口)
+
+    注意：p115client 底层使用 httpx，timeout 必须通过 extensions={"timeout": {...}}
+    传入，不能使用 requests 风格的 (connect, read) 元组。
     """
+    _timeout = {"connect": 10, "pool": 10, "read": 60, "write": 60}
     return _EndpointPool([
         (
             "share_snap_app_https",
-            lambda p: client.share_snap_app(p, base_url="https://proapi.115.com", timeout=(10, 60)),
+            lambda p: client.share_snap_app(
+                p, base_url="https://proapi.115.com",
+                extensions={"timeout": _timeout},
+            ),
         ),
         (
             "share_snap_app_http",
-            lambda p: client.share_snap_app(p, base_url="http://pro.api.115.com", timeout=(10, 60)),
+            lambda p: client.share_snap_app(
+                p, base_url="http://pro.api.115.com",
+                extensions={"timeout": _timeout},
+            ),
         ),
         (
             "share_snap_cookie",
-            lambda p: client.share_snap_cookie(p, timeout=(10, 60)),
+            lambda p: client.share_snap_cookie(
+                p, extensions={"timeout": _timeout},
+            ),
         ),
     ])
 
