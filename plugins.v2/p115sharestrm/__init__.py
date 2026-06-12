@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.37"
+    plugin_version = "1.0.38"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -199,6 +199,27 @@ class p115sharestrm(_PluginBase):
                                                             "model": "imdb_extract",
                                                             "label": "自动提取 IMDB ID",
                                                             "hint": "从指令文本中提取 IMDB ID，格式如 tt1234567 或 IMDB: tt1234567，两个开关同时开启时优先使用 TMDB ID",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    # ── 提取识别黑名单行 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "extract_blacklist",
+                                                            "label": "提取识别黑名单",
+                                                            "hint": "英文逗号隔开输入多个。若消息中包含任意关键词，则不提取 TMDB/IMDB ID，如：定时分享,最近接收",
                                                             "persistent-hint": True,
                                                         },
                                                     }
@@ -447,6 +468,7 @@ class p115sharestrm(_PluginBase):
             "strm_url_template_enabled": False,
             "tmdb_extract": False,
             "imdb_extract": False,
+            "extract_blacklist": "",
             "strm_url_template": "",
             "strm_url_template_custom": "",
             "user_rmt_mediaext": "mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v",
@@ -570,24 +592,43 @@ class p115sharestrm(_PluginBase):
         tmdbid = None
         imdbid = None
         mtype = None
-        
-        # 提取 TMDB ID（如果开关打开）
-        if configer.tmdb_extract:
+
+        # 检查是否命中提取黑名单
+        hit_blacklist = False
+        if configer.extract_blacklist:
+            keywords = [k.strip() for k in configer.extract_blacklist.split(",") if k.strip()]
+            for word in keywords:
+                if word.lower() in arg_str.lower():
+                    logger.info(f"【P115ShareStrm】指令参数中包含黑名单关键词 '{word}'，跳过 TMDB/IMDB ID 提取识别")
+                    hit_blacklist = True
+                    break
+
+        # 提取 TMDB ID（如果开关打开且没有命中黑名单）
+        if configer.tmdb_extract and not hit_blacklist:
             # 优先从 TMDB 链接中提取 ID 和媒体类型，格式如:
             #   https://www.themoviedb.org/tv/289690
             #   https://www.themoviedb.org/movie/1474050
             #   https://www.themoviedb.org/collection/17149
-            tmdb_url_match = re.search(r'themoviedb\.org/(tv|movie|collection)/(\d+)', arg_str, re.IGNORECASE)
-            if tmdb_url_match:
-                mtype = tmdb_url_match.group(1).lower()  # "tv", "movie" 或 "collection"
-                tmdbid = int(tmdb_url_match.group(2))
-                logger.info(f"【P115ShareStrm】从 TMDB 链接中提取到 TMDB ID: {tmdbid}，类型: {mtype}")
-            else:
-                # 回退：支持格式: TMDB ID: 123, TMDBID: 123, tmdb-123, tmdb=123, tmdb 123 等
-                tmdb_match = re.search(r'TMDB(?:[\s\-_]*ID)?\s*[：:= \-]+(\d+)', arg_str, re.IGNORECASE)
-                if tmdb_match:
-                    tmdbid = int(tmdb_match.group(1))
-                    logger.info(f"【P115ShareStrm】从指令文本中提取到 TMDB ID: {tmdbid}")
+            tmdb_urls = re.findall(r'themoviedb\.org/(tv|movie|collection)/(\d+)', arg_str, re.IGNORECASE)
+            # 回退：支持格式: TMDB ID: 123, TMDBID: 123, tmdb-123, tmdb=123, tmdb 123 等
+            tmdb_texts = re.findall(r'TMDB(?:[\s\-_]*ID)?\s*[：:= \-]+(\d+)', arg_str, re.IGNORECASE)
+
+            unique_tmdb_ids = set()
+            for _, tid in tmdb_urls:
+                unique_tmdb_ids.add(int(tid))
+            for tid in tmdb_texts:
+                unique_tmdb_ids.add(int(tid))
+
+            if len(unique_tmdb_ids) > 1:
+                logger.info(f"【P115ShareStrm】检测到消息中存在多个不同的 TMDB ID: {list(unique_tmdb_ids)}，跳过提取")
+            elif len(unique_tmdb_ids) == 1:
+                tmdbid = list(unique_tmdb_ids)[0]
+                mtypes_for_id = {m.lower() for m, tid in tmdb_urls if int(tid) == tmdbid}
+                if len(mtypes_for_id) == 1:
+                    mtype = list(mtypes_for_id)[0]
+                    logger.info(f"【P115ShareStrm】从 TMDB 链接中提取到唯一的 TMDB ID: {tmdbid}，类型: {mtype}")
+                else:
+                    logger.info(f"【P115ShareStrm】从指令文本中提取到唯一的 TMDB ID: {tmdbid}")
                     # 剥掉 URL，只在纯文本上做类型关键词匹配，避免密码/参数干扰
                     clean_text = re.sub(r'https?://\S+', '', arg_str)
                     # 尝试通过关键词判断类型
@@ -614,24 +655,28 @@ class p115sharestrm(_PluginBase):
                         else:
                             logger.info(f"【P115ShareStrm】TMDB验证确认媒体类型: {mtype}")
 
-        # 提取 IMDB ID（如果开关打开，且未提取到 TMDB ID 时）
-        if configer.imdb_extract and not tmdbid:
+        # 提取 IMDB ID（如果开关打开，且未提取到 TMDB ID，且未命中黑名单时）
+        if configer.imdb_extract and not tmdbid and not hit_blacklist:
             # 优先从 IMDB 链接中提取 ID，格式如:
             #   https://www.imdb.com/title/tt1234567/
             #   https://imdb.com/title/tt1234567
-            imdb_url_match = re.search(r'imdb\.com/title/(tt\d+)', arg_str, re.IGNORECASE)
-            if imdb_url_match:
-                imdbid = imdb_url_match.group(1)
-                logger.info(f"【P115ShareStrm】从 IMDB 链接中提取到 IMDB ID: {imdbid}")
-            else:
-                # 回退：支持格式: IMDB: tt1234567, IMDBID: tt1234567, imdb-tt1234567, 或直接 tt1234567
-                imdb_match = re.search(r'(?:IMDB(?:[\s\-_]*ID)?\s*[：:= \-]+)?(tt\d{7,8})', arg_str, re.IGNORECASE)
-                if imdb_match:
-                    imdbid = imdb_match.group(1)
-                    logger.info(f"【P115ShareStrm】从指令文本中提取到 IMDB ID: {imdbid}")
-            
-            # 如果提取到 IMDB ID，通过 TMDB API 查询媒体信息并推断类型
-            if imdbid:
+            imdb_urls = re.findall(r'imdb\.com/title/(tt\d+)', arg_str, re.IGNORECASE)
+            # 回退：支持格式: IMDB: tt1234567, IMDBID: tt1234567, imdb-tt1234567, 或直接 tt1234567
+            imdb_texts = re.findall(r'(?:IMDB(?:[\s\-_]*ID)?\s*[：:= \-]+)?(tt\d{7,10})', arg_str, re.IGNORECASE)
+
+            unique_imdb_ids = set()
+            for iid in imdb_urls:
+                unique_imdb_ids.add(iid.lower())
+            for iid in imdb_texts:
+                unique_imdb_ids.add(iid.lower())
+
+            if len(unique_imdb_ids) > 1:
+                logger.info(f"【P115ShareStrm】检测到消息中存在多个不同的 IMDB ID: {list(unique_imdb_ids)}，跳过提取")
+            elif len(unique_imdb_ids) == 1:
+                imdbid = list(unique_imdb_ids)[0]
+                logger.info(f"【P115ShareStrm】从指令文本或链接中提取到唯一的 IMDB ID: {imdbid}")
+
+                # 如果提取到 IMDB ID，通过 TMDB API 查询媒体信息并推断类型
                 from .logic import _resolve_mtype_by_imdb
                 imdb_result = _resolve_mtype_by_imdb(imdbid, arg_str)
                 if imdb_result:
