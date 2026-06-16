@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.38"
+    plugin_version = "1.0.39"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -368,6 +368,10 @@ class p115sharestrm(_PluginBase):
                                                                 "component": "div",
                                                                 "text": "• 多个链接会依次加入队列，避免并发风控，实时通过 TG 推送处理进度",
                                                             },
+                                                            {
+                                                                "component": "div",
+                                                                "text": "• 默认生成的 STRM 为 http://<MoviePilot地址>/api/v1/plugin/P115StrmHelper/redirect_url?share_code=...&id=... 结构，需要安装并开启【115网盘STRM助手 (P115StrmHelper)】插件配合使用。",
+                                                            },
                                                         ],
                                                     },
                                                 ],
@@ -415,7 +419,7 @@ class p115sharestrm(_PluginBase):
                                                             "label": "STRM URL 自定义模板 (Jinja2)",
                                                             "hint": (
                                                                 "需开启上方【启用 STRM URL 自定义模板】开关后生效。"
-                                                                "可用变量：{{ share_code }}、{{ receive_code }}、{{ file_id }}、{{ file_name }}、{{ file_path }}、{{ base_url }}"
+                                                                "可用变量：{{ share_code }}、{{ receive_code }}、{{ file_id }}、{{ file_name }}、{{ file_path }}、{{ base_url }}、{{ sha }}"
                                                             ),
                                                             "persistent-hint": True,
                                                             "rows": 4,

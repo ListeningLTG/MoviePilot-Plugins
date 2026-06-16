@@ -224,6 +224,9 @@ def iter_share_files(
             name = item.get("name", "")
             current_path = f"{path_prefix}/{name}" if path_prefix else f"/{name}"
             if item.get("is_dir"):
+                if name.upper() in ("BDMV", "CERTIFICATE"):
+                    logger.info(f"【P115ShareStrm】检测到蓝光原盘标志性目录 '{name}' (路径: {current_path})，跳过该目录的遍历")
+                    continue
                 # 递归进入子目录，共享同一轮询池
                 yield from iter_share_files(
                     client, share_code, receive_code, int(item["id"]), current_path,
@@ -893,6 +896,8 @@ def process_share_strm(
                     file_id=item["id"],
                     file_path=full_path,
                     base_url=redirect_base,
+                    sha=item.get("sha1") or "",
+                    sha1=item.get("sha1") or "",
                 )
             else:
                 strm_url = (
