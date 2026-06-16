@@ -898,6 +898,7 @@ def process_share_strm(
                     base_url=redirect_base,
                     sha=item.get("sha1") or "",
                     sha1=item.get("sha1") or "",
+                    file_size=item.get("size") or 0,
                 )
             else:
                 strm_url = (

@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.39"
+    plugin_version = "1.0.40"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -419,7 +419,7 @@ class p115sharestrm(_PluginBase):
                                                             "label": "STRM URL 自定义模板 (Jinja2)",
                                                             "hint": (
                                                                 "需开启上方【启用 STRM URL 自定义模板】开关后生效。"
-                                                                "可用变量：{{ share_code }}、{{ receive_code }}、{{ file_id }}、{{ file_name }}、{{ file_path }}、{{ base_url }}、{{ sha }}"
+                                                                "可用变量：{{ share_code }}、{{ receive_code }}、{{ file_id }}、{{ file_name }}、{{ file_path }}、{{ base_url }}、{{ sha }}、{{ file_size }}"
                                                             ),
                                                             "persistent-hint": True,
                                                             "rows": 4,
