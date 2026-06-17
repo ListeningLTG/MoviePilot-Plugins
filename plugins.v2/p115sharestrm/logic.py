@@ -459,6 +459,7 @@ def _download_subtitles_from_share(
                         "share_code": share_code,
                         "receive_code": receive_code,
                     },
+                    app="android",
                     timeout=30,
                 )
                 resp_dl = httpx.get(
