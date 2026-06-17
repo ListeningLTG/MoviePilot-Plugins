@@ -244,7 +244,7 @@ def iter_share_files(
 
 # 字幕语言标签正则（与 MoviePilot transhandler.__rename_subtitles 保持一致）
 _ZHCN_SUB_RE = (
-    r"([.\[(\s](((zh[-_])?(cn|ch[si]|sg|sc))|zho?"
+    r"([.\[(\s](((zh[-_])?(cn|ch[si]|sg|sc|hans))|zho?"
     r"|chinese|(cn|ch[si]|sg|zho?)[-_&]?(cn|ch[si]|sg|zho?|eng|jap|ja|jpn)"
     r"|eng[-_&]?(cn|ch[si]|sg|zho?)|(jap|ja|jpn)[-_&]?(cn|ch[si]|sg|zho?)"
     r"|简[体中]?)[.\])\s])"
@@ -253,7 +253,7 @@ _ZHCN_SUB_RE = (
     r"|(?<![a-z0-9])gb(?![a-z0-9])"
 )
 _ZHTW_SUB_RE = (
-    r"([.\[(\s](((zh[-_])?(hk|tw|cht|tc))"
+    r"([.\[(\s](((zh[-_])?(hk|tw|cht|tc|hant))"
     r"|cht[-_&]?(cht|eng|jap|ja|jpn)"
     r"|eng[-_&]?cht|(jap|ja|jpn)[-_&]?cht"
     r"|繁[体中]?)[.\])\s])"
@@ -285,16 +285,19 @@ def _extract_subtitle_lang_tag(sub_filename: str) -> str:
     import re
     from app.core.config import settings
 
-    if re.search(_ZHCN_SUB_RE, sub_filename, re.I):
+    # 拼接一个前导点，以解决如 Hans.srt、hk.srt 等位于文件名开头无前导边界符的情况
+    test_name = f".{sub_filename}"
+
+    if re.search(_ZHCN_SUB_RE, test_name, re.I):
         lang_code = "zh-cn"
         lang = ".chi.zh-cn"
-    elif re.search(_ZHTW_SUB_RE, sub_filename, re.I):
+    elif re.search(_ZHTW_SUB_RE, test_name, re.I):
         lang_code = "zh-tw"
         lang = ".zh-tw"
-    elif re.search(_JA_SUB_RE, sub_filename, re.I):
+    elif re.search(_JA_SUB_RE, test_name, re.I):
         lang_code = "ja"
         lang = ".ja"
-    elif re.search(_ENG_SUB_RE, sub_filename, re.I):
+    elif re.search(_ENG_SUB_RE, test_name, re.I):
         lang_code = "eng"
         lang = ".eng"
     else:
@@ -1040,6 +1043,11 @@ def process_share_strm(
                         lang_tag = _extract_subtitle_lang_tag(sub_name)
                         new_name = _truncate_filename(strm_target.stem + lang_tag + local_path.suffix)
                         dest_path = strm_target.parent / new_name
+                        idx = 1
+                        while dest_path.exists():
+                            new_name = _truncate_filename(strm_target.stem + lang_tag + f".{idx}" + local_path.suffix)
+                            dest_path = strm_target.parent / new_name
+                            idx += 1
                         try:
                             dest_path.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(str(local_path), str(dest_path))
