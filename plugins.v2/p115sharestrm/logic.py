@@ -252,8 +252,15 @@ _ZHCN_SUB_RE = (
     r"|简体中[文字]|中[文字]简体|简体|JPSC|sc_jp"
     r"|(?<![a-z0-9])gb(?![a-z0-9])"
 )
+_ZHHK_SUB_RE = (
+    r"([.\[(\s](((zh[-_])?(hk))"
+    r"|hk[-_&]?(hk|eng|jap|ja|jpn)"
+    r"|eng[-_&]?hk|(jap|ja|jpn)[-_&]?hk"
+    r"|香港)[.\])\s])"
+    r"|香港中[文字]|中[文字]香港|粤语|廣東話|广东话"
+)
 _ZHTW_SUB_RE = (
-    r"([.\[(\s](((zh[-_])?(hk|tw|cht|tc|hant))"
+    r"([.\[(\s](((zh[-_])?(tw|cht|tc|hant))"
     r"|cht[-_&]?(cht|eng|jap|ja|jpn)"
     r"|eng[-_&]?cht|(jap|ja|jpn)[-_&]?cht"
     r"|繁[体中]?)[.\])\s])"
@@ -291,6 +298,9 @@ def _extract_subtitle_lang_tag(sub_filename: str) -> str:
     if re.search(_ZHCN_SUB_RE, test_name, re.I):
         lang_code = "zh-cn"
         lang = ".chi.zh-cn"
+    elif re.search(_ZHHK_SUB_RE, test_name, re.I):
+        lang_code = "zh-hk"
+        lang = ".zh-hk"
     elif re.search(_ZHTW_SUB_RE, test_name, re.I):
         lang_code = "zh-tw"
         lang = ".zh-tw"
