@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.44"
+    plugin_version = "1.0.45"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -71,7 +71,7 @@ class p115sharestrm(_PluginBase):
         """
         return []
 
-    def _send_notify(self, user_id: Optional[str], title: str, text: str):
+    def _send_notify(self, user_id: Optional[str], title: str, text: str, buttons: Optional[List[List[dict]]] = None):
         """
         通知发送包装，通过 MoviePilot 标准 post_message 接口发出
         """
@@ -81,6 +81,7 @@ class p115sharestrm(_PluginBase):
                 title=title,
                 text=text,
                 userid=user_id,
+                buttons=buttons,
             )
         except Exception as e:
             logger.warning(f"【P115ShareStrm】通知发送失败: {e}")
@@ -105,6 +106,13 @@ class p115sharestrm(_PluginBase):
                 "desc": "提取消息中的115分享链接并加入STRM生成队列",
                 "category": "115",
                 "data": {"plugin_id": "p115sharestrm", "action": "sharestrm"},
+            },
+            {
+                "cmd": "/sharesubdown",
+                "event": EventType.PluginAction,
+                "desc": "对 115 分享链接仅重新下载并放置字幕（根据整理历史）",
+                "category": "115",
+                "data": {"plugin_id": "p115sharestrm", "action": "sharesubdown"},
             },
         ]
 
@@ -577,8 +585,10 @@ class p115sharestrm(_PluginBase):
         event_data = event.event_data
         if event_data.get("plugin_id") and event_data.get("plugin_id") != "p115sharestrm":
             return
-        if event_data.get("action") != "sharestrm":
+        action = event_data.get("action")
+        if action not in ["sharestrm", "sharesubdown"]:
             return
+        sub_only = (action == "sharesubdown")
 
         user_id = str(
             event_data.get("userid") or event_data.get("user_id") or ""
@@ -709,16 +719,58 @@ class p115sharestrm(_PluginBase):
         for link_info in links:
             sc = link_info["share_code"]
             rc = link_info["receive_code"]
-            queued = task_queue.add_task(sc, rc, user_id, tmdbid=tmdbid, mtype=mtype, arg_str=arg_str)
+            queued = task_queue.add_task(sc, rc, user_id, tmdbid=tmdbid, mtype=mtype, arg_str=arg_str, sub_only=sub_only)
             if queued:
-                logger.info(f"【P115ShareStrm】加入队列 share_code={sc}, receive_code={rc}")
+                logger.info(f"【P115ShareStrm】加入队列 share_code={sc}, receive_code={rc}, sub_only={sub_only}")
+                title = "【115分享STRM】字幕重试已入队" if sub_only else "【115分享STRM】已入队"
+                text = (
+                    f"📥 分享码: {sc}\n🔑 提取码: {rc or '无'}\n"
+                    f"正在排队{'下载字幕' if sub_only else '处理'}，请稍候..."
+                )
                 self._send_notify(
                     user_id,
-                    "【115分享STRM】已入队",
-                    f"📥 分享码: {sc}\n🔑 提取码: {rc or '无'}\n正在排队处理，请稍候...",
+                    title,
+                    text,
                 )
             else:
                 logger.warning(f"【P115ShareStrm】任务已被去重过滤，跳过: {sc}")
+
+    @eventmanager.register(EventType.MessageAction)
+    def handle_message_action(self, event: Event):
+        """
+        处理 Telegram 按钮回调事件
+        """
+        if not configer.enabled:
+            return
+        if not event or not event.event_data:
+            return
+        event_data = event.event_data
+        if event_data.get("plugin_id") != "p115sharestrm":
+            return
+        
+        text = event_data.get("text") or ""
+        if not text.startswith("retry_sub:"):
+            return
+        
+        # 格式: retry_sub:share_code:receive_code
+        parts = text.split(":", 2)
+        if len(parts) < 2:
+            return
+        
+        share_code = parts[1]
+        receive_code = parts[2] if len(parts) > 2 else ""
+        user_id = str(event_data.get("userid") or event_data.get("user_id") or "")
+        
+        logger.info(f"【P115ShareStrm】通过 TG 按钮触发字幕重试: share_code={share_code}, receive_code={receive_code}")
+        
+        # 加入队列（sub_only=True）
+        queued = task_queue.add_task(share_code, receive_code, user_id, sub_only=True)
+        if queued:
+            self._send_notify(
+                user_id,
+                "【115分享STRM】字幕重试已入队",
+                f"📥 分享码: {share_code}\n正在排队重试下载字幕，请稍候...",
+            )
 
     def stop_service(self):
         """

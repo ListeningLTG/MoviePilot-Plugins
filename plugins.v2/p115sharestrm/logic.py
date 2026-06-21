@@ -454,6 +454,13 @@ def _download_subtitles_from_share(
     """
     import httpx
 
+    custom_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+        ),
+    }
+
     _download_headers = {
         "User-Agent": (
             "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
@@ -470,7 +477,7 @@ def _download_subtitles_from_share(
         scid = None
         try:
             # 1. 在网盘中创建临时文件夹
-            resp = client.fs_mkdir(f"subtitle-{uuid4()}")
+            resp = client.fs_mkdir(f"subtitle-{uuid4()}", headers=custom_headers)
             check_response(resp)
             if "cid" in resp:
                 scid = resp["cid"]
@@ -486,22 +493,33 @@ def _download_subtitles_from_share(
                 "cid": scid,
                 "is_check": 0,
             }
-            resp = client.share_receive(payload)
+            resp = client.share_receive(payload, headers=custom_headers)
             check_response(resp)
 
-            # 3. 等待 115 转存完成
-            sleep(8)
+            # 3. 轮询等待 115 异步转存完成（最多等待 30s，每 2s 轮询一次）
+            attr = None
+            for attempt in range(15):
+                sleep(2)
+                try:
+                    attr = next(
+                        _iter_fs_files(
+                            client=client,
+                            payload=scid,
+                            page_size=1,
+                            app="web",
+                            headers=custom_headers,
+                        )
+                    )
+                    if attr:
+                        break
+                except StopIteration:
+                    pass
 
-            # 4. 获取临时文件夹中文件信息，调用 fs_video_subtitle 获取下载链接
-            attr = next(
-                _iter_fs_files(
-                    client=client,
-                    payload=scid,
-                    page_size=1,
-                    app="web",
-                )
-            )
-            resp = client.fs_video_subtitle(attr["pickcode"])
+            if not attr:
+                raise RuntimeError("115 转存文件超时，临时文件夹中未发现字幕文件")
+
+            # 4. 调用 fs_video_subtitle 获取下载链接
+            resp = client.fs_video_subtitle(attr["pickcode"], headers=custom_headers)
             check_response(resp)
 
             # 5. 构建 sha1 -> url 映射
@@ -562,7 +580,7 @@ def _download_subtitles_from_share(
             # 7. 清理临时文件夹
             if scid:
                 try:
-                    client.fs_delete(scid)
+                    client.fs_delete(scid, headers=custom_headers)
                 except Exception as e:
                     logger.warning(f"【P115ShareStrm】清理字幕临时目录失败: {e}")
 
@@ -790,6 +808,7 @@ def process_share_strm(
     mtype: Optional[str] = None,
     arg_str: Optional[str] = None,
     notify: Optional[Callable[[str], None]] = None,
+    sub_only: bool = False,
 ) -> Dict[str, Any]:
     """
     实际执行 STRM 生成逻辑：遍历分享、生成文件、触发 MP 整理
@@ -993,102 +1012,114 @@ def process_share_strm(
             if not strm_url:
                 continue
 
-            strm_file_path.write_text(strm_url, encoding="utf-8")
-            strm_count += 1
-            if configer.moviepilot_transfer:
-                generated_strm_paths.append(strm_file_path)
-                strm_to_mediainfo[strm_file_path.as_posix()] = current_mediainfo
+            if not sub_only:
+                strm_file_path.parent.mkdir(parents=True, exist_ok=True)
+                strm_file_path.write_text(strm_url, encoding="utf-8")
+                strm_count += 1
+                if configer.moviepilot_transfer:
+                    generated_strm_paths.append(strm_file_path)
+                    strm_to_mediainfo[strm_file_path.as_posix()] = current_mediainfo
             media_stem_to_strm_path[Path(filename).stem] = strm_file_path
 
 
-        # 4. 第四步：全部生成完毕后，批量交由 MoviePilot 异步整理 STRM，并轮询等待全部完成
+        # 4. 第四步：全部生成完毕后，如果是全量任务，批量交由 MoviePilot 整理 STRM；如果是字幕重试任务，直接从历史库查出整理目标
         # strm 本地源路径（posix）→ MoviePilot 整理后目标路径，用于字幕直接放置
         strm_source_to_target: Dict[str, Path] = {}
         media_stem_to_target: Dict[str, Path] = {}
-        if generated_strm_paths and configer.moviepilot_transfer:
-            logger.info(f"【P115ShareStrm】开始批量整理 STRM，共 {len(generated_strm_paths)} 个文件")
+        if configer.moviepilot_transfer:
             from app.db.transferhistory_oper import TransferHistoryOper
             _th_oper = TransferHistoryOper()
-            transfer_chain = TransferChain()
-            # 1. 全部异步入队
-            for strm_file_path in generated_strm_paths:
-                try:
-                    stat = strm_file_path.stat()
-                    transfer_chain.do_transfer(
-                        fileitem=FileItem(
-                            storage="local",
-                            type="file",
-                            path=strm_file_path.as_posix(),
-                            name=strm_file_path.name,
-                            basename=strm_file_path.stem,
-                            extension="strm",
-                            size=stat.st_size,
-                            modify_time=stat.st_mtime,
-                        ),
-                        mediainfo=strm_to_mediainfo.get(strm_file_path.as_posix()),
-                        background=True,
-                    )
-                except Exception as e:
-                    logger.warning(f"【P115ShareStrm】STRM 整理入队失败: {strm_file_path.name}: {e}")
-            logger.info("【P115ShareStrm】STRM 已全部入队，等待整理完成...")
 
-            # 2. 轮询等待所有 STRM 整理完成
-            # 优化：只有在需要下载并放置字幕，且本次分享确实包含字幕文件时，才需要等待以获取目标路径
-            need_wait = configer.download_subtitle and subtitle_files
-            
-            pending = set(strm_file_path.as_posix() for strm_file_path in generated_strm_paths)
-            
-            # 即使不需要等待放置字幕，也可以先通过预扫描清理掉已经整理过的记录（保持状态准确）
-            for src in list(pending):
-                history = _th_oper.get_by_src(src, "local")
-                if history and history.dest:
-                    strm_source_to_target[src] = Path(history.dest)
-                    pending.remove(src)
-            
-            if pending:
-                if need_wait:
-                    # 动态调整超时时间：如果队列积压严重，缩短等待时间
-                    qsize = task_queue.get_queue_size()
-                    base_timeout = configer.wait_organize_timeout
-                    if qsize > 50:
-                        timeout = min(base_timeout, 30)
-                    elif qsize > 20:
-                        timeout = min(base_timeout, 60)
-                    elif qsize > 10:
-                        timeout = min(base_timeout, 120)
-                    else:
-                        timeout = base_timeout
+            if not sub_only and generated_strm_paths:
+                logger.info(f"【P115ShareStrm】开始批量整理 STRM，共 {len(generated_strm_paths)} 个文件")
+                transfer_chain = TransferChain()
+                # 1. 全部异步入队
+                for strm_file_path in generated_strm_paths:
+                    try:
+                        stat = strm_file_path.stat()
+                        transfer_chain.do_transfer(
+                            fileitem=FileItem(
+                                storage="local",
+                                type="file",
+                                path=strm_file_path.as_posix(),
+                                name=strm_file_path.name,
+                                basename=strm_file_path.stem,
+                                extension="strm",
+                                size=stat.st_size,
+                                modify_time=stat.st_mtime,
+                            ),
+                            mediainfo=strm_to_mediainfo.get(strm_file_path.as_posix()),
+                            background=True,
+                        )
+                    except Exception as e:
+                        logger.warning(f"【P115ShareStrm】STRM 整理入队失败: {strm_file_path.name}: {e}")
+                logger.info("【P115ShareStrm】STRM 已全部入队，等待整理完成...")
 
-                    logger.info(f"【P115ShareStrm】剩余 {len(pending)} 个文件等待整理 (积压: {qsize}，超时: {timeout}s)...")
-                    interval = 2
-                    waited = 0
-                    while pending and waited < timeout:
-                        finished = set()
-                        for src in pending:
-                            history = _th_oper.get_by_src(src, "local")
-                            if history and history.dest:
-                                strm_source_to_target[src] = Path(history.dest)
-                                finished.add(src)
-                        
-                        if finished:
-                            logger.info(f"【P115ShareStrm】整理完成新进度: {len(finished)} 个")
-                            pending -= finished
+                # 2. 轮询等待所有 STRM 整理完成
+                # 优化：只有在需要下载并放置字幕，且本次分享确实包含字幕文件时，才需要等待以获取目标路径
+                need_wait = configer.download_subtitle and subtitle_files
+                
+                pending = set(strm_file_path.as_posix() for strm_file_path in generated_strm_paths)
+                
+                # 即使不需要等待放置字幕，也可以先通过预扫描清理掉已经整理过的记录（保持状态准确）
+                for src in list(pending):
+                    history = _th_oper.get_by_src(src, "local")
+                    if history and history.dest:
+                        strm_source_to_target[src] = Path(history.dest)
+                        pending.remove(src)
+                
+                if pending:
+                    if need_wait:
+                        # 动态调整超时时间：如果队列积压严重，缩短等待时间
+                        qsize = task_queue.get_queue_size()
+                        base_timeout = configer.wait_organize_timeout
+                        if qsize > 50:
+                            timeout = min(base_timeout, 30)
+                        elif qsize > 20:
+                            timeout = min(base_timeout, 60)
+                        elif qsize > 10:
+                            timeout = min(base_timeout, 120)
+                        else:
+                            timeout = base_timeout
+
+                        logger.info(f"【P115ShareStrm】剩余 {len(pending)} 个文件等待整理 (积压: {qsize}，超时: {timeout}s)...")
+                        interval = 2
+                        waited = 0
+                        while pending and waited < timeout:
+                            finished = set()
+                            for src in pending:
+                                history = _th_oper.get_by_src(src, "local")
+                                if history and history.dest:
+                                    strm_source_to_target[src] = Path(history.dest)
+                                    finished.add(src)
+                            
+                            if finished:
+                                logger.info(f"【P115ShareStrm】整理完成新进度: {len(finished)} 个")
+                                pending -= finished
+                            
+                            if pending:
+                                sleep(interval)
+                                waited += interval
                         
                         if pending:
-                            sleep(interval)
-                            waited += interval
-                    
-                    if pending:
-                        if waited >= timeout:
-                            logger.warning(f"【P115ShareStrm】STRM 整理等待超时 ({timeout}s)，跳过后续等待（STRM 将在后台继续整理，但字幕可能无法自动归位）: {pending}")
+                            if waited >= timeout:
+                                logger.warning(f"【P115ShareStrm】STRM 整理等待超时 ({timeout}s)，跳过后续等待（STRM 将在后台继续整理，但字幕可能无法自动归位）: {pending}")
+                            else:
+                                logger.warning(f"【P115ShareStrm】部分 STRM 整理异常未完成: {pending}")
                         else:
-                            logger.warning(f"【P115ShareStrm】部分 STRM 整理异常未完成: {pending}")
+                            logger.info("【P115ShareStrm】STRM 批量整理全部完成")
                     else:
-                        logger.info("【P115ShareStrm】STRM 批量整理全部完成")
+                        logger.info("【P115ShareStrm】无需放置字幕，跳过整理等待")
                 else:
-                    logger.info("【P115ShareStrm】无需放置字幕，跳过整理等待")
-            else:
-                logger.info("【P115ShareStrm】所有文件均已整理过，无需等待")
+                    logger.info("【P115ShareStrm】所有文件均已整理过，无需等待")
+            elif sub_only:
+                # 在 sub_only 模式下，直接在 TransferHistory 中查找每个 strm_file_path 的整理位置
+                logger.info("【P115ShareStrm】仅重试下载字幕模式：直接检索历史整理记录...")
+                for stem, strm_path in media_stem_to_strm_path.items():
+                    history = _th_oper.get_by_src(strm_path.as_posix(), "local")
+                    if history and history.dest:
+                        strm_source_to_target[strm_path.as_posix()] = Path(history.dest)
+                logger.info(f"【P115ShareStrm】历史整理记录检索完成，成功匹配到 {len(strm_source_to_target)}/{len(media_stem_to_strm_path)} 个目标路径")
 
             # 3. 构建 媒体 stem → STRM 整理目标路径 映射，供字幕放置使用
             for stem, strm_path in media_stem_to_strm_path.items():
@@ -1208,7 +1239,7 @@ class ShareTaskQueue:
 
     def _persist_add(self, task_id: str, share_code: str, receive_code: str,
                      user_id: Optional[str], tmdbid: Optional[int], mtype: Optional[str],
-                     arg_str: Optional[str] = None) -> None:
+                     arg_str: Optional[str] = None, sub_only: bool = False) -> None:
         """向持久化文件追加一条任务（需在 _lock 内调用）"""
         tasks = self._load_tasks()
         tasks.append({
@@ -1219,6 +1250,7 @@ class ShareTaskQueue:
             "tmdbid": tmdbid,
             "mtype": mtype,
             "arg_str": arg_str,
+            "sub_only": sub_only,
             "added_at": time(),
             "retry_count": 0,
         })
@@ -1279,6 +1311,7 @@ class ShareTaskQueue:
         tmdbid: Optional[int] = None,
         mtype: Optional[str] = None,
         arg_str: Optional[str] = None,
+        sub_only: bool = False,
         _task_id: Optional[str] = None,
         _skip_dedup: bool = False,
     ) -> bool:
@@ -1309,11 +1342,11 @@ class ShareTaskQueue:
                     return False
                 self._recent_tasks[share_code] = now
                 # 新任务才写持久化，恢复任务已在文件中
-                self._persist_add(task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str)
+                self._persist_add(task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str, sub_only)
 
             self._pending_codes.add(share_code)
 
-        self._queue.put((task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str))
+        self._queue.put((task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str, sub_only))
         logger.info(f"【P115ShareStrm】新任务已入队: {share_code} (id={task_id})，当前队列待处理: {self._queue.qsize()}")
         return True
 
@@ -1343,6 +1376,7 @@ class ShareTaskQueue:
                 t.get("tmdbid"),
                 t.get("mtype"),
                 t.get("arg_str"),
+                t.get("sub_only", False),
             ))
             logger.info(f"【P115ShareStrm】已恢复任务: {share_code} (重试次数: {t.get('retry_count', 0)})")
 
@@ -1356,7 +1390,12 @@ class ShareTaskQueue:
         while self._running:
             try:
                 task = self._queue.get(timeout=10)
-                task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str = task
+                # 兼容旧版本未带 sub_only 的情况
+                if len(task) == 7:
+                    task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str = task
+                    sub_only = False
+                else:
+                    task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str, sub_only = task
 
                 # 稍作等待，确保"已入队"通知先到达用户（积压时减小延迟）
                 if self._queue.qsize() > 10:
@@ -1364,21 +1403,42 @@ class ShareTaskQueue:
                 else:
                     sleep(0.8)
                 self._processing_count += 1
-                self._notify(user_id, "【115分享STRM】", f"🚀 开始处理分享: {share_code}")
+                
+                start_msg = f"🚀 开始处理分享: {share_code}"
+                if sub_only:
+                    start_msg = f"🚀 开始重试下载分享字幕: {share_code}"
+                self._notify(user_id, "【115分享STRM】", start_msg)
 
-                result = process_share_strm(share_code, receive_code, tmdbid=tmdbid, mtype=mtype, arg_str=arg_str)
+                result = process_share_strm(share_code, receive_code, tmdbid=tmdbid, mtype=mtype, arg_str=arg_str, sub_only=sub_only)
 
                 if result.get("status"):
-                    msg = (
-                        f"✅ 处理完成: {share_code}\n"
-                        f"生成 STRM: {result.get('strm_count')} 个\n"
-                        f"遍历文件: {result.get('total_files')} 个"
-                    )
-                    if result.get("subtitle_count") or result.get("subtitle_fail_count"):
-                        msg += f"\n下载字幕: {result.get('subtitle_count', 0)} 个"
+                    if sub_only:
+                        msg = (
+                            f"✅ 字幕重新下载完成: {share_code}\n"
+                            f"遍历文件: {result.get('total_files')} 个\n"
+                            f"成功下载: {result.get('subtitle_count', 0)} 个"
+                        )
                         if result.get("subtitle_fail_count"):
                             msg += f"，失败 {result.get('subtitle_fail_count')} 个"
-                    self._notify(user_id, "【115分享STRM】完成", msg)
+                    else:
+                        msg = (
+                            f"✅ 处理完成: {share_code}\n"
+                            f"生成 STRM: {result.get('strm_count')} 个\n"
+                            f"遍历文件: {result.get('total_files')} 个"
+                        )
+                        if result.get("subtitle_count") or result.get("subtitle_fail_count"):
+                            msg += f"\n下载字幕: {result.get('subtitle_count', 0)} 个"
+                            if result.get("subtitle_fail_count"):
+                                msg += f"，失败 {result.get('subtitle_fail_count')} 个"
+
+                    buttons = None
+                    if not sub_only and result.get("subtitle_fail_count", 0) > 0:
+                        buttons = [[{
+                            "text": "🔁 重试下载字幕",
+                            "callback_data": f"[PLUGIN]p115sharestrm|retry_sub:{share_code}:{receive_code}"
+                        }]]
+
+                    self._notify(user_id, "【115分享STRM】完成", msg, buttons=buttons)
                     # 成功：从持久化文件移除
                     self._persist_remove(task_id)
                 else:
@@ -1428,10 +1488,15 @@ class ShareTaskQueue:
                 logger.error(f"【P115ShareStrm】工作线程异常: {e}", exc_info=True)
                 sleep(5)
 
-    def _notify(self, user_id: Optional[str], title: str, text: str):
+    def _notify(self, user_id: Optional[str], title: str, text: str, buttons: Optional[List[List[dict]]] = None):
         if self._notify_callback:
             try:
-                self._notify_callback(user_id, title, text)
+                import inspect
+                sig = inspect.signature(self._notify_callback)
+                if "buttons" in sig.parameters:
+                    self._notify_callback(user_id, title, text, buttons)
+                else:
+                    self._notify_callback(user_id, title, text)
             except Exception as e:
                 logger.warning(f"【P115ShareStrm】通知发送失败: {e}")
 
