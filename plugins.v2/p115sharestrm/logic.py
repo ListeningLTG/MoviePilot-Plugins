@@ -28,6 +28,46 @@ class ShareLinkExpiredError(Exception):
     pass
 
 
+def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any]:
+    """
+    根据 STRM 路径从 TransferHistory 中检索整理记录。
+    支持精确匹配和模糊匹配（兼容被 115 屏蔽/重命名导致父目录名称不一致的情况，如 "豆瓣..." -> "豆***..."）。
+    """
+    # 1. 首先尝试精确匹配
+    src_posix = strm_path.as_posix()
+    history = th_oper.get_by_src(src_posix, "local")
+    if history and history.dest:
+        return history
+
+    # 2. 如果精确匹配失败，尝试进行后缀模糊匹配
+    # 模糊匹配末尾两级路径: /media_folder/filename.strm
+    parts = strm_path.parts
+    if len(parts) >= 2:
+        suffix = f"/{parts[-2]}/{parts[-1]}"
+        from app.db.models.transferhistory import TransferHistory
+        history = th_oper._db.query(TransferHistory).filter(
+            TransferHistory.src.like(f"%{suffix}"),
+            TransferHistory.src_storage == "local"
+        ).first()
+        if history and history.dest:
+            logger.info(f"【P115ShareStrm】通过两级路径后缀模糊匹配成功: {strm_path.name} -> {history.src}")
+            return history
+
+    # 3. 如果依然未匹配成功，尝试仅通过文件名匹配
+    if len(parts) >= 1:
+        suffix = f"/{parts[-1]}"
+        from app.db.models.transferhistory import TransferHistory
+        history = th_oper._db.query(TransferHistory).filter(
+            TransferHistory.src.like(f"%{suffix}"),
+            TransferHistory.src_storage == "local"
+        ).first()
+        if history and history.dest:
+            logger.info(f"【P115ShareStrm】通过文件名后缀模糊匹配成功: {strm_path.name} -> {history.src}")
+            return history
+
+    return None
+
+
 def _truncate_filename(filename: str, max_bytes: int = 240) -> str:
     """
     截断文件名以符合文件系统限制 (255 字节)，预留一定空间。
@@ -1063,7 +1103,7 @@ def process_share_strm(
                 
                 # 即使不需要等待放置字幕，也可以先通过预扫描清理掉已经整理过的记录（保持状态准确）
                 for src in list(pending):
-                    history = _th_oper.get_by_src(src, "local")
+                    history = _get_transfer_history_by_strm_path(_th_oper, Path(src))
                     if history and history.dest:
                         strm_source_to_target[src] = Path(history.dest)
                         pending.remove(src)
@@ -1088,7 +1128,7 @@ def process_share_strm(
                         while pending and waited < timeout:
                             finished = set()
                             for src in pending:
-                                history = _th_oper.get_by_src(src, "local")
+                                history = _get_transfer_history_by_strm_path(_th_oper, Path(src))
                                 if history and history.dest:
                                     strm_source_to_target[src] = Path(history.dest)
                                     finished.add(src)
@@ -1116,7 +1156,7 @@ def process_share_strm(
                 # 在 sub_only 模式下，直接在 TransferHistory 中查找每个 strm_file_path 的整理位置
                 logger.info("【P115ShareStrm】仅重试下载字幕模式：直接检索历史整理记录...")
                 for stem, strm_path in media_stem_to_strm_path.items():
-                    history = _th_oper.get_by_src(strm_path.as_posix(), "local")
+                    history = _get_transfer_history_by_strm_path(_th_oper, strm_path)
                     if history and history.dest:
                         strm_source_to_target[strm_path.as_posix()] = Path(history.dest)
                 logger.info(f"【P115ShareStrm】历史整理记录检索完成，成功匹配到 {len(strm_source_to_target)}/{len(media_stem_to_strm_path)} 个目标路径")
