@@ -1186,15 +1186,64 @@ def process_share_strm(
             if downloaded_subtitle_paths and configer.moviepilot_transfer and media_stem_to_target:
                 # 直接将字幕复制到 STRM 整理目标目录，文件名以整理后的 STRM stem 为前缀，
                 # 避免 ffprobe 等插件造成 STRM 与字幕文件名前缀不一致的问题
-                name_map = _match_subtitle_to_media(subtitle_files, media_files)
+                #
+                # 改进：不再使用基于纯文件名的 name_map（同名字幕会互相覆盖映射），
+                # 而是直接通过字幕条目的 _full_path 父目录匹配同目录的媒体文件 stem，
+                # 从而精确定位每个字幕对应的媒体目标路径。
+                #
+                # 预建 "分享内父目录" → "该目录下媒体stem列表" 的索引
+                dir_to_media_stems: Dict[str, List[str]] = {}
+                for m_item in media_files:
+                    m_path = m_item.get("_full_path", m_item.get("name", ""))
+                    m_parent = str(Path(m_path).parent)
+                    m_stem = Path(m_item.get("name", "")).stem
+                    if m_parent not in dir_to_media_stems:
+                        dir_to_media_stems[m_parent] = []
+                    dir_to_media_stems[m_parent].append(m_stem)
+
                 for sub_item, local_path in zip(subtitle_files, downloaded_subtitle_paths):
-                    sub_name = Path(sub_item.get("_full_path", sub_item.get("name", ""))).name
-                    media_stem = name_map.get(sub_name)
-                    strm_target = media_stem_to_target.get(media_stem) if media_stem else None
+                    sub_full_path = sub_item.get("_full_path", sub_item.get("name", ""))
+                    sub_name = Path(sub_full_path).name
+                    sub_parent = str(Path(sub_full_path).parent)
+
+                    # 在同目录下寻找媒体文件 stem，确定字幕放置目标
+                    strm_target = None
+                    candidate_stems = dir_to_media_stems.get(sub_parent, [])
+                    if len(candidate_stems) == 1:
+                        # 同目录只有一个媒体文件，直接关联
+                        strm_target = media_stem_to_target.get(candidate_stems[0])
+                    elif len(candidate_stems) > 1:
+                        # 多媒体文件：先尝试集号匹配，再尝试公共前缀匹配
+                        ep_match = re.search(r"[Ss](\d+)[Ee](\d+)", sub_name)
+                        if ep_match:
+                            for cstem in candidate_stems:
+                                m_ep = re.search(r"[Ss](\d+)[Ee](\d+)", cstem)
+                                if m_ep and m_ep.group(1) == ep_match.group(1) and m_ep.group(2) == ep_match.group(2):
+                                    strm_target = media_stem_to_target.get(cstem)
+                                    break
+                        if not strm_target:
+                            # 回退：选公共前缀最长的
+                            best = max(
+                                candidate_stems,
+                                key=lambda s: len(s) if s in sub_name else 0,
+                            )
+                            if best in sub_name:
+                                strm_target = media_stem_to_target.get(best)
+                        if not strm_target:
+                            # 最终兜底：取第一个
+                            strm_target = media_stem_to_target.get(candidate_stems[0])
+
                     if strm_target:
                         lang_tag = _extract_subtitle_lang_tag(sub_name)
                         new_name = _truncate_filename(strm_target.stem + lang_tag + local_path.suffix)
                         dest_path = strm_target.parent / new_name
+                        # 如果目标已存在且内容完全相同，则跳过（避免重复运行产生大量带序号的重复字幕）
+                        try:
+                            if dest_path.exists() and dest_path.read_bytes() == local_path.read_bytes():
+                                logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
+                                continue
+                        except Exception:
+                            pass
                         idx = 1
                         while dest_path.exists():
                             new_name = _truncate_filename(strm_target.stem + lang_tag + f".{idx}" + local_path.suffix)
