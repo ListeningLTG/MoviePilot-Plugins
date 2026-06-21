@@ -28,6 +28,18 @@ class ShareLinkExpiredError(Exception):
     pass
 
 
+from app.db import db_query
+
+
+@db_query
+def _fuzzy_query_transfer_history(db, suffix: str) -> Optional[Any]:
+    from app.db.models.transferhistory import TransferHistory
+    return db.query(TransferHistory).filter(
+        TransferHistory.src.like(f"%{suffix}"),
+        TransferHistory.src_storage == "local"
+    ).first()
+
+
 def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any]:
     """
     根据 STRM 路径从 TransferHistory 中检索整理记录。
@@ -44,11 +56,7 @@ def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any
     parts = strm_path.parts
     if len(parts) >= 2:
         suffix = f"/{parts[-2]}/{parts[-1]}"
-        from app.db.models.transferhistory import TransferHistory
-        history = th_oper._db.query(TransferHistory).filter(
-            TransferHistory.src.like(f"%{suffix}"),
-            TransferHistory.src_storage == "local"
-        ).first()
+        history = _fuzzy_query_transfer_history(None, suffix)
         if history and history.dest:
             logger.info(f"【P115ShareStrm】通过两级路径后缀模糊匹配成功: {strm_path.name} -> {history.src}")
             return history
@@ -56,11 +64,7 @@ def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any
     # 3. 如果依然未匹配成功，尝试仅通过文件名匹配
     if len(parts) >= 1:
         suffix = f"/{parts[-1]}"
-        from app.db.models.transferhistory import TransferHistory
-        history = th_oper._db.query(TransferHistory).filter(
-            TransferHistory.src.like(f"%{suffix}"),
-            TransferHistory.src_storage == "local"
-        ).first()
+        history = _fuzzy_query_transfer_history(None, suffix)
         if history and history.dest:
             logger.info(f"【P115ShareStrm】通过文件名后缀模糊匹配成功: {strm_path.name} -> {history.src}")
             return history
