@@ -873,13 +873,175 @@ def _resolve_mtype_by_imdb(imdbid: str, arg_str: str) -> Optional[Tuple[int, str
         return None
 
 
+def _get_share_state(client: ShareP115Client, share_code: str, receive_code: str) -> Optional[int]:
+    """
+    获取分享链接的当前状态：
+    0: 审核中/快照生成中
+    1: 正常
+    7: 链接已失效/过期
+    其他: 未知
+    """
+    try:
+        payload = {"share_code": share_code, "receive_code": receive_code}
+        # 使用 app 端接口查询快照，获取分享状态
+        resp = client.share_snap_app(payload, app="android", timeout=15)
+        data = resp.get("data", {})
+        share_info = data.get("shareinfo", data.get("share_info", {}))
+        share_state = data.get("share_state", share_info.get("share_state", share_info.get("status")))
+        if share_state is not None:
+            return int(share_state)
+    except Exception as e:
+        logger.warning(f"【P115ShareStrm】获取分享链接状态失败: {e}")
+    return None
+
+
+def _background_download_subtitles(
+    client: ShareP115Client,
+    share_code: str,
+    receive_code: str,
+    subtitle_files: List[dict],
+    save_path_obj: Path,
+    user_id: Optional[str],
+    media_files: List[dict],
+    media_stem_to_strm_path: Dict[str, Path],
+    media_stem_to_target: Dict[str, Path],
+):
+    """
+    后台轮询等待分享链接审核通过，然后执行字幕下载与整理（防止堵塞主队列工作线程）
+    """
+    max_attempts = 36  # 36次 * 5分钟 = 3小时
+    logger.info(f"【P115ShareStrm】已为 {share_code} 启动字幕后台轮询下载任务...")
+
+    for attempt in range(1, max_attempts + 1):
+        # 动态前置等待：前两次分别等 1 分钟、2 分钟，后续每 5 分钟检查一次
+        if attempt == 1:
+            sleep(60)
+        elif attempt == 2:
+            sleep(120)
+        else:
+            sleep(300)
+
+        logger.info(f"【P115ShareStrm】字幕下载后台轮询：正在进行第 {attempt}/{max_attempts} 次状态检查: {share_code}")
+        state = _get_share_state(client, share_code, receive_code)
+
+        if state is not None and state != 0:
+            if state == 7:
+                logger.warning(f"【P115ShareStrm】字幕后台轮询发现链接已过期: {share_code}")
+                task_queue._notify(user_id, "【115分享STRM】字幕下载失败", f"❌ {share_code}\n原因: 链接已失效或在审核期间过期")
+                return
+
+            logger.info(f"【P115ShareStrm】字幕后台轮询检测到审核已通过！开始下载字幕: {share_code}")
+            try:
+                downloaded_subtitle_paths, subtitle_fail_count = _download_subtitles_from_share(
+                    client, share_code, receive_code, subtitle_files, save_path_obj
+                )
+                subtitle_count = len(downloaded_subtitle_paths)
+
+                if downloaded_subtitle_paths:
+                    # 动态重新尝试从历史数据库中获取未命中的整理目标路径
+                    try:
+                        from app.db.transferhistory_oper import TransferHistoryOper
+                        _th_oper = TransferHistoryOper()
+                    except Exception as th_err:
+                        logger.warning(f"【P115ShareStrm】后台整理历史数据库连接失败: {th_err}")
+                        _th_oper = None
+
+                    # 预建 "分享内父目录" → "该目录下媒体stem列表" 的索引
+                    dir_to_media_stems: Dict[str, List[str]] = {}
+                    for m_item in media_files:
+                        m_path = m_item.get("_full_path", m_item.get("name", ""))
+                        m_parent = str(Path(m_path).parent)
+                        m_stem = Path(m_item.get("name", "")).stem
+                        if m_parent not in dir_to_media_stems:
+                            dir_to_media_stems[m_parent] = []
+                        dir_to_media_stems[m_parent].append(m_stem)
+
+                    for sub_item, local_path in zip(subtitle_files, downloaded_subtitle_paths):
+                        sub_full_path = sub_item.get("_full_path", sub_item.get("name", ""))
+                        sub_name = Path(sub_full_path).name
+                        sub_parent = str(Path(sub_full_path).parent)
+
+                        strm_target = None
+                        candidate_stems = dir_to_media_stems.get(sub_parent, [])
+
+                        # 挑选对应的 media_stem
+                        matched_stem = None
+                        if len(candidate_stems) == 1:
+                            matched_stem = candidate_stems[0]
+                        elif len(candidate_stems) > 1:
+                            ep_match = re.search(r"[Ss](\d+)[Ee](\d+)", sub_name)
+                            if ep_match:
+                                for cstem in candidate_stems:
+                                    m_ep = re.search(r"[Ss](\d+)[Ee](\d+)", cstem)
+                                    if m_ep and m_ep.group(1) == ep_match.group(1) and m_ep.group(2) == ep_match.group(2):
+                                        matched_stem = cstem
+                                        break
+                            if not matched_stem:
+                                best = max(
+                                    candidate_stems,
+                                    key=lambda s: len(s) if s in sub_name else 0,
+                                )
+                                if best in sub_name:
+                                    matched_stem = best
+                            if not matched_stem:
+                                matched_stem = candidate_stems[0]
+
+                        if matched_stem:
+                            strm_target = media_stem_to_target.get(matched_stem)
+                            # 如果先前没有获取到整理目标路径，尝试直接到数据库检索
+                            if not strm_target and _th_oper:
+                                strm_path = media_stem_to_strm_path.get(matched_stem)
+                                if strm_path:
+                                    history = _get_transfer_history_by_strm_path(_th_oper, strm_path)
+                                    if history and history.dest:
+                                        strm_target = Path(history.dest)
+                                        # 缓存在内存中
+                                        media_stem_to_target[matched_stem] = strm_target
+
+                        if strm_target:
+                            lang_tag = _extract_subtitle_lang_tag(sub_name)
+                            new_name = _truncate_filename(strm_target.stem + lang_tag + local_path.suffix)
+                            dest_path = strm_target.parent / new_name
+                            try:
+                                if dest_path.exists() and dest_path.read_bytes() == local_path.read_bytes():
+                                    logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
+                                    continue
+                            except Exception:
+                                pass
+                            idx = 1
+                            while dest_path.exists():
+                                new_name = _truncate_filename(strm_target.stem + lang_tag + f".{idx}" + local_path.suffix)
+                                dest_path = strm_target.parent / new_name
+                                idx += 1
+                            try:
+                                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(str(local_path), str(dest_path))
+                                logger.info(f"【P115ShareStrm】字幕放置到目标: {new_name}")
+                            except Exception as e:
+                                logger.warning(f"【P115ShareStrm】字幕放置失败 {sub_name}: {e}")
+                        else:
+                            logger.warning(f"【P115ShareStrm】未找到对应 STRM 目标路径，跳过字幕: {sub_name}")
+
+                msg = f"✅ 审核通过，字幕已后台自动下载并整理完成: {share_code}\n成功下载: {subtitle_count} 个"
+                if subtitle_fail_count:
+                    msg += f"，失败 {subtitle_fail_count} 个"
+
+                task_queue._notify(user_id, "【115分享STRM】字幕自动下载成功", msg)
+                return
+            except Exception as e:
+                logger.error(f"【P115ShareStrm】字幕后台下载处理异常: {e}", exc_info=True)
+
+    logger.warning(f"【P115ShareStrm】字幕下载后台轮询超时 (3小时): {share_code}")
+    task_queue._notify(user_id, "【115分享STRM】字幕下载失败", f"❌ {share_code}\n原因: 链接审核轮询超时 (3小时)")
+
+
 def process_share_strm(
     share_code: str,
     receive_code: str,
     tmdbid: Optional[int] = None,
     mtype: Optional[str] = None,
     arg_str: Optional[str] = None,
-    notify: Optional[Callable[[str], None]] = None,
+    user_id: Optional[str] = None,
     sub_only: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -1202,89 +1364,111 @@ def process_share_strm(
         # 5. 第五步：下载字幕文件并放置（如开启）
         subtitle_count = 0
         subtitle_fail_count = 0
+        subtitle_in_background = False
         if configer.download_subtitle and subtitle_files:
-            logger.info(f"【P115ShareStrm】开始下载字幕文件，共 {len(subtitle_files)} 个")
-            downloaded_subtitle_paths, subtitle_fail_count = _download_subtitles_from_share(
-                client, share_code, receive_code, subtitle_files, save_path_obj
-            )
-            subtitle_count = len(downloaded_subtitle_paths)
-            logger.info(
-                f"【P115ShareStrm】字幕下载完成，成功 {subtitle_count} 个，失败 {subtitle_fail_count} 个"
-            )
-            if downloaded_subtitle_paths and configer.moviepilot_transfer and media_stem_to_target:
-                # 直接将字幕复制到 STRM 整理目标目录，文件名以整理后的 STRM stem 为前缀，
-                # 避免 ffprobe 等插件造成 STRM 与字幕文件名前缀不一致的问题
-                #
-                # 改进：不再使用基于纯文件名的 name_map（同名字幕会互相覆盖映射），
-                # 而是直接通过字幕条目的 _full_path 父目录匹配同目录的媒体文件 stem，
-                # 从而精确定位每个字幕对应的媒体目标路径。
-                #
-                # 预建 "分享内父目录" → "该目录下媒体stem列表" 的索引
-                dir_to_media_stems: Dict[str, List[str]] = {}
-                for m_item in media_files:
-                    m_path = m_item.get("_full_path", m_item.get("name", ""))
-                    m_parent = str(Path(m_path).parent)
-                    m_stem = Path(m_item.get("name", "")).stem
-                    if m_parent not in dir_to_media_stems:
-                        dir_to_media_stems[m_parent] = []
-                    dir_to_media_stems[m_parent].append(m_stem)
+            share_state = _get_share_state(client, share_code, receive_code)
+            if share_state == 0:
+                logger.info(f"【P115ShareStrm】检测到分享链接 {share_code} 处于审核状态中，启动后台轮询下载字幕任务...")
+                subtitle_in_background = True
+                t = Thread(
+                    target=_background_download_subtitles,
+                    args=(
+                        ShareP115Client(configer.cookies),
+                        share_code,
+                        receive_code,
+                        subtitle_files,
+                        save_path_obj,
+                        user_id,
+                        media_files,
+                        media_stem_to_strm_path,
+                        media_stem_to_target,
+                    ),
+                    daemon=True
+                )
+                t.start()
+            else:
+                logger.info(f"【P115ShareStrm】开始下载字幕文件，共 {len(subtitle_files)} 个")
+                downloaded_subtitle_paths, subtitle_fail_count = _download_subtitles_from_share(
+                    client, share_code, receive_code, subtitle_files, save_path_obj
+                )
+                subtitle_count = len(downloaded_subtitle_paths)
+                logger.info(
+                    f"【P115ShareStrm】字幕下载完成，成功 {subtitle_count} 个，失败 {subtitle_fail_count} 个"
+                )
+                if downloaded_subtitle_paths and configer.moviepilot_transfer and media_stem_to_target:
+                    # 直接将字幕复制到 STRM 整理目标目录，文件名以整理后的 STRM stem 为前缀，
+                    # 避免 ffprobe 等插件造成 STRM 与字幕文件名前缀不一致的问题
+                    #
+                    # 改进：不再使用基于纯文件名的 name_map（同名字幕会互相覆盖映射），
+                    # 而是直接通过字幕条目的 _full_path 父目录匹配同目录的媒体文件 stem，
+                    # 从而精确定位每个字幕对应的媒体目标路径。
+                    #
+                    # 预建 "分享内父目录" → "该目录下媒体stem列表" 的索引
+                    dir_to_media_stems: Dict[str, List[str]] = {}
+                    for m_item in media_files:
+                        m_path = m_item.get("_full_path", m_item.get("name", ""))
+                        m_parent = str(Path(m_path).parent)
+                        m_stem = Path(m_item.get("name", "")).stem
+                        if m_parent not in dir_to_media_stems:
+                            dir_to_media_stems[m_parent] = []
+                        dir_to_media_stems[m_parent].append(m_stem)
 
-                for sub_item, local_path in zip(subtitle_files, downloaded_subtitle_paths):
-                    sub_full_path = sub_item.get("_full_path", sub_item.get("name", ""))
-                    sub_name = Path(sub_full_path).name
-                    sub_parent = str(Path(sub_full_path).parent)
+                    for sub_item, local_path in zip(subtitle_files, downloaded_subtitle_paths):
+                        sub_full_path = sub_item.get("_full_path", sub_item.get("name", ""))
+                        sub_name = Path(sub_full_path).name
+                        sub_parent = str(Path(sub_full_path).parent)
 
-                    # 在同目录下寻找媒体文件 stem，确定字幕放置目标
-                    strm_target = None
-                    candidate_stems = dir_to_media_stems.get(sub_parent, [])
-                    if len(candidate_stems) == 1:
-                        # 同目录只有一个媒体文件，直接关联
-                        strm_target = media_stem_to_target.get(candidate_stems[0])
-                    elif len(candidate_stems) > 1:
-                        # 多媒体文件：先尝试集号匹配，再尝试公共前缀匹配
-                        ep_match = re.search(r"[Ss](\d+)[Ee](\d+)", sub_name)
-                        if ep_match:
-                            for cstem in candidate_stems:
-                                m_ep = re.search(r"[Ss](\d+)[Ee](\d+)", cstem)
-                                if m_ep and m_ep.group(1) == ep_match.group(1) and m_ep.group(2) == ep_match.group(2):
-                                    strm_target = media_stem_to_target.get(cstem)
-                                    break
-                        if not strm_target:
-                            # 回退：选公共前缀最长的
-                            best = max(
-                                candidate_stems,
-                                key=lambda s: len(s) if s in sub_name else 0,
-                            )
-                            if best in sub_name:
-                                strm_target = media_stem_to_target.get(best)
-                        if not strm_target:
-                            # 最终兜底：取第一个
+                        # 在同目录下寻找媒体文件 stem，确定字幕放置目标
+                        strm_target = None
+                        candidate_stems = dir_to_media_stems.get(sub_parent, [])
+                        if len(candidate_stems) == 1:
+                            # 同目录只有一个媒体文件，直接关联
                             strm_target = media_stem_to_target.get(candidate_stems[0])
+                        elif len(candidate_stems) > 1:
+                            # 多媒体文件：先尝试集号匹配，再尝试公共前缀匹配
+                            ep_match = re.search(r"[Ss](\d+)[Ee](\d+)", sub_name)
+                            if ep_match:
+                                for cstem in candidate_stems:
+                                    m_ep = re.search(r"[Ss](\d+)[Ee](\d+)", cstem)
+                                    if m_ep and m_ep.group(1) == ep_match.group(1) and m_ep.group(2) == ep_match.group(2):
+                                        strm_target = media_stem_to_target.get(cstem)
+                                        break
+                            if not strm_target:
+                                # 回退：选公共前缀最长的
+                                best = max(
+                                    candidate_stems,
+                                    key=lambda s: len(s) if s in sub_name else 0,
+                                )
+                                if best in sub_name:
+                                    strm_target = media_stem_to_target.get(best)
+                            if not strm_target:
+                                # 最终兜底：取第一个
+                                strm_target = media_stem_to_target.get(candidate_stems[0])
 
-                    if strm_target:
-                        lang_tag = _extract_subtitle_lang_tag(sub_name)
-                        new_name = _truncate_filename(strm_target.stem + lang_tag + local_path.suffix)
-                        dest_path = strm_target.parent / new_name
-                        # 如果目标已存在且内容完全相同，则跳过（避免重复运行产生大量带序号的重复字幕）
-                        try:
-                            if dest_path.exists() and dest_path.read_bytes() == local_path.read_bytes():
-                                logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
-                                continue
-                        except Exception:
-                            pass
-                        idx = 1
-                        while dest_path.exists():
-                            new_name = _truncate_filename(strm_target.stem + lang_tag + f".{idx}" + local_path.suffix)
+                        if strm_target:
+                            lang_tag = _extract_subtitle_lang_tag(sub_name)
+                            new_name = _truncate_filename(strm_target.stem + lang_tag + local_path.suffix)
                             dest_path = strm_target.parent / new_name
-                            idx += 1
-                        try:
-                            dest_path.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(str(local_path), str(dest_path))
-                            logger.info(f"【P115ShareStrm】字幕放置到目标: {new_name}")
-                        except Exception as e:
-                            logger.warning(f"【P115ShareStrm】字幕放置失败 {sub_name}: {e}")
-                    else:
-                        logger.warning(f"【P115ShareStrm】未找到对应 STRM 目标路径，跳过字幕: {sub_name}")
+                            # 如果目标已存在且内容完全相同，则跳过（避免重复运行产生大量带序号的重复字幕）
+                            try:
+                                if dest_path.exists() and dest_path.read_bytes() == local_path.read_bytes():
+                                    logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
+                                    continue
+                            except Exception:
+                                pass
+                            idx = 1
+                            while dest_path.exists():
+                                new_name = _truncate_filename(strm_target.stem + lang_tag + f".{idx}" + local_path.suffix)
+                                dest_path = strm_target.parent / new_name
+                                idx += 1
+                            try:
+                                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(str(local_path), str(dest_path))
+                                logger.info(f"【P115ShareStrm】字幕放置到目标: {new_name}")
+                            except Exception as e:
+                                logger.warning(f"【P115ShareStrm】字幕放置失败 {sub_name}: {e}")
+                        else:
+                            logger.warning(f"【P115ShareStrm】未找到对应 STRM 目标路径，跳过字幕: {sub_name}")
 
         return {
             "status": True,
@@ -1292,6 +1476,7 @@ def process_share_strm(
             "total_files": total_media,
             "subtitle_count": subtitle_count,
             "subtitle_fail_count": subtitle_fail_count,
+            "subtitle_in_background": subtitle_in_background,
         }
 
     except ShareLinkExpiredError as e:
@@ -1530,17 +1715,20 @@ class ShareTaskQueue:
                     start_msg = f"🚀 开始重试下载分享字幕: {share_code}"
                 self._notify(user_id, "【115分享STRM】", start_msg)
 
-                result = process_share_strm(share_code, receive_code, tmdbid=tmdbid, mtype=mtype, arg_str=arg_str, sub_only=sub_only)
+                result = process_share_strm(share_code, receive_code, tmdbid=tmdbid, mtype=mtype, arg_str=arg_str, user_id=user_id, sub_only=sub_only)
 
                 if result.get("status"):
                     if sub_only:
-                        msg = (
-                            f"✅ 字幕重新下载完成: {share_code}\n"
-                            f"遍历文件: {result.get('total_files')} 个\n"
-                            f"成功下载: {result.get('subtitle_count', 0)} 个"
-                        )
-                        if result.get("subtitle_fail_count"):
-                            msg += f"，失败 {result.get('subtitle_fail_count')} 个"
+                        if result.get("subtitle_in_background"):
+                            msg = f"⏳ 字幕重新下载已转为后台轮询，等待链接审核通过后自动下载整理: {share_code}"
+                        else:
+                            msg = (
+                                f"✅ 字幕重新下载完成: {share_code}\n"
+                                f"遍历文件: {result.get('total_files')} 个\n"
+                                f"成功下载: {result.get('subtitle_count', 0)} 个"
+                            )
+                            if result.get("subtitle_fail_count"):
+                                msg += f"，失败 {result.get('subtitle_fail_count')} 个"
                     else:
                         msg = (
                             f"✅ 处理完成: {share_code}\n"
@@ -1551,6 +1739,8 @@ class ShareTaskQueue:
                             msg += f"\n下载字幕: {result.get('subtitle_count', 0)} 个"
                             if result.get("subtitle_fail_count"):
                                 msg += f"，失败 {result.get('subtitle_fail_count')} 个"
+                        if result.get("subtitle_in_background"):
+                            msg += f"\n⏳ 分享链接审核中，字幕下载已转为后台排队轮询，审核通过后自动下载放置"
 
                     buttons = None
                     if not sub_only and result.get("subtitle_fail_count", 0) > 0:
