@@ -125,7 +125,10 @@ class ShareP115Client(P115Client):
     def share_snap_cookie(
         self,
         payload: dict,
+        /,
         base_url: str = "https://webapi.115.com",
+        *,
+        async_: bool = False,
         **kwargs,
     ) -> dict:
         """
@@ -133,7 +136,7 @@ class ShareP115Client(P115Client):
         """
         api = complete_url("/share/snap", base_url=base_url)
         payload = {"cid": 0, "limit": 32, "offset": 0, **payload}
-        return self.request(url=api, params=payload, **kwargs)
+        return self.request(url=api, params=payload, async_=async_, **kwargs)
 
 
 class _EndpointPool:
@@ -521,6 +524,7 @@ def _download_subtitles_from_share(
         scid = None
         try:
             # 1. 在网盘中创建临时文件夹
+            logger.info(f"【P115ShareStrm】开始转存并下载分享字幕，准备创建临时文件夹...")
             resp = client.fs_mkdir(f"subtitle-{uuid4()}", headers=custom_headers)
             check_response(resp)
             if "cid" in resp:
@@ -528,23 +532,30 @@ def _download_subtitles_from_share(
             else:
                 data = resp.get("data", {})
                 scid = data.get("category_id") or data.get("file_id")
+            logger.info(f"【P115ShareStrm】网盘临时文件夹创建成功，scid: {scid}")
 
             # 2. 将分享中的字幕文件转存到临时文件夹
+            file_ids_str = ",".join(str(item["id"]) for item in batch_items)
+            logger.info(f"【P115ShareStrm】向 115 提交字幕转存，共 {len(batch_items)} 个文件，ID列表: {file_ids_str}")
             payload = {
                 "share_code": share_code,
                 "receive_code": receive_code,
-                "file_id": ",".join(str(item["id"]) for item in batch_items),
+                "file_id": file_ids_str,
                 "cid": scid,
                 "is_check": 0,
             }
             resp = client.share_receive(payload, headers=custom_headers)
+            logger.debug(f"【P115ShareStrm】share_receive 接口返回: {resp}")
             check_response(resp)
+            logger.info(f"【P115ShareStrm】字幕转存任务提交完成")
 
             # 3. 轮询等待 115 异步转存完成（最多等待 30s，每 2s 轮询一次）
             attr = None
+            logger.info(f"【P115ShareStrm】开始轮询转存状态，检测文件是否生成...")
             for attempt in range(15):
                 sleep(2)
                 try:
+                    logger.debug(f"【P115ShareStrm】正在进行第 {attempt + 1}/15 次转存轮询...")
                     attr = next(
                         _iter_fs_files(
                             client=client,
@@ -555,16 +566,27 @@ def _download_subtitles_from_share(
                         )
                     )
                     if attr:
+                        logger.info(f"【P115ShareStrm】检测到转存文件成功，首个文件 pickcode: {attr.get('pickcode')}")
                         break
                 except StopIteration:
                     pass
+                except Exception as poll_err:
+                    logger.warning(f"【P115ShareStrm】轮询转存状态时出错: {poll_err}")
 
             if not attr:
+                try:
+                    logger.warning(f"【P115ShareStrm】轮询超时，尝试列出临时目录 {scid} 下的所有内容...")
+                    tmp_files = list(_iter_fs_files(client=client, payload=scid, page_size=10, app="web", headers=custom_headers))
+                    logger.warning(f"【P115ShareStrm】临时目录下实际存在的文件列表: {tmp_files}")
+                except Exception as list_err:
+                    logger.warning(f"【P115ShareStrm】尝试列出临时目录内容失败: {list_err}")
                 raise RuntimeError("115 转存文件超时，临时文件夹中未发现字幕文件")
 
             # 4. 调用 fs_video_subtitle 获取下载链接
+            logger.info(f"【P115ShareStrm】通过 fs_video_subtitle 批量获取字幕下载链接，使用 pickcode: {attr['pickcode']}")
             resp = client.fs_video_subtitle(attr["pickcode"], headers=custom_headers)
             check_response(resp)
+            logger.debug(f"【P115ShareStrm】fs_video_subtitle 接口返回数据: {resp}")
 
             # 5. 构建 sha1 -> url 映射
             subtitles_url_map = {
@@ -572,6 +594,7 @@ def _download_subtitles_from_share(
                 for info in resp.get("data", {}).get("list", [])
                 if info.get("file_id")
             }
+            logger.info(f"【P115ShareStrm】成功获取字幕链接映射，可下载的 sha1 数量: {len(subtitles_url_map)}")
 
             # 6. 逐个下载字幕文件到本地
             for item in batch_items:
@@ -583,12 +606,14 @@ def _download_subtitles_from_share(
                 url = subtitles_url_map.get(sha1)
                 if not url:
                     logger.warning(
-                        f"【P115ShareStrm】字幕文件 {filename} 未获取到下载链接（sha1 不匹配），跳过"
+                        f"【P115ShareStrm】字幕文件 {filename} (sha1: {sha1}) 未匹配到下载链接，跳过。"
+                        f" 可用的 sha1 列表: {list(subtitles_url_map.keys())}"
                     )
                     fail_count += 1
                     continue
 
                 _dl_success = False
+                logger.info(f"【P115ShareStrm】开始从 115 CDN 下载字幕 {filename}，保存路径: {local_path}")
                 for _attempt in range(3):
                     try:
                         resp_dl = httpx.get(
@@ -605,9 +630,10 @@ def _download_subtitles_from_share(
                         _dl_success = True
                         break
                     except Exception as e:
-                        logger.warning(
+                        logger.error(
                             f"【P115ShareStrm】字幕下载失败 ({_attempt + 1}/3): "
-                            f"{filename}: {e}"
+                            f"{filename}: {e}",
+                            exc_info=True
                         )
                         if _attempt < 2:
                             sleep(2)
@@ -616,7 +642,7 @@ def _download_subtitles_from_share(
                     fail_count += 1
 
         except Exception as e:
-            logger.error(f"【P115ShareStrm】字幕批处理失败: {e}")
+            logger.error(f"【P115ShareStrm】字幕批处理失败: {e}", exc_info=True)
             # 本批次中尚未成功下载的全部计为失败
             batch_downloaded = len([p for p in downloaded_paths if p not in downloaded_paths[:batch_start]])
             fail_count += len(batch_items) - batch_downloaded
@@ -624,9 +650,11 @@ def _download_subtitles_from_share(
             # 7. 清理临时文件夹
             if scid:
                 try:
-                    client.fs_delete(scid, headers=custom_headers)
+                    logger.info(f"【P115ShareStrm】正在清理网盘临时目录 {scid}...")
+                    resp_del = client.fs_delete(scid, headers=custom_headers)
+                    logger.debug(f"【P115ShareStrm】清理返回结果: {resp_del}")
                 except Exception as e:
-                    logger.warning(f"【P115ShareStrm】清理字幕临时目录失败: {e}")
+                    logger.warning(f"【P115ShareStrm】清理字幕临时目录失败: {e}", exc_info=True)
 
     return downloaded_paths, fail_count
 
