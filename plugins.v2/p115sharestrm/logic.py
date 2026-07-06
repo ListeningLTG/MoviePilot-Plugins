@@ -602,26 +602,53 @@ def _download_subtitles_from_share(
             check_response(resp)
             logger.debug(f"【P115ShareStrm】fs_video_subtitle 接口返回数据: {resp}")
 
+            # 列出转存到临时文件夹下的所有文件的 sha1 -> pickcode 映射（用于兜底下载）
+            tmp_files_map = {}
+            try:
+                tmp_files = list(_iter_fs_files(client=client, payload=scid, page_size=100, app="web", headers=custom_headers))
+                logger.info(f"【P115ShareStrm】临时文件夹 {scid} 中当前实际存在的文件数量: {len(tmp_files)}")
+                for tf in tmp_files:
+                    if tf.get("sha1") and tf.get("pickcode"):
+                        tmp_files_map[tf["sha1"].lower()] = tf["pickcode"]
+                logger.debug(f"【P115ShareStrm】已构建临时文件 sha1 -> pickcode 映射: {tmp_files_map}")
+            except Exception as list_err:
+                logger.warning(f"【P115ShareStrm】构建临时文件映射失败: {list_err}")
+
             # 5. 构建 sha1 -> url 映射
             subtitles_url_map = {
-                info["sha1"]: info["url"]
+                info["sha1"].lower(): info["url"]
                 for info in resp.get("data", {}).get("list", [])
                 if info.get("file_id")
             }
-            logger.info(f"【P115ShareStrm】成功获取字幕链接映射，可下载的 sha1 数量: {len(subtitles_url_map)}")
+            logger.info(f"【P115ShareStrm】成功从 fs_video_subtitle 获取字幕直链，数量: {len(subtitles_url_map)}")
 
             # 6. 逐个下载字幕文件到本地
             for item in batch_items:
                 filename = item.get("name", "")
                 full_path = item.get("_full_path", f"/{filename}")
                 local_path = save_path_obj / _safe_path(Path(full_path.lstrip("/")))
-                sha1 = item.get("sha1", "")
+                sha1 = item.get("sha1", "").lower()
 
                 url = subtitles_url_map.get(sha1)
                 if not url:
+                    # 尝试进行兜底获取下载直链（支持 .sup 或其它非常规后缀字幕）
+                    logger.info(f"【P115ShareStrm】字幕文件 {filename} (sha1: {sha1}) 未能匹配到 fs_video_subtitle 链接，尝试使用 client.download_url 兜底获取直链...")
+                    tmp_pickcode = tmp_files_map.get(sha1)
+                    if tmp_pickcode:
+                        try:
+                            logger.info(f"【P115ShareStrm】正在为 {filename} (pickcode: {tmp_pickcode}) 获取下载直链...")
+                            url = str(client.download_url(tmp_pickcode, headers=custom_headers))
+                            logger.info(f"【P115ShareStrm】获取直链成功: {url}")
+                        except Exception as dl_url_err:
+                            logger.error(f"【P115ShareStrm】调用 client.download_url 获取 {filename} 直链失败: {dl_url_err}", exc_info=True)
+                    else:
+                        logger.warning(f"【P115ShareStrm】未能在临时网盘目录映射中匹配到 sha1={sha1} 的文件，可能该文件转存落盘未成功")
+
+                if not url:
                     logger.warning(
-                        f"【P115ShareStrm】字幕文件 {filename} (sha1: {sha1}) 未匹配到下载链接，跳过。"
-                        f" 可用的 sha1 列表: {list(subtitles_url_map.keys())}"
+                        f"【P115ShareStrm】字幕文件 {filename} (sha1: {sha1}) 最终未能匹配到有效下载链接，跳过。"
+                        f" 可用 fs_video_subtitle sha1 列表: {list(subtitles_url_map.keys())}，"
+                        f" 临时目录可用 sha1 列表: {list(tmp_files_map.keys())}"
                     )
                     fail_count += 1
                     continue
