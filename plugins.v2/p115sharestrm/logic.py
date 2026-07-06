@@ -126,17 +126,17 @@ class ShareP115Client(P115Client):
         self,
         payload: dict,
         /,
-        base_url: str = "https://webapi.115.com",
+        base_url: str | Callable[[], str] = "https://webapi.115.com",
         *,
         async_: bool = False,
-        **kwargs,
+        **request_kwargs,
     ) -> dict:
         """
         通过 Cookie 接口获取分享目录列表
         """
         api = complete_url("/share/snap", base_url=base_url)
         payload = {"cid": 0, "limit": 32, "offset": 0, **payload}
-        return self.request(url=api, params=payload, async_=async_, **kwargs)
+        return self.request(url=api, params=payload, async_=async_, **request_kwargs)
 
 
 class _EndpointPool:
@@ -205,11 +205,19 @@ def _make_endpoint_pool(client: ShareP115Client) -> _EndpointPool:
     传入，不能使用 requests 风格的 (connect, read) 元组。
     """
     _timeout = {"connect": 10, "pool": 10, "read": 60, "write": 60}
+    custom_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/21E219 "
+            "115wangpan_ios/36.2.20"
+        ),
+    }
     return _EndpointPool([
         (
             "share_snap_app_https",
             lambda p: client.share_snap_app(
                 p, base_url="https://proapi.115.com",
+                headers=custom_headers,
                 extensions={"timeout": _timeout},
             ),
         ),
@@ -217,13 +225,15 @@ def _make_endpoint_pool(client: ShareP115Client) -> _EndpointPool:
             "share_snap_app_http",
             lambda p: client.share_snap_app(
                 p, base_url="http://pro.api.115.com",
+                headers=custom_headers,
                 extensions={"timeout": _timeout},
             ),
         ),
         (
             "share_snap_cookie",
             lambda p: client.share_snap_cookie(
-                p, extensions={"timeout": _timeout},
+                p, headers=custom_headers,
+                extensions={"timeout": _timeout},
             ),
         ),
     ])
@@ -503,15 +513,17 @@ def _download_subtitles_from_share(
 
     custom_headers = {
         "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/21E219 "
+            "115wangpan_ios/36.2.20"
         ),
     }
 
     _download_headers = {
         "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/21E219 "
+            "115wangpan_ios/36.2.20"
         ),
     }
 
@@ -549,13 +561,15 @@ def _download_subtitles_from_share(
             check_response(resp)
             logger.info(f"【P115ShareStrm】字幕转存任务提交完成")
 
-            # 3. 轮询等待 115 异步转存完成（最多等待 30s，每 2s 轮询一次）
+            # 3. 轮询等待 115 异步转存完成（在第一次查询前增加 8s 的延时以给 115 充足时间落盘）
             attr = None
-            logger.info(f"【P115ShareStrm】开始轮询转存状态，检测文件是否生成...")
-            for attempt in range(15):
-                sleep(2)
+            logger.info(f"【P115ShareStrm】开始等待字幕文件转存落盘...")
+            sleep(8)
+            for attempt in range(10):
+                if attempt > 0:
+                    sleep(3)
                 try:
-                    logger.debug(f"【P115ShareStrm】正在进行第 {attempt + 1}/15 次转存轮询...")
+                    logger.debug(f"【P115ShareStrm】正在进行第 {attempt + 1}/10 次转存检测...")
                     attr = next(
                         _iter_fs_files(
                             client=client,
@@ -884,7 +898,14 @@ def _get_share_state(client: ShareP115Client, share_code: str, receive_code: str
     try:
         payload = {"share_code": share_code, "receive_code": receive_code}
         # 使用 app 端接口查询快照，获取分享状态
-        resp = client.share_snap_app(payload, app="android", timeout=15)
+        custom_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/21E219 "
+                "115wangpan_ios/36.2.20"
+            ),
+        }
+        resp = client.share_snap_app(payload, app="android", headers=custom_headers, timeout=15)
         data = resp.get("data", {})
         share_info = data.get("shareinfo", data.get("share_info", {}))
         share_state = data.get("share_state", share_info.get("share_state", share_info.get("status")))
