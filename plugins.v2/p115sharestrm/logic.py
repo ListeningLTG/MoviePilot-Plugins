@@ -576,7 +576,6 @@ def _download_subtitles_from_share(
                             payload=scid,
                             page_size=1,
                             app="web",
-                            headers=custom_headers,
                         )
                     )
                     if attr:
@@ -590,7 +589,7 @@ def _download_subtitles_from_share(
             if not attr:
                 try:
                     logger.warning(f"【P115ShareStrm】轮询超时，尝试列出临时目录 {scid} 下的所有内容...")
-                    tmp_files = list(_iter_fs_files(client=client, payload=scid, page_size=10, app="web", headers=custom_headers))
+                    tmp_files = list(_iter_fs_files(client=client, payload=scid, page_size=10, app="web"))
                     logger.warning(f"【P115ShareStrm】临时目录下实际存在的文件列表: {tmp_files}")
                 except Exception as list_err:
                     logger.warning(f"【P115ShareStrm】尝试列出临时目录内容失败: {list_err}")
@@ -605,7 +604,7 @@ def _download_subtitles_from_share(
             # 列出转存到临时文件夹下的所有文件的 sha1 -> pickcode 映射（用于兜底下载）
             tmp_files_map = {}
             try:
-                tmp_files = list(_iter_fs_files(client=client, payload=scid, page_size=100, app="web", headers=custom_headers))
+                tmp_files = list(_iter_fs_files(client=client, payload=scid, page_size=100, app="web"))
                 logger.info(f"【P115ShareStrm】临时文件夹 {scid} 中当前实际存在的文件数量: {len(tmp_files)}")
                 for tf in tmp_files:
                     if tf.get("sha1") and tf.get("pickcode"):
