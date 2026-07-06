@@ -637,7 +637,7 @@ def _download_subtitles_from_share(
                     if tmp_pickcode:
                         try:
                             logger.info(f"【P115ShareStrm】正在为 {filename} (pickcode: {tmp_pickcode}) 获取下载直链...")
-                            url = str(client.download_url(tmp_pickcode, headers=custom_headers))
+                            url = str(client.download_url(tmp_pickcode, user_agent=custom_headers.get("User-Agent")))
                             logger.info(f"【P115ShareStrm】获取直链成功: {url}")
                         except Exception as dl_url_err:
                             logger.error(f"【P115ShareStrm】调用 client.download_url 获取 {filename} 直链失败: {dl_url_err}", exc_info=True)
