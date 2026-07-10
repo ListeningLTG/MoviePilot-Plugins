@@ -40,6 +40,53 @@ def _fuzzy_query_transfer_history(db, suffix: str) -> Optional[Any]:
     ).first()
 
 
+_PATH_PREFIX_MAPPING_CACHE: Dict[str, str] = {}
+
+
+def _update_prefix_mapping_cache(local_path: str, db_path: str):
+    """
+    通过本地生成的 STRM 路径和数据库中记录的转移历史路径，推导并缓存路径前缀映射关系。
+    例如：
+      local_path = "/shareStrm/Detective Dee/file.strm"
+      db_path = "/mnt/data/mp2/shareStrm/Detective Dee/file.strm"
+    推导结果：
+      _PATH_PREFIX_MAPPING_CACHE["/shareStrm"] = "/mnt/data/mp2/shareStrm"
+    """
+    local_parts = local_path.split('/')
+    db_parts = db_path.split('/')
+    
+    common_parts = []
+    i = 1
+    # 留出至少一个目录层级，防止 local_prefix 为空
+    while i < len(local_parts) - 1 and i <= len(db_parts):
+        if local_parts[-i] == db_parts[-i]:
+            common_parts.append(local_parts[-i])
+            i += 1
+        else:
+            break
+            
+    if common_parts:
+        common_parts.reverse()
+        common_suffix = '/' + '/'.join(common_parts)
+        if local_path.endswith(common_suffix) and db_path.endswith(common_suffix):
+            local_prefix = local_path[:-len(common_suffix)]
+            db_prefix = db_path[:-len(common_suffix)]
+            if local_prefix and local_prefix not in _PATH_PREFIX_MAPPING_CACHE:
+                _PATH_PREFIX_MAPPING_CACHE[local_prefix] = db_prefix
+                logger.info(f"【P115ShareStrm】检测到路径映射关系并存入缓存: {local_prefix} -> {db_prefix}")
+
+
+def _map_local_path_to_db(local_path: str) -> str:
+    """
+    根据已缓存的路径前缀映射，将本地路径转换为数据库匹配路径。
+    """
+    for local_prefix in sorted(_PATH_PREFIX_MAPPING_CACHE.keys(), key=len, reverse=True):
+        if local_path.startswith(local_prefix):
+            db_prefix = _PATH_PREFIX_MAPPING_CACHE[local_prefix]
+            return db_prefix + local_path[len(local_prefix):]
+    return local_path
+
+
 def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any]:
     """
     根据 STRM 路径从 TransferHistory 中检索整理记录。
@@ -47,6 +94,15 @@ def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any
     """
     # 1. 首先尝试精确匹配
     src_posix = strm_path.as_posix()
+    
+    # 1.1 优先尝试使用缓存的路径前缀进行精确匹配
+    mapped_src = _map_local_path_to_db(src_posix)
+    if mapped_src != src_posix:
+        history = th_oper.get_by_src(mapped_src, "local")
+        if history and history.dest:
+            return history
+
+    # 1.2 尝试原路径精确匹配
     history = th_oper.get_by_src(src_posix, "local")
     if history and history.dest:
         return history
@@ -59,6 +115,8 @@ def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any
         history = _fuzzy_query_transfer_history(None, suffix)
         if history and history.dest:
             logger.info(f"【P115ShareStrm】通过两级路径后缀模糊匹配成功: {strm_path.name} -> {history.src}")
+            # 更新缓存，加速以后的匹配
+            _update_prefix_mapping_cache(src_posix, history.src)
             return history
 
     # 3. 如果依然未匹配成功，尝试仅通过文件名匹配
@@ -67,6 +125,8 @@ def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any
         history = _fuzzy_query_transfer_history(None, suffix)
         if history and history.dest:
             logger.info(f"【P115ShareStrm】通过文件名后缀模糊匹配成功: {strm_path.name} -> {history.src}")
+            # 更新缓存，加速以后的匹配
+            _update_prefix_mapping_cache(src_posix, history.src)
             return history
 
     return None
@@ -1340,17 +1400,17 @@ def process_share_strm(
                 # 优化：只有在需要下载并放置字幕，且本次分享确实包含字幕文件时，才需要等待以获取目标路径
                 need_wait = configer.download_subtitle and subtitle_files
                 
-                pending = set(strm_file_path.as_posix() for strm_file_path in generated_strm_paths)
-                
-                # 即使不需要等待放置字幕，也可以先通过预扫描清理掉已经整理过的记录（保持状态准确）
-                for src in list(pending):
-                    history = _get_transfer_history_by_strm_path(_th_oper, Path(src))
-                    if history and history.dest:
-                        strm_source_to_target[src] = Path(history.dest)
-                        pending.remove(src)
-                
-                if pending:
-                    if need_wait:
+                if need_wait:
+                    pending = set(strm_file_path.as_posix() for strm_file_path in generated_strm_paths)
+                    
+                    # 即使不需要等待放置字幕，也可以先通过预扫描清理掉已经整理过的记录（保持状态准确）
+                    for src in list(pending):
+                        history = _get_transfer_history_by_strm_path(_th_oper, Path(src))
+                        if history and history.dest:
+                            strm_source_to_target[src] = Path(history.dest)
+                            pending.remove(src)
+                    
+                    if pending:
                         # 动态调整超时时间：如果队列积压严重，缩短等待时间
                         qsize = task_queue.get_queue_size()
                         base_timeout = configer.wait_organize_timeout
@@ -1390,9 +1450,9 @@ def process_share_strm(
                         else:
                             logger.info("【P115ShareStrm】STRM 批量整理全部完成")
                     else:
-                        logger.info("【P115ShareStrm】无需放置字幕，跳过整理等待")
+                        logger.info("【P115ShareStrm】所有文件均已整理过，无需等待")
                 else:
-                    logger.info("【P115ShareStrm】所有文件均已整理过，无需等待")
+                    logger.info("【P115ShareStrm】无需放置字幕，跳过整理等待")
             elif sub_only:
                 # 在 sub_only 模式下，直接在 TransferHistory 中查找每个 strm_file_path 的整理位置
                 logger.info("【P115ShareStrm】仅重试下载字幕模式：直接检索历史整理记录...")
