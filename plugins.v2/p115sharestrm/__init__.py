@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.55"
+    plugin_version = "1.0.56"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -254,7 +254,7 @@ class p115sharestrm(_PluginBase):
                                             },
                                             {
                                                 "component": "VCol",
-                                                "props": {"cols": 12, "md": 9},
+                                                "props": {"cols": 12, "md": 5},
                                                 "content": [
                                                     {
                                                         "component": "VTextField",
@@ -262,6 +262,22 @@ class p115sharestrm(_PluginBase):
                                                             "model": "user_subtitle_ext",
                                                             "label": "字幕文件后缀",
                                                             "hint": "逗号分隔，开启后将此类后缀文件从分享转存下载到本地，例如 srt,ass,ssa",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "subtitle_audit_poll_timeout_hours",
+                                                            "label": "审核轮询超时（小时）",
+                                                            "type": "number",
+                                                            "hint": "分享链接审核中时，后台等待审核通过的最长时间，默认 6 小时；超时后可点通知按钮重试",
                                                             "persistent-hint": True,
                                                         },
                                                     }
@@ -486,6 +502,7 @@ class p115sharestrm(_PluginBase):
             "user_rmt_mediaext": "mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v",
             "download_subtitle": False,
             "user_subtitle_ext": "srt,ass,ssa",
+            "subtitle_audit_poll_timeout_hours": 6,
         }
 
     def get_page(self) -> List[dict]:

@@ -53,6 +53,10 @@ class ConfigManager(BaseModel):
         default=120,
         description="STRM 整理等待超时时间（秒），若队列任务过多建议调低"
     )
+    subtitle_audit_poll_timeout_hours: int = Field(
+        default=6,
+        description="字幕审核轮询超时时间（小时），分享链接审核中时后台最长等待时长",
+    )
 
     @property
     def moviepilot_address(self) -> str:

@@ -1016,10 +1016,22 @@ def _background_download_subtitles(
     """
     后台轮询等待分享链接审核通过，然后执行字幕下载与整理（防止堵塞主队列工作线程）
     """
-    max_attempts = 36  # 36次 * 5分钟 = 3小时
-    logger.info(f"【P115ShareStrm】已为 {share_code} 启动字幕后台轮询下载任务...")
+    try:
+        timeout_hours = int(configer.subtitle_audit_poll_timeout_hours or 6)
+    except (TypeError, ValueError):
+        timeout_hours = 6
+    timeout_hours = max(1, timeout_hours)
+    # 约每 5 分钟检查一次：timeout_hours * 12
+    max_attempts = timeout_hours * 12
+    deadline = time() + timeout_hours * 3600
+    logger.info(
+        f"【P115ShareStrm】已为 {share_code} 启动字幕后台轮询下载任务"
+        f"（超时 {timeout_hours} 小时，最多约 {max_attempts} 次检查）..."
+    )
 
-    for attempt in range(1, max_attempts + 1):
+    attempt = 0
+    while True:
+        attempt += 1
         # 动态前置等待：前两次分别等 1 分钟、2 分钟，后续每 5 分钟检查一次
         if attempt == 1:
             sleep(60)
@@ -1028,7 +1040,10 @@ def _background_download_subtitles(
         else:
             sleep(300)
 
-        logger.info(f"【P115ShareStrm】字幕下载后台轮询：正在进行第 {attempt}/{max_attempts} 次状态检查: {share_code}")
+        logger.info(
+            f"【P115ShareStrm】字幕下载后台轮询：正在进行第 {attempt} 次状态检查"
+            f"（超时 {timeout_hours} 小时）: {share_code}"
+        )
         state = _get_share_state(client, share_code, receive_code)
 
         if state is not None and state != 0:
@@ -1138,8 +1153,19 @@ def _background_download_subtitles(
             except Exception as e:
                 logger.error(f"【P115ShareStrm】字幕后台下载处理异常: {e}", exc_info=True)
 
-    logger.warning(f"【P115ShareStrm】字幕下载后台轮询超时 (3小时): {share_code}")
-    task_queue._notify(user_id, "【115分享STRM】字幕下载失败", f"❌ {share_code}\n原因: 链接审核轮询超时 (3小时)")
+        if time() >= deadline or attempt >= max_attempts:
+            break
+
+    logger.warning(f"【P115ShareStrm】字幕下载后台轮询超时 ({timeout_hours}小时): {share_code}")
+    task_queue._notify(
+        user_id,
+        "【115分享STRM】字幕下载失败",
+        f"❌ {share_code}\n原因: 链接审核轮询超时 ({timeout_hours}小时)",
+        buttons=[[{
+            "text": "🔁 重试下载字幕",
+            "callback_data": f"[PLUGIN]p115sharestrm|retry_sub:{share_code}:{receive_code}",
+        }]],
+    )
 
 
 def process_share_strm(
