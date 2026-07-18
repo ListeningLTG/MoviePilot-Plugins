@@ -24,7 +24,7 @@ class p115sign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
     # 插件版本
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
      # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -137,8 +137,24 @@ class p115sign(_PluginBase):
             P115Client = _P115Client
             check_response = _check_response
             use_client = True
-        except Exception:
+            try:
+                from importlib.metadata import version as package_version
+                client_version = package_version("p115client")
+            except Exception:
+                client_version = "未知（包元数据不可用）"
+            logger.info(
+                "p115client 加载成功，版本=%s，模块=%s",
+                client_version,
+                _P115Client.__module__,
+            )
+        except Exception as e:
             use_client = False
+            logger.error(
+                "p115client 加载失败，将回退到 p115 CLI：%s: %s",
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
 
         for idx, cookie in enumerate(cookies, start=1):
 
@@ -149,38 +165,62 @@ class p115sign(_PluginBase):
                 attempt = 0
                 final_result = None
                 while True:
-                    if use_client and P115Client and check_response:
-                        client = P115Client(cookie)
-                        resp = check_response(client.user_points_sign_post())
-                        logger.debug(f"115签到接口返回: {resp}")
-                        data = resp.get("data") or {}
-                        continuous_day = data.get("continuous_day", 0)
-                        points_num = data.get("points_num", 0)
-                        first_require_sign = data.get("first_require_sign")
-                        if first_require_sign == 1:
-                            status = "签到成功"
-                            msg = f"已连续签到{continuous_day}天，获得枫叶值为{points_num}"
+                    try:
+                        if use_client and P115Client and check_response:
+                            client = P115Client(cookie)
+                            resp = client.user_points_sign_post()
+                            logger.info("115签到接口原始响应: %s", resp)
+                            resp = check_response(resp)
+                            data = resp.get("data") or {}
+                            continuous_day = data.get("continuous_day", 0)
+                            points_num = data.get("points_num", 0)
+                            first_require_sign = data.get("first_require_sign")
+                            if first_require_sign == 1:
+                                status = "签到成功"
+                                msg = f"已连续签到{continuous_day}天，获得枫叶值为{points_num}"
+                            else:
+                                status = "已经签到过了"
+                                msg = f"无需再签到，已连续签到{continuous_day}天，获得枫叶值为{points_num}"
+                            final_result = {
+                                "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                "status": status,
+                                "message": msg,
+                                "continuous_day": continuous_day,
+                                "points_num": points_num
+                            }
                         else:
-                            status = "已经签到过了"
-                            msg = f"无需再签到，已连续签到{continuous_day}天，获得枫叶值为{points_num}"
+                            command = f'p115 check -c "{cookie}"'
+                            process = subprocess.run(command, shell=True, capture_output=True, text=True, encoding='utf-8')
+                            output = (process.stdout or "").strip()
+                            error = (process.stderr or "").strip()
+                            status = "签到成功" if process.returncode == 0 else "签到失败"
+                            message = output if process.returncode == 0 else f"{output}\n{error}".strip()
+                            if process.returncode != 0:
+                                logger.error(
+                                    "p115 CLI 签到失败：returncode=%s, stdout=%r, stderr=%r",
+                                    process.returncode,
+                                    output,
+                                    error,
+                                )
+                            final_result = {
+                                "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                "status": status,
+                                "message": message,
+                                "continuous_day": "-",
+                                "points_num": "-"
+                            }
+                    except Exception as e:
+                        logger.error(
+                            "第%d次签到调用异常：%s: %s",
+                            attempt + 1,
+                            type(e).__name__,
+                            e,
+                            exc_info=True,
+                        )
                         final_result = {
                             "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                            "status": status,
-                            "message": msg,
-                            "continuous_day": continuous_day,
-                            "points_num": points_num
-                        }
-                    else:
-                        command = f'p115 check -c "{cookie}"'
-                        process = subprocess.run(command, shell=True, capture_output=True, text=True, encoding='utf-8')
-                        output = (process.stdout or "").strip()
-                        error = (process.stderr or "").strip()
-                        status = "签到成功" if process.returncode == 0 else "签到失败"
-                        message = output if process.returncode == 0 else f"{output}\n{error}"
-                        final_result = {
-                            "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                            "status": status,
-                            "message": message,
+                            "status": "签到失败",
+                            "message": f"{type(e).__name__}: {e}",
                             "continuous_day": "-",
                             "points_num": "-"
                         }
