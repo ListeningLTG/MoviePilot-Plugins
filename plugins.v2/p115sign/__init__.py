@@ -24,7 +24,7 @@ class p115sign(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
     # 插件版本
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
      # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -131,9 +131,11 @@ class p115sign(_PluginBase):
 
         use_client = False
         P115Client = None
+        check_response = None
         try:
-            from p115client import P115Client as _P115Client
+            from p115client import P115Client as _P115Client, check_response as _check_response
             P115Client = _P115Client
+            check_response = _check_response
             use_client = True
         except Exception:
             use_client = False
@@ -147,39 +149,26 @@ class p115sign(_PluginBase):
                 attempt = 0
                 final_result = None
                 while True:
-                    if use_client and P115Client:
+                    if use_client and P115Client and check_response:
                         client = P115Client(cookie)
-                        app_kwargs = {
-                            "headers": {"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 115wangpan_ios/36.2.20"},
-                            "app": "ios"
-                        }
-                        resp = client.user_points_sign_post(**app_kwargs)
-                        if isinstance(resp, dict):
-                            code = resp.get("code")
-                            state = resp.get("state")
-                            data = resp.get("data") or {}
-                            continuous_day = data.get("continuous_day")
-                            points_num = data.get("points_num")
-                            first_require_sign = data.get("first_require_sign")
-                            if state and code == 0:
-                                if first_require_sign == 1:
-                                    status = "签到成功"
-                                    msg = f"已连续签到{continuous_day}天，获得枫叶值为{points_num}"
-                                else:
-                                    status = "已经签到过了"
-                                    msg = f"无需再签到，已连续签到{continuous_day}天，获得枫叶值为{points_num}"
-                            else:
-                                status = "签到失败"
-                                msg = str(resp)
+                        resp = check_response(client.user_points_sign_post())
+                        logger.debug(f"115签到接口返回: {resp}")
+                        data = resp.get("data") or {}
+                        continuous_day = data.get("continuous_day", 0)
+                        points_num = data.get("points_num", 0)
+                        first_require_sign = data.get("first_require_sign")
+                        if first_require_sign == 1:
+                            status = "签到成功"
+                            msg = f"已连续签到{continuous_day}天，获得枫叶值为{points_num}"
                         else:
-                            status = "签到成功" if resp else "签到失败"
-                            msg = str(resp)
+                            status = "已经签到过了"
+                            msg = f"无需再签到，已连续签到{continuous_day}天，获得枫叶值为{points_num}"
                         final_result = {
                             "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                             "status": status,
                             "message": msg,
-                            "continuous_day": continuous_day if 'continuous_day' in locals() else '-',
-                            "points_num": points_num if 'points_num' in locals() else '-'
+                            "continuous_day": continuous_day,
+                            "points_num": points_num
                         }
                     else:
                         command = f'p115 check -c "{cookie}"'

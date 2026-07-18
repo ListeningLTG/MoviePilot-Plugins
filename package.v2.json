@@ -79,11 +79,12 @@
   "p115sign": {
     "name": "115网盘签到",
     "description": "115网盘签到，支持失败重试和历史记录统计",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.6": "适配新版签到响应判定逻辑",
       "v1.0.5": "升级 p115client 至 0.0.9.4.6.1",
       "v1.0.4": "修复签到失败的问题",
       "v1.0.3": "尝试修复签到失败的问题",
