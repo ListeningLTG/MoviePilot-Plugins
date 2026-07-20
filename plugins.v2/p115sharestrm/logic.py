@@ -87,6 +87,16 @@ def _map_local_path_to_db(local_path: str) -> str:
     return local_path
 
 
+_AMBIGUOUS_STRM_STEM_RE = re.compile(r"^(?:\d+|EP\d+|E\d+)$", re.IGNORECASE)
+
+
+def _is_ambiguous_strm_filename(stem: str) -> bool:
+    """短/集数型文件名在 LIKE 查询中易误匹配，跳过仅文件名级模糊匹配。"""
+    if not stem or len(stem) <= 3:
+        return True
+    return bool(_AMBIGUOUS_STRM_STEM_RE.match(stem))
+
+
 def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any]:
     """
     根据 STRM 路径从 TransferHistory 中检索整理记录。
@@ -119,8 +129,8 @@ def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any
             _update_prefix_mapping_cache(src_posix, history.src)
             return history
 
-    # 3. 如果依然未匹配成功，尝试仅通过文件名匹配
-    if len(parts) >= 1:
+    # 3. 如果依然未匹配成功，尝试仅通过文件名匹配（跳过易误匹配的短/集数型文件名）
+    if len(parts) >= 1 and not _is_ambiguous_strm_filename(strm_path.stem):
         suffix = f"/{parts[-1]}"
         history = _fuzzy_query_transfer_history(None, suffix)
         if history and history.dest:
@@ -1449,32 +1459,52 @@ def process_share_strm(
                         else:
                             timeout = base_timeout
 
-                        logger.info(f"【P115ShareStrm】剩余 {len(pending)} 个文件等待整理 (积压: {qsize}，超时: {timeout}s)...")
-                        interval = 2
-                        waited = 0
-                        while pending and waited < timeout:
-                            finished = set()
-                            for src in pending:
-                                history = _get_transfer_history_by_strm_path(_th_oper, Path(src))
-                                if history and history.dest:
-                                    strm_source_to_target[src] = Path(history.dest)
-                                    finished.add(src)
-                            
-                            if finished:
-                                logger.info(f"【P115ShareStrm】整理完成新进度: {len(finished)} 个")
-                                pending -= finished
-                            
-                            if pending:
-                                sleep(interval)
-                                waited += interval
-                        
-                        if pending:
-                            if waited >= timeout:
-                                logger.warning(f"【P115ShareStrm】STRM 整理等待超时 ({timeout}s)，跳过后续等待（STRM 将在后台继续整理，但字幕可能无法自动归位）: {pending}")
-                            else:
-                                logger.warning(f"【P115ShareStrm】部分 STRM 整理异常未完成: {pending}")
+                        skip_wait = len(pending) > 500 or (qsize > 0 and len(pending) > 100)
+                        if skip_wait:
+                            logger.warning(
+                                f"【P115ShareStrm】待整理文件过多 ({len(pending)}) 或队列积压 ({qsize})，"
+                                f"跳过整理等待（STRM 将在后台继续整理，但字幕可能无法自动归位）"
+                            )
                         else:
-                            logger.info("【P115ShareStrm】STRM 批量整理全部完成")
+                            logger.info(f"【P115ShareStrm】剩余 {len(pending)} 个文件等待整理 (积压: {qsize}，超时: {timeout}s)...")
+                            interval = 2
+                            deadline = time() + timeout
+                            cancelled = False
+                            while pending and time() < deadline:
+                                if task_queue._cancel_event.is_set():
+                                    cancelled = True
+                                    logger.info("【P115ShareStrm】整理等待已取消（插件停止）")
+                                    break
+
+                                finished = set()
+                                for src in pending:
+                                    history = _get_transfer_history_by_strm_path(_th_oper, Path(src))
+                                    if history and history.dest:
+                                        strm_source_to_target[src] = Path(history.dest)
+                                        finished.add(src)
+
+                                if finished:
+                                    logger.info(f"【P115ShareStrm】整理完成新进度: {len(finished)} 个")
+                                    pending -= finished
+
+                                if pending and time() < deadline and not task_queue._cancel_event.is_set():
+                                    sleep(interval)
+
+                            if pending:
+                                if cancelled:
+                                    logger.warning(
+                                        f"【P115ShareStrm】整理等待已取消，仍有 {len(pending)} 个文件未完成"
+                                        f"（STRM 将在后台继续整理，但字幕可能无法自动归位）"
+                                    )
+                                elif time() >= deadline:
+                                    logger.warning(
+                                        f"【P115ShareStrm】STRM 整理等待超时 ({timeout}s)，跳过后续等待"
+                                        f"（STRM 将在后台继续整理，但字幕可能无法自动归位）: {pending}"
+                                    )
+                                else:
+                                    logger.warning(f"【P115ShareStrm】部分 STRM 整理异常未完成: {pending}")
+                            else:
+                                logger.info("【P115ShareStrm】STRM 批量整理全部完成")
                     else:
                         logger.info("【P115ShareStrm】所有文件均已整理过，无需等待")
                 else:
@@ -1636,6 +1666,7 @@ class ShareTaskQueue:
         self._worker_thread: Optional[Thread] = None
         self._lock = Lock()
         self._running = False
+        self._cancel_event = Event()
         self._processing_count: int = 0  # 当前正在处理中的任务数
         self._notify_callback: Optional[Callable[[Optional[str], str, str], None]] = None
         # 正在队列中等待或处理的分享码（全量去重）
@@ -1729,18 +1760,29 @@ class ShareTaskQueue:
         启动前先从持久化文件恢复未完成任务，重新入队。
         """
         with self._lock:
-            if not self._running:
-                self._running = True
-                self._worker_thread = Thread(target=self._worker, daemon=True)
-                self._worker_thread.start()
-                logger.info("【P115ShareStrm】任务队列工作线程已启动")
+            if self._running and self._worker_thread and self._worker_thread.is_alive():
+                return
+
+        if self._worker_thread and self._worker_thread.is_alive():
+            self.stop()
+
+        with self._lock:
+            self._cancel_event.clear()
+            self._running = True
+            self._worker_thread = Thread(target=self._worker, daemon=True)
+            self._worker_thread.start()
+            logger.info("【P115ShareStrm】任务队列工作线程已启动")
 
         # 恢复持久化任务（在 _lock 外执行，避免死锁）
         self._restore_persisted_tasks()
 
     def stop(self):
-        """停止工作线程"""
+        """停止工作线程，并中断整理等待等长耗时操作"""
         self._running = False
+        self._cancel_event.set()
+        worker = self._worker_thread
+        if worker and worker.is_alive() and worker is not Thread.current_thread():
+            worker.join(timeout=5)
 
     def add_task(
         self,

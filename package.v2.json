@@ -114,11 +114,12 @@
   "p115sharestrm": {
     "name": "分享STRM生成助手",
     "description": "发送/sharestrm 115分享链接 给TG机器人，自动生成分享STRM",
-    "version": "1.0.57",
+    "version": "1.0.58",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.58": "修复整理等待墙钟超时失效与短文件名误匹配导致队列阻塞；stop 可中断等待",
       "v1.0.57": "升级 p115client 至 0.0.9.4.6.1",
       "v1.0.56": "字幕审核轮询超时默认改为6小时并可配置，超时通知增加重试下载按钮",
       "v1.0.55": "优化整理等待逻辑",
