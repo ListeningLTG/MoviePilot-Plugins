@@ -69,6 +69,36 @@ class ConfigManager(BaseModel):
         default=100,
         description="队列有积压且待整理数超过此值时跳过同步等待",
     )
+    share_snap_speed_mode: int = Field(
+        default=3,
+        ge=0,
+        le=3,
+        description="分享扫描速度 0最快~3最慢（对齐 p115strmhelper，默认3最安全）",
+    )
+    scan_cache_ttl_hours: int = Field(
+        default=72,
+        ge=1,
+        description="分享扫描结果本地缓存有效期（小时）",
+    )
+    reuse_scan_cache_for_sharestrm: bool = Field(
+        default=True,
+        description="全量 /sharestrm 在缓存未过期时复用扫描结果，跳过 115 列举",
+    )
+    audit_poll_min_sec: int = Field(
+        default=60,
+        ge=10,
+        description="字幕审核轮询最小间隔（秒）",
+    )
+    audit_poll_max_sec: int = Field(
+        default=300,
+        ge=30,
+        description="字幕审核轮询最大间隔（秒）",
+    )
+    share_receive_retry_hours: int = Field(
+        default=3,
+        ge=1,
+        description="share_receive 限制接收(4200041)后首次自动重试等待（小时）",
+    )
 
     @property
     def moviepilot_address(self) -> str:

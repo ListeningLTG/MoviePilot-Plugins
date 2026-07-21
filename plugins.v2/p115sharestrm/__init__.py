@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.63"
+    plugin_version = "1.0.64"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -338,6 +338,138 @@ class p115sharestrm(_PluginBase):
                                             },
                                         ],
                                     },
+                                    # ── 115 接口限速 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12},
+                                                "content": [
+                                                    {
+                                                        "component": "VAlert",
+                                                        "props": {
+                                                            "type": "warning",
+                                                            "variant": "tonal",
+                                                            "density": "compact",
+                                                            "class": "mt-2",
+                                                        },
+                                                        "content": [
+                                                            {
+                                                                "component": "div",
+                                                                "html": "<b>115 接口限速</b>（大包分享扫描防 405 风控）",
+                                                            },
+                                                        ],
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 3},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "share_snap_speed_mode",
+                                                            "label": "分享扫描速度",
+                                                            "type": "number",
+                                                            "hint": "0最快~3最慢，默认 3（约 1.5s/请求，大包更安全）",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 3},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "scan_cache_ttl_hours",
+                                                            "label": "扫描缓存有效期（小时）",
+                                                            "type": "number",
+                                                            "hint": "同一分享在 TTL 内重复处理可跳过 115 列举，默认 72",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 3},
+                                                "content": [
+                                                    {
+                                                        "component": "VSwitch",
+                                                        "props": {
+                                                            "model": "reuse_scan_cache_for_sharestrm",
+                                                            "label": "全量任务复用扫描缓存",
+                                                            "hint": "关闭后 /sharestrm 每次强制重新扫描分享目录",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 3},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "share_receive_retry_hours",
+                                                            "label": "限制接收重试间隔（小时）",
+                                                            "type": "number",
+                                                            "hint": "share_receive 4200041 后首次自动重试等待，默认 3",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 6},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "audit_poll_min_sec",
+                                                            "label": "审核轮询最小间隔（秒）",
+                                                            "type": "number",
+                                                            "hint": "字幕后台等待审核通过时的轮询起点，默认 60",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 6},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "audit_poll_max_sec",
+                                                            "label": "审核轮询最大间隔（秒）",
+                                                            "type": "number",
+                                                            "hint": "轮询间隔上限，默认 300",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
                                     # ── 第二行：Cookie 与 地址 ──
                                     {
                                         "component": "VRow",
@@ -559,6 +691,12 @@ class p115sharestrm(_PluginBase):
             "subtitle_finalize_timeout_hours": 6,
             "skip_wait_pending_threshold": 500,
             "skip_wait_pending_when_queued": 100,
+            "share_snap_speed_mode": 3,
+            "scan_cache_ttl_hours": 72,
+            "reuse_scan_cache_for_sharestrm": True,
+            "audit_poll_min_sec": 60,
+            "audit_poll_max_sec": 300,
+            "share_receive_retry_hours": 3,
         }
 
     def get_page(self) -> List[dict]:
@@ -573,6 +711,10 @@ class p115sharestrm(_PluginBase):
         place_miss = metrics.get("subtitle_place_miss", 0)
         place_ok = metrics.get("subtitle_place_ok", 0)
         last_sec = metrics.get("last_finalize_seconds", 0)
+        snap_last = metrics.get("snap_calls_last_task", 0)
+        snap_total = metrics.get("snap_calls_total", 0)
+        waf_405 = metrics.get("waf_405_count", 0)
+        cache_hits = metrics.get("scan_cache_hits", 0)
 
         return [
             {
@@ -699,6 +841,57 @@ class p115sharestrm(_PluginBase):
                                                     "prepend-icon": "mdi-timer",
                                                 },
                                                 "text": f"最近收尾耗时: {last_sec}s",
+                                            }
+                                        ],
+                                    },
+                                ],
+                            },
+                            {
+                                "component": "VRow",
+                                "props": {"class": "mt-2"},
+                                "content": [
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 12, "md": 4},
+                                        "content": [
+                                            {
+                                                "component": "VChip",
+                                                "props": {
+                                                    "color": "primary",
+                                                    "variant": "tonal",
+                                                    "prepend-icon": "mdi-api",
+                                                },
+                                                "text": f"最近任务扫描 API: {snap_last} 次",
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 12, "md": 4},
+                                        "content": [
+                                            {
+                                                "component": "VChip",
+                                                "props": {
+                                                    "color": "error" if waf_405 > 0 else "default",
+                                                    "variant": "tonal",
+                                                    "prepend-icon": "mdi-shield-alert",
+                                                },
+                                                "text": f"405 触发: {waf_405} 次 (累计扫描 {snap_total})",
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 12, "md": 4},
+                                        "content": [
+                                            {
+                                                "component": "VChip",
+                                                "props": {
+                                                    "color": "success" if cache_hits > 0 else "default",
+                                                    "variant": "tonal",
+                                                    "prepend-icon": "mdi-database-check",
+                                                },
+                                                "text": f"扫描缓存命中: {cache_hits} 次",
                                             }
                                         ],
                                     },

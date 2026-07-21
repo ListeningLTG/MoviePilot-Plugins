@@ -20,12 +20,28 @@ from app.schemas import FileItem
 
 from .config import configer
 from .utils import StrmUrlTemplateResolver
+from .limiter import (
+    ApiEndpointCooldown,
+    ShareRateLimitedError,
+    ShareReceiveLimitedError,
+    api_metrics,
+    call_protected_api,
+    get_speed_cooldowns,
+    global_api_guard,
+    handle_waf_405,
+    is_receive_limited,
+    is_waf_405,
+    reset_waf_backoff,
+)
 
 
 
 class ShareLinkExpiredError(Exception):
     """分享链接已失效或被拒绝"""
     pass
+
+
+_SHARE_SNAP_PROGRESS_INTERVAL = 10
 
 
 from app.db import db_query
@@ -324,6 +340,83 @@ def _deserialize_stem_paths(data: Dict[str, str]) -> Dict[str, Path]:
     return {stem: Path(path) for stem, path in (data or {}).items()}
 
 
+def _schedule_subtitle_receive_retry(
+    job_id: str,
+    share_code: str,
+    receive_code: str,
+    subtitle_files: List[dict],
+    save_path_obj: Path,
+    user_id: Optional[str],
+    media_files: List[dict],
+    media_stem_to_strm_path: Dict[str, Path],
+    media_stem_to_target: Dict[str, Path],
+    retry_hours: int,
+) -> None:
+    """4200041 限制接收后延迟重试字幕下载。"""
+
+    def _retry_worker():
+        wait_sec = max(3600, retry_hours * 3600)
+        logger.info(
+            f"【P115ShareStrm】字幕转存限制接收，{retry_hours}h 后重试: {share_code} (job={job_id})"
+        )
+        if _interruptible_sleep(wait_sec, task_queue._cancel_event):
+            return
+        if task_queue._cancel_event.is_set():
+            return
+        task_queue.subtitle_job_update_stage(job_id, "placing")
+        client = ShareP115Client(configer.cookies)
+        retry_btn = [[{
+            "text": "🔁 重试下载字幕",
+            "callback_data": f"[PLUGIN]p115sharestrm|retry_sub:{share_code}:{receive_code}",
+        }]]
+        try:
+            downloaded, fail_count = _download_subtitles_from_share(
+                client, share_code, receive_code, subtitle_files, save_path_obj
+            )
+        except ShareReceiveLimitedError as e:
+            task_queue.subtitle_job_update_stage(job_id, "receive_limited")
+            task_queue._notify(
+                user_id,
+                "【115分享STRM】字幕下载失败",
+                f"❌ {share_code}\n限制接收仍未解除: {e}",
+                buttons=retry_btn,
+            )
+            return
+        except Exception as e:
+            task_queue.subtitle_job_update_stage(job_id, "failed")
+            task_queue._notify(
+                user_id,
+                "【115分享STRM】字幕下载失败",
+                f"❌ {share_code}\n重试失败: {e}",
+                buttons=retry_btn,
+            )
+            task_queue.subtitle_job_remove(job_id)
+            return
+
+        place_ok, place_miss = 0, 0
+        if downloaded and configer.moviepilot_transfer:
+            place_ok, place_miss = _place_subtitles_to_targets(
+                subtitle_files, downloaded, media_files,
+                media_stem_to_strm_path, media_stem_to_target,
+            )
+        elif downloaded:
+            for stem, sp in media_stem_to_strm_path.items():
+                media_stem_to_target.setdefault(stem, sp)
+            place_ok, place_miss = _place_subtitles_to_targets(
+                subtitle_files, downloaded, media_files,
+                media_stem_to_strm_path, media_stem_to_target,
+            )
+        task_queue.metrics_add_place(place_ok, place_miss)
+        msg = f"✅ 字幕限制接收重试完成: {share_code}\n下载成功: {len(downloaded)} 个"
+        if fail_count:
+            msg += f"，失败 {fail_count} 个"
+        task_queue._notify(user_id, "【115分享STRM】字幕自动下载成功", msg, buttons=retry_btn if fail_count else None)
+        task_queue.subtitle_job_update_stage(job_id, "done")
+        task_queue.subtitle_job_remove(job_id)
+
+    Thread(target=_retry_worker, daemon=True, name=f"P115SubReceiveRetry-{job_id[:8]}").start()
+
+
 def _start_subtitle_finalize_job(
     share_code: str,
     receive_code: str,
@@ -417,7 +510,15 @@ def _finalize_subtitles_async(
         task_queue.subtitle_job_update_stage(job_id, "waiting_transfer")
 
         client = ShareP115Client(configer.cookies)
-        interval = 10
+        try:
+            audit_min = max(10, int(configer.audit_poll_min_sec or 60))
+        except (TypeError, ValueError):
+            audit_min = 60
+        try:
+            audit_max = max(audit_min, int(configer.audit_poll_max_sec or 300))
+        except (TypeError, ValueError):
+            audit_max = 300
+        interval = audit_min
         audit_ok = False
         attempt = 0
 
@@ -459,7 +560,7 @@ def _finalize_subtitles_async(
             if _interruptible_sleep(interval, task_queue._cancel_event):
                 logger.info(f"【P115ShareStrm】字幕后台收尾已取消: {share_code}")
                 return
-            interval = min(60, interval + 5)
+            interval = min(audit_max, interval + max(5, audit_min // 6))
 
         if task_queue._cancel_event.is_set():
             return
@@ -494,9 +595,28 @@ def _finalize_subtitles_async(
         _refresh_media_stem_targets(media_stem_to_strm_path, media_stem_to_target)
         task_queue.subtitle_job_update_stage(job_id, "placing")
         logger.info(f"【P115ShareStrm】开始后台下载字幕，共 {len(subtitle_files)} 个: {share_code}")
-        downloaded_subtitle_paths, subtitle_fail_count = _download_subtitles_from_share(
-            client, share_code, receive_code, subtitle_files, save_path_obj
-        )
+        try:
+            downloaded_subtitle_paths, subtitle_fail_count = _download_subtitles_from_share(
+                client, share_code, receive_code, subtitle_files, save_path_obj
+            )
+        except ShareReceiveLimitedError as e:
+            try:
+                retry_hours = max(1, int(configer.share_receive_retry_hours or 3))
+            except (TypeError, ValueError):
+                retry_hours = 3
+            task_queue.subtitle_job_update_stage(job_id, "receive_limited")
+            task_queue._notify(
+                user_id,
+                "【115分享STRM】字幕下载失败",
+                f"❌ {share_code}\n原因: {e}\n将在 {retry_hours} 小时后自动重试转存",
+                buttons=retry_btn,
+            )
+            _schedule_subtitle_receive_retry(
+                job_id, share_code, receive_code, subtitle_files, save_path_obj,
+                user_id, media_files, media_stem_to_strm_path, media_stem_to_target,
+                retry_hours,
+            )
+            return
         subtitle_count = len(downloaded_subtitle_paths)
         place_ok, place_miss = 0, 0
         if downloaded_subtitle_paths and configer.moviepilot_transfer:
@@ -613,104 +733,246 @@ class ShareP115Client(P115Client):
         return self.request(url=api, params=payload, async_=async_, **request_kwargs)
 
 
-class _EndpointPool:
+class _ShareSnapFetcher:
     """
-    轮询多个 115 API 端点，单次请求依次尝试所有端点，成功后自动推进轮询位置。
+    分享目录列举：端点冷却 + 分流（对齐 p115strmhelper iter_share_files_with_path）。
+    子目录首页走 App HTTPS；翻页走 Cookie；App 页不完整时 fallback Cookie。
     """
 
-    def __init__(self, endpoints: List[Tuple[str, Callable]]) -> None:
-        # endpoints: list of (name, callable(payload) -> resp)
-        self._endpoints = endpoints
-        self._idx = 0
+    def __init__(self, client: "ShareP115Client") -> None:
+        self._client = client
+        app_http_cd, app_https_cd, cookie_cd = get_speed_cooldowns(
+            configer.share_snap_speed_mode
+        )
+        _timeout = {"connect": 10, "pool": 10, "read": 60, "write": 60}
+        self._headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/21E219 "
+                "115wangpan_ios/36.2.20"
+            ),
+        }
+        self._ext = {"timeout": _timeout}
 
-    def fetch_page(self, payload: dict, max_retries: int = 5) -> list:
-        """
-        获取一页数据，轮询端点并在全部失败时退避重试。
-
-        :return: 文件/目录列表
-        :raises: 最后一次异常（当所有端点在所有重试中均失败时）
-        """
-        n = len(self._endpoints)
-        last_exc: Optional[Exception] = None
-
-        for attempt in range(max_retries):
-            for i in range(n):
-                ep_idx = (self._idx + i) % n
-                ep_name, ep_func = self._endpoints[ep_idx]
-                try:
-                    resp = ep_func(payload)
-                    data = check_response(resp).get("data", {})
-                    # 成功：推进到下一个端点，保持轮询效果
-                    self._idx = (ep_idx + 1) % n
-                    last_exc = None
-                    return data.get("list", [])
-                except Exception as e:
-                    last_exc = e
-                    # 4100009: 链接已失效 / 分享已拒绝
-                    # 4100010: 分享已取消
-                    # 均属于不可恢复错误，直接终止重试
-                    if "4100009" in str(e) or "4100010" in str(e):
-                        raise ShareLinkExpiredError(f"分享链接已失效或已取消 ({e})") from e
-                    logger.warning(
-                        f"【P115ShareStrm】端点 [{ep_name}] 失败，切换到下一个: {e}"
-                    )
-
-            # 当前轮次所有端点均失败，等待后重试
-            if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 2 + (time() % 2)
-                logger.warning(
-                    f"【P115ShareStrm】所有端点均失败 (cid={payload.get('cid')}, "
-                    f"offset={payload.get('offset')})，"
-                    f"第 {attempt + 1}/{max_retries} 次重试 (等待 {wait_time:.1f}s)"
-                )
-                sleep(wait_time)
-
-        raise last_exc
-
-
-def _make_endpoint_pool(client: ShareP115Client) -> _EndpointPool:
-    """
-    构建三端点轮询池：
-      1. https://proapi.115.com  (App 接口)
-      2. http://pro.api.115.com  (App 接口，HTTP)
-      3. https://webapi.115.com  (Cookie 接口)
-
-    注意：p115client 底层使用 httpx，timeout 必须通过 extensions={"timeout": {...}}
-    传入，不能使用 requests 风格的 (connect, read) 元组。
-    """
-    _timeout = {"connect": 10, "pool": 10, "read": 60, "write": 60}
-    custom_headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/21E219 "
-            "115wangpan_ios/36.2.20"
-        ),
-    }
-    return _EndpointPool([
-        (
+        self._app_https = ApiEndpointCooldown(
+            lambda p: client.share_snap_app(
+                p,
+                base_url="https://proapi.115.com",
+                headers=self._headers,
+                extensions={"timeout": _timeout},
+            ),
+            app_https_cd,
             "share_snap_app_https",
-            lambda p: client.share_snap_app(
-                p, base_url="https://proapi.115.com",
-                headers=custom_headers,
-                extensions={"timeout": _timeout},
-            ),
-        ),
-        (
-            "share_snap_app_http",
-            lambda p: client.share_snap_app(
-                p, base_url="http://pro.api.115.com",
-                headers=custom_headers,
-                extensions={"timeout": _timeout},
-            ),
-        ),
-        (
-            "share_snap_cookie",
+        )
+        self._cookie = ApiEndpointCooldown(
             lambda p: client.share_snap_cookie(
-                p, headers=custom_headers,
+                p,
+                headers=self._headers,
                 extensions={"timeout": _timeout},
             ),
-        ),
-    ])
+            cookie_cd,
+            "share_snap_cookie",
+        )
+        self._use_app_for_first = True
+        self._request_count = 0
+
+    @staticmethod
+    def _extract(resp: dict) -> Tuple[int, list]:
+        data = resp.get("data", {}) if isinstance(resp, dict) else {}
+        return int(data.get("count") or 0), list(data.get("list") or [])
+
+    def _invoke(self, endpoint: ApiEndpointCooldown, payload: dict) -> Tuple[int, list]:
+        with global_api_guard():
+            try:
+                resp = endpoint(payload)
+                check_response(resp)
+                reset_waf_backoff()
+                api_metrics.record_snap_call()
+                self._request_count += 1
+                if (
+                    self._request_count == 1
+                    or self._request_count % _SHARE_SNAP_PROGRESS_INTERVAL == 0
+                ):
+                    logger.info(
+                        f"【P115ShareStrm】分享扫描进度: 已请求 {self._request_count} 页/目录 "
+                        f"(cid={payload.get('cid')}, offset={payload.get('offset')})"
+                    )
+                return self._extract(resp)
+            except Exception as e:
+                if "4100009" in str(e) or "4100010" in str(e):
+                    raise ShareLinkExpiredError(f"分享链接已失效或已取消 ({e})") from e
+                if is_waf_405(e):
+                    handle_waf_405()
+                raise
+
+    def fetch_page(self, payload: dict) -> list:
+        offset = int(payload.get("offset") or 0)
+        primary = self._app_https if (offset == 0 and self._use_app_for_first) else self._cookie
+        primary_name = primary.name
+
+        try:
+            count, items = self._invoke(primary, payload)
+        except ShareRateLimitedError:
+            raise
+        except Exception as primary_err:
+            if primary_name.startswith("share_snap_app"):
+                logger.warning(
+                    f"【P115ShareStrm】端点 [{primary_name}] 失败，fallback Cookie: {primary_err}"
+                )
+                try:
+                    count, items = self._invoke(self._cookie, payload)
+                except ShareRateLimitedError:
+                    raise
+                except Exception as cookie_err:
+                    logger.error(f"【P115ShareStrm】Cookie 端点也失败: {cookie_err}")
+                    raise cookie_err from primary_err
+            else:
+                raise
+
+        if (
+            primary_name.startswith("share_snap_app")
+            and items
+            and offset + len(items) < count
+        ):
+            logger.debug(
+                f"【P115ShareStrm】App 端分页不完整 ({offset}+{len(items)}<{count})，fallback Cookie"
+            )
+            try:
+                count, items = self._invoke(self._cookie, payload)
+            except ShareRateLimitedError:
+                raise
+            except Exception as fb_err:
+                logger.warning(f"【P115ShareStrm】Cookie fallback 失败，沿用 App 结果: {fb_err}")
+
+        return items
+
+
+def _scan_cache_key(share_code: str, receive_code: str) -> str:
+    return f"{share_code}:{receive_code}"
+
+
+def _get_scan_cache_path() -> Path:
+    return task_queue._get_data_dir() / "share_scan_cache.json"
+
+
+def _load_scan_cache_file() -> Dict[str, Any]:
+    path = _get_scan_cache_path()
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"【P115ShareStrm】读取 share_scan_cache.json 失败: {e}")
+    return {}
+
+
+def _save_scan_cache_file(data: Dict[str, Any]) -> None:
+    path = _get_scan_cache_path()
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as e:
+        logger.warning(f"【P115ShareStrm】写入 share_scan_cache.json 失败: {e}")
+
+
+def _save_share_scan_cache(
+    share_code: str,
+    receive_code: str,
+    media_files: List[dict],
+    subtitle_files: List[dict],
+) -> None:
+    key = _scan_cache_key(share_code, receive_code)
+    data = _load_scan_cache_file()
+    data[key] = {
+        "scanned_at": time(),
+        "media_files": media_files,
+        "subtitle_files": subtitle_files,
+    }
+    _save_scan_cache_file(data)
+
+
+def _load_share_scan_cache(
+    share_code: str,
+    receive_code: str,
+    *,
+    sub_only: bool,
+) -> Optional[Tuple[List[dict], List[dict]]]:
+    if not sub_only and not configer.reuse_scan_cache_for_sharestrm:
+        return None
+    key = _scan_cache_key(share_code, receive_code)
+    entry = _load_scan_cache_file().get(key)
+    if not entry:
+        return None
+    try:
+        ttl_hours = int(configer.scan_cache_ttl_hours or 72)
+    except (TypeError, ValueError):
+        ttl_hours = 72
+    age = time() - float(entry.get("scanned_at") or 0)
+    if age > ttl_hours * 3600:
+        return None
+    media_files = list(entry.get("media_files") or [])
+    subtitle_files = list(entry.get("subtitle_files") or [])
+    if not media_files and not subtitle_files:
+        return None
+    api_metrics.record_cache_hit()
+    logger.info(
+        f"【P115ShareStrm】使用扫描缓存，跳过 115 列举 "
+        f"(sub_only={sub_only}, age={int(age)}s, 媒体={len(media_files)}, 字幕={len(subtitle_files)})"
+    )
+    return media_files, subtitle_files
+
+
+def _load_scan_from_subtitle_job(share_code: str) -> Optional[Tuple[List[dict], List[dict]]]:
+    jobs = task_queue._load_json_list(task_queue._get_subtitle_jobs_path())
+    matched = [j for j in jobs if j.get("share_code") == share_code]
+    if not matched:
+        return None
+    job = max(matched, key=lambda j: float(j.get("created_at") or 0))
+    media_files = list(job.get("media_files") or [])
+    subtitle_files = list(job.get("subtitle_files") or [])
+    if not media_files and not subtitle_files:
+        return None
+    logger.info(
+        f"【P115ShareStrm】sub_only 使用 subtitle_jobs 缓存 "
+        f"(媒体={len(media_files)}, 字幕={len(subtitle_files)})"
+    )
+    return media_files, subtitle_files
+
+
+def _resolve_share_file_lists(
+    client: "ShareP115Client",
+    share_code: str,
+    receive_code: str,
+    media_exts: set,
+    subtitle_exts: set,
+    sub_only: bool,
+) -> Tuple[List[dict], List[dict]]:
+    cached = _load_share_scan_cache(share_code, receive_code, sub_only=sub_only)
+    if cached:
+        media_files, subtitle_files = cached
+        if subtitle_exts and not subtitle_files and sub_only:
+            pass  # 仍可用 media；字幕列表可能为空
+        return media_files, subtitle_files
+
+    if sub_only:
+        job_cached = _load_scan_from_subtitle_job(share_code)
+        if job_cached:
+            return job_cached
+
+    logger.info(f"【P115ShareStrm】正在扫描分享内容: {share_code} ...")
+    api_metrics.reset_task_counters()
+    media_files: List[dict] = []
+    subtitle_files: List[dict] = []
+    for item in iter_share_files(client, share_code, receive_code):
+        filename = item.get("name", "")
+        file_ext = Path(filename).suffix.lower()
+        if file_ext in media_exts:
+            media_files.append(item)
+        elif subtitle_exts and file_ext in subtitle_exts:
+            subtitle_files.append(item)
+
+    _save_share_scan_cache(share_code, receive_code, media_files, subtitle_files)
+    return media_files, subtitle_files
 
 
 def iter_share_files(
@@ -719,17 +981,14 @@ def iter_share_files(
     receive_code: str = "",
     cid: int = 0,
     path_prefix: str = "",
-    max_retries: int = 5,
-    _pool: Optional[_EndpointPool] = None,
+    max_retries: int = 1,
+    _fetcher: Optional[_ShareSnapFetcher] = None,
 ) -> Iterator[dict]:
     """
-    递归遍历分享链接下的所有文件，轮询三个 115 API 端点并自动容错切换。
-
-    端点优先级（轮询）：
-      proapi.115.com (App/HTTPS) → pro.api.115.com (App/HTTP) → webapi.115.com (Cookie)
+    递归遍历分享链接下的所有文件，端点冷却 + 分流，避免 405 突发。
     """
-    if _pool is None:
-        _pool = _make_endpoint_pool(client)
+    if _fetcher is None:
+        _fetcher = _ShareSnapFetcher(client)
 
     offset = 0
     limit = 1000
@@ -743,9 +1002,11 @@ def iter_share_files(
         }
 
         try:
-            items = _pool.fetch_page(payload, max_retries=max_retries)
+            items = _fetcher.fetch_page(payload)
+        except ShareRateLimitedError:
+            raise
         except Exception as e:
-            logger.error(f"【P115ShareStrm】请求分享列表失败，已达最大重试次数: {e}")
+            logger.error(f"【P115ShareStrm】请求分享列表失败: {e}")
             raise
 
         if not items:
@@ -757,19 +1018,20 @@ def iter_share_files(
             current_path = f"{path_prefix}/{name}" if path_prefix else f"/{name}"
             if item.get("is_dir"):
                 if name.upper() in ("BDMV", "CERTIFICATE"):
-                    logger.info(f"【P115ShareStrm】检测到蓝光原盘标志性目录 '{name}' (路径: {current_path})，跳过该目录的遍历")
+                    logger.info(
+                        f"【P115ShareStrm】检测到蓝光原盘标志性目录 '{name}' "
+                        f"(路径: {current_path})，跳过该目录的遍历"
+                    )
                     continue
-                # 递归进入子目录，共享同一轮询池
                 yield from iter_share_files(
                     client, share_code, receive_code, int(item["id"]), current_path,
-                    max_retries, _pool,
+                    max_retries, _fetcher,
                 )
             else:
                 item["_full_path"] = current_path
                 yield item
 
         offset += limit
-        # 如果当前页返回的数据少于 limit，说明已经是最后一页
         if len(items) < limit:
             break
 
@@ -1011,7 +1273,7 @@ def _download_subtitles_from_share(
         try:
             # 1. 在网盘中创建临时文件夹
             logger.info(f"【P115ShareStrm】开始转存并下载分享字幕，准备创建临时文件夹...")
-            resp = client.fs_mkdir(f"subtitle-{uuid4()}", headers=custom_headers)
+            resp = call_protected_api(client.fs_mkdir, f"subtitle-{uuid4()}", headers=custom_headers)
             check_response(resp)
             if "cid" in resp:
                 scid = resp["cid"]
@@ -1030,7 +1292,7 @@ def _download_subtitles_from_share(
                 "cid": scid,
                 "is_check": 0,
             }
-            resp = client.share_receive(payload, headers=custom_headers)
+            resp = call_protected_api(client.share_receive, payload, headers=custom_headers)
             logger.debug(f"【P115ShareStrm】share_receive 接口返回: {resp}")
             check_response(resp)
             logger.info(f"【P115ShareStrm】字幕转存任务提交完成")
@@ -1044,13 +1306,10 @@ def _download_subtitles_from_share(
                     sleep(3)
                 try:
                     logger.debug(f"【P115ShareStrm】正在进行第 {attempt + 1}/10 次转存检测...")
-                    attr = next(
-                        iterdir(
-                            client,
-                            cid=scid,
-                            page_size=1,
-                            app="web",
-                        )
+                    attr = call_protected_api(
+                        lambda c, s: next(iterdir(c, cid=s, page_size=1, app="web")),
+                        client,
+                        scid,
                     )
                     if attr:
                         logger.info(f"【P115ShareStrm】检测到转存文件成功，首个文件 pickcode: {attr.get('pickcode')}")
@@ -1063,7 +1322,11 @@ def _download_subtitles_from_share(
             if not attr:
                 try:
                     logger.warning(f"【P115ShareStrm】轮询超时，尝试列出临时目录 {scid} 下的所有内容...")
-                    tmp_files = list(iterdir(client, cid=scid, page_size=10, app="web"))
+                    tmp_files = call_protected_api(
+                        lambda c, s: list(iterdir(c, cid=s, page_size=10, app="web")),
+                        client,
+                        scid,
+                    )
                     logger.warning(f"【P115ShareStrm】临时目录下实际存在的文件列表: {tmp_files}")
                 except Exception as list_err:
                     logger.warning(f"【P115ShareStrm】尝试列出临时目录内容失败: {list_err}")
@@ -1071,14 +1334,18 @@ def _download_subtitles_from_share(
 
             # 4. 调用 fs_video_subtitle 获取下载链接
             logger.info(f"【P115ShareStrm】通过 fs_video_subtitle 批量获取字幕下载链接，使用 pickcode: {attr['pickcode']}")
-            resp = client.fs_video_subtitle(attr["pickcode"], headers=custom_headers)
+            resp = call_protected_api(client.fs_video_subtitle, attr["pickcode"], headers=custom_headers)
             check_response(resp)
             logger.debug(f"【P115ShareStrm】fs_video_subtitle 接口返回数据: {resp}")
 
             # 列出转存到临时文件夹下的所有文件的 sha1 -> pickcode 映射（用于兜底下载）
             tmp_files_map = {}
             try:
-                tmp_files = list(iterdir(client, cid=scid, page_size=100, app="web"))
+                tmp_files = call_protected_api(
+                    lambda c, s: list(iterdir(c, cid=s, page_size=100, app="web")),
+                    client,
+                    scid,
+                )
                 logger.info(f"【P115ShareStrm】临时文件夹 {scid} 中当前实际存在的文件数量: {len(tmp_files)}")
                 for tf in tmp_files:
                     if tf.get("sha1") and tf.get("pickcode"):
@@ -1110,7 +1377,11 @@ def _download_subtitles_from_share(
                     if tmp_pickcode:
                         try:
                             logger.info(f"【P115ShareStrm】正在为 {filename} (pickcode: {tmp_pickcode}) 获取下载直链...")
-                            url = str(client.download_url(tmp_pickcode, user_agent=custom_headers.get("User-Agent")))
+                            url = str(call_protected_api(
+                                client.download_url,
+                                tmp_pickcode,
+                                user_agent=custom_headers.get("User-Agent"),
+                            ))
                             logger.info(f"【P115ShareStrm】获取直链成功: {url}")
                         except Exception as dl_url_err:
                             logger.error(f"【P115ShareStrm】调用 client.download_url 获取 {filename} 直链失败: {dl_url_err}", exc_info=True)
@@ -1155,7 +1426,11 @@ def _download_subtitles_from_share(
                 if not _dl_success:
                     fail_count += 1
 
+        except ShareReceiveLimitedError:
+            raise
         except Exception as e:
+            if is_receive_limited(e):
+                raise ShareReceiveLimitedError(str(e)) from e
             logger.error(f"【P115ShareStrm】字幕批处理失败: {e}", exc_info=True)
             # 本批次中尚未成功下载的全部计为失败
             batch_downloaded = len([p for p in downloaded_paths if p not in downloaded_paths[:batch_start]])
@@ -1165,7 +1440,7 @@ def _download_subtitles_from_share(
             if scid:
                 try:
                     logger.info(f"【P115ShareStrm】正在清理网盘临时目录 {scid}...")
-                    resp_del = client.fs_delete(scid, headers=custom_headers)
+                    resp_del = call_protected_api(client.fs_delete, scid, headers=custom_headers)
                     logger.debug(f"【P115ShareStrm】清理返回结果: {resp_del}")
                 except Exception as e:
                     logger.warning(f"【P115ShareStrm】清理字幕临时目录失败: {e}", exc_info=True)
@@ -1405,7 +1680,13 @@ def _get_share_state(client: ShareP115Client, share_code: str, receive_code: str
                 "115wangpan_ios/36.2.20"
             ),
         }
-        resp = client.share_snap_app(payload, app="android", headers=custom_headers, timeout=15)
+        resp = call_protected_api(
+            client.share_snap_app,
+            payload,
+            app="android",
+            headers=custom_headers,
+            timeout=15,
+        )
         data = resp.get("data", {})
         share_info = data.get("shareinfo", data.get("share_info", {}))
         share_state = data.get("share_state", share_info.get("share_state", share_info.get("status")))
@@ -1472,16 +1753,16 @@ def process_share_strm(
                 if ext.strip()
             }
 
-        # 1. 第一步：递归扫描获取分享中的所有目标媒体文件和字幕文件
-        logger.info(f"【P115ShareStrm】正在扫描分享内容: {share_code} ...")
+        # 1. 第一步：获取分享中的媒体与字幕（缓存 / 在线扫描）
         subtitle_files: List[dict] = []
-        for item in iter_share_files(client, share_code, receive_code):
-            filename = item.get("name", "")
-            file_ext = Path(filename).suffix.lower()
-            if file_ext in media_exts:
-                media_files.append(item)
-            elif subtitle_exts and file_ext in subtitle_exts:
-                subtitle_files.append(item)
+        media_files, subtitle_files = _resolve_share_file_lists(
+            client,
+            share_code,
+            receive_code,
+            media_exts,
+            subtitle_exts,
+            sub_only,
+        )
 
         total_media = len(media_files)
         logger.info(f"【P115ShareStrm】扫描完成，匹配到 {total_media} 个媒体文件")
@@ -1738,6 +2019,9 @@ def process_share_strm(
     except ShareLinkExpiredError as e:
         logger.warning(f"【P115ShareStrm】分享链接已失效: {share_code}")
         return {"status": False, "msg": str(e), "terminal": True}
+    except ShareRateLimitedError as e:
+        logger.warning(f"【P115ShareStrm】115 接口风控: {share_code} - {e}")
+        return {"status": False, "msg": str(e), "retryable": True}
     except Exception as e:
         logger.error(f"【P115ShareStrm】逻辑执行异常: {e}", exc_info=True)
         return {"status": False, "msg": str(e)}
@@ -1872,7 +2156,9 @@ class ShareTaskQueue:
 
     def get_metrics(self) -> Dict[str, Any]:
         with self._lock:
+            base = api_metrics.snapshot()
             return {
+                **base,
                 "subtitle_bg_active": self._subtitle_bg_active,
                 "subtitle_bg_started_total": self._subtitle_bg_started_total,
                 "subtitle_place_ok": self._subtitle_place_ok,
@@ -1892,6 +2178,32 @@ class ShareTaskQueue:
         logger.info(f"【P115ShareStrm】从持久化恢复 {len(pending)} 个字幕收尾任务")
         for job in pending:
             try:
+                stage = job.get("stage") or ""
+                if stage == "receive_limited":
+                    try:
+                        retry_hours = max(1, int(configer.share_receive_retry_hours or 3))
+                    except (TypeError, ValueError):
+                        retry_hours = 3
+                    logger.info(
+                        f"【P115ShareStrm】恢复限制接收字幕任务，{retry_hours}h 后重试: "
+                        f"{job.get('share_code')} (job={job.get('job_id')})"
+                    )
+                    _schedule_subtitle_receive_retry(
+                        job["job_id"],
+                        job["share_code"],
+                        job["receive_code"],
+                        job.get("subtitle_files") or [],
+                        Path(job.get("save_path") or configer.strm_save_path),
+                        job.get("user_id"),
+                        job.get("media_files") or [],
+                        _deserialize_stem_paths(job.get("media_stem_to_strm_path") or {}),
+                        {
+                            k: Path(v)
+                            for k, v in (job.get("media_stem_to_target") or {}).items()
+                        },
+                        retry_hours,
+                    )
+                    continue
                 retry = int(job.get("retry_count", 0) or 0)
                 if retry >= self._MAX_RETRY:
                     logger.warning(
@@ -2141,7 +2453,26 @@ class ShareTaskQueue:
                     # 成功：从持久化文件移除
                     self._persist_remove(task_id)
                 else:
-                    if result.get("terminal"):
+                    if result.get("retryable"):
+                        retry_count = self._persist_increment_retry(task_id)
+                        if retry_count >= self._MAX_RETRY:
+                            logger.error(
+                                f"【P115ShareStrm】115 风控重试已达上限 ({self._MAX_RETRY})，放弃: {share_code}"
+                            )
+                            self._persist_remove(task_id)
+                            self._notify(
+                                user_id,
+                                "【115分享STRM】放弃",
+                                f"❌ {share_code}\n115 接口风控，已重试 {self._MAX_RETRY} 次\n原因: {result.get('msg')}",
+                            )
+                        else:
+                            self._notify(
+                                user_id,
+                                "【115分享STRM】风控等待",
+                                f"⏳ {share_code}\n115 接口限流，将在重启后自动重试 "
+                                f"(第 {retry_count}/{self._MAX_RETRY} 次)\n{result.get('msg')}",
+                            )
+                    elif result.get("terminal"):
                         logger.warning(f"【P115ShareStrm】任务遇到不可恢复错误，放弃: {share_code}")
                         self._persist_remove(task_id)
                         self._notify(
