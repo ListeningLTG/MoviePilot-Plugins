@@ -57,6 +57,18 @@ class ConfigManager(BaseModel):
         default=6,
         description="字幕审核轮询超时时间（小时），分享链接审核中时后台最长等待时长",
     )
+    subtitle_finalize_timeout_hours: int = Field(
+        default=6,
+        description="字幕后台收尾总超时（小时）：等整理映射+下载放置",
+    )
+    skip_wait_pending_threshold: int = Field(
+        default=500,
+        description="待整理文件数超过此值时跳过同步等待（主路径已后台化，作兜底/日志分级）",
+    )
+    skip_wait_pending_when_queued: int = Field(
+        default=100,
+        description="队列有积压且待整理数超过此值时跳过同步等待",
+    )
 
     @property
     def moviepilot_address(self) -> str:

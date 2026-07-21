@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import quote
 from time import sleep, time
 from threading import Thread, Lock, Event
-from typing import Dict, Any, List, Optional, Iterator, Callable, Tuple
+from typing import Dict, Any, List, Optional, Iterator, Callable, Tuple, Set
 from queue import Queue, Empty
 from uuid import uuid4
 import json
@@ -40,40 +40,69 @@ def _fuzzy_query_transfer_history(db, suffix: str) -> Optional[Any]:
     ).first()
 
 
+@db_query
+def _batch_query_transfer_histories(db, srcs: List[str]) -> List[Any]:
+    from app.db.models.transferhistory import TransferHistory
+    if not srcs:
+        return []
+    return db.query(TransferHistory).filter(
+        TransferHistory.src.in_(srcs),
+        TransferHistory.src_storage == "local",
+    ).all()
+
+
+def _batch_load_transfer_histories_by_srcs(srcs: List[str]) -> Dict[str, Any]:
+    """按 src 批量加载 TransferHistory，返回 src -> history。"""
+    result: Dict[str, Any] = {}
+    unique = [s for s in dict.fromkeys(srcs) if s]
+    chunk_size = 200
+    for i in range(0, len(unique), chunk_size):
+        chunk = unique[i:i + chunk_size]
+        try:
+            rows = _batch_query_transfer_histories(None, chunk)
+        except Exception as e:
+            logger.warning(f"【P115ShareStrm】批量查询 TransferHistory 失败: {e}")
+            continue
+        for history in rows or []:
+            if history and getattr(history, "src", None) and getattr(history, "dest", None):
+                result[history.src] = history
+    return result
+
+
 _PATH_PREFIX_MAPPING_CACHE: Dict[str, str] = {}
 
 
 def _update_prefix_mapping_cache(local_path: str, db_path: str):
     """
     通过本地生成的 STRM 路径和数据库中记录的转移历史路径，推导并缓存路径前缀映射关系。
-    例如：
-      local_path = "/shareStrm/Detective Dee/file.strm"
-      db_path = "/mnt/data/mp2/shareStrm/Detective Dee/file.strm"
-    推导结果：
-      _PATH_PREFIX_MAPPING_CACHE["/shareStrm"] = "/mnt/data/mp2/shareStrm"
+    仅当共同后缀至少 2 个路径段且长度 >= 16 时写入，避免短路径污染缓存。
     """
     local_parts = local_path.split('/')
     db_parts = db_path.split('/')
-    
+
     common_parts = []
     i = 1
-    # 留出至少一个目录层级，防止 local_prefix 为空
     while i < len(local_parts) - 1 and i <= len(db_parts):
         if local_parts[-i] == db_parts[-i]:
             common_parts.append(local_parts[-i])
             i += 1
         else:
             break
-            
-    if common_parts:
-        common_parts.reverse()
-        common_suffix = '/' + '/'.join(common_parts)
-        if local_path.endswith(common_suffix) and db_path.endswith(common_suffix):
-            local_prefix = local_path[:-len(common_suffix)]
-            db_prefix = db_path[:-len(common_suffix)]
-            if local_prefix and local_prefix not in _PATH_PREFIX_MAPPING_CACHE:
-                _PATH_PREFIX_MAPPING_CACHE[local_prefix] = db_prefix
-                logger.info(f"【P115ShareStrm】检测到路径映射关系并存入缓存: {local_prefix} -> {db_prefix}")
+
+    if len(common_parts) < 2:
+        return
+
+    common_parts.reverse()
+    common_suffix = '/' + '/'.join(common_parts)
+    if len(common_suffix) < 16:
+        return
+
+    if local_path.endswith(common_suffix) and db_path.endswith(common_suffix):
+        local_prefix = local_path[:-len(common_suffix)]
+        db_prefix = db_path[:-len(common_suffix)]
+        if local_prefix and local_prefix not in _PATH_PREFIX_MAPPING_CACHE:
+            _PATH_PREFIX_MAPPING_CACHE[local_prefix] = db_prefix
+            logger.info(f"【P115ShareStrm】检测到路径映射关系并存入缓存: {local_prefix} -> {db_prefix}")
 
 
 def _map_local_path_to_db(local_path: str) -> str:
@@ -88,6 +117,10 @@ def _map_local_path_to_db(local_path: str) -> str:
 
 
 _AMBIGUOUS_STRM_STEM_RE = re.compile(r"^(?:\d+|EP\d+|E\d+)$", re.IGNORECASE)
+_GENERIC_PARENT_DIR_RE = re.compile(
+    r"^(?:S\d+|Season\s*\d+|中字版|字幕|Subs?|字幕组)$",
+    re.IGNORECASE,
+)
 
 
 def _is_ambiguous_strm_filename(stem: str) -> bool:
@@ -97,49 +130,420 @@ def _is_ambiguous_strm_filename(stem: str) -> bool:
     return bool(_AMBIGUOUS_STRM_STEM_RE.match(stem))
 
 
+def _is_generic_parent_dir(name: str) -> bool:
+    """过短或通用的父目录名，跳过两级路径模糊匹配。"""
+    if not name or len(name) <= 3:
+        return True
+    if name.isdigit():
+        return True
+    return bool(_GENERIC_PARENT_DIR_RE.match(name.strip()))
+
+
 def _get_transfer_history_by_strm_path(th_oper, strm_path: Path) -> Optional[Any]:
     """
     根据 STRM 路径从 TransferHistory 中检索整理记录。
     支持精确匹配和模糊匹配（兼容被 115 屏蔽/重命名导致父目录名称不一致的情况，如 "豆瓣..." -> "豆***..."）。
     """
-    # 1. 首先尝试精确匹配
     src_posix = strm_path.as_posix()
-    
-    # 1.1 优先尝试使用缓存的路径前缀进行精确匹配
+
     mapped_src = _map_local_path_to_db(src_posix)
     if mapped_src != src_posix:
-        history = th_oper.get_by_src(mapped_src, "local")
+        history = th_oper.get_by_src(mapped_src, "local") if th_oper else None
         if history and history.dest:
             return history
 
-    # 1.2 尝试原路径精确匹配
-    history = th_oper.get_by_src(src_posix, "local")
-    if history and history.dest:
-        return history
+    if th_oper:
+        history = th_oper.get_by_src(src_posix, "local")
+        if history and history.dest:
+            return history
 
-    # 2. 如果精确匹配失败，尝试进行后缀模糊匹配
-    # 模糊匹配末尾两级路径: /media_folder/filename.strm
     parts = strm_path.parts
-    if len(parts) >= 2:
+    if len(parts) >= 2 and not _is_generic_parent_dir(parts[-2]):
         suffix = f"/{parts[-2]}/{parts[-1]}"
         history = _fuzzy_query_transfer_history(None, suffix)
         if history and history.dest:
-            logger.info(f"【P115ShareStrm】通过两级路径后缀模糊匹配成功: {strm_path.name} -> {history.src}")
-            # 更新缓存，加速以后的匹配
+            logger.warning(f"【P115ShareStrm】通过两级路径后缀模糊匹配成功: {strm_path.name} -> {history.src}")
             _update_prefix_mapping_cache(src_posix, history.src)
             return history
 
-    # 3. 如果依然未匹配成功，尝试仅通过文件名匹配（跳过易误匹配的短/集数型文件名）
     if len(parts) >= 1 and not _is_ambiguous_strm_filename(strm_path.stem):
         suffix = f"/{parts[-1]}"
         history = _fuzzy_query_transfer_history(None, suffix)
         if history and history.dest:
-            logger.info(f"【P115ShareStrm】通过文件名后缀模糊匹配成功: {strm_path.name} -> {history.src}")
-            # 更新缓存，加速以后的匹配
+            logger.warning(f"【P115ShareStrm】通过文件名后缀模糊匹配成功: {strm_path.name} -> {history.src}")
             _update_prefix_mapping_cache(src_posix, history.src)
             return history
 
     return None
+
+
+def _interruptible_sleep(seconds: float, cancel_event: Event) -> bool:
+    """分段 sleep，cancel 时返回 True。"""
+    end = time() + max(0.0, seconds)
+    while time() < end:
+        if cancel_event.is_set():
+            return True
+        sleep(min(1.0, end - time()))
+    return cancel_event.is_set()
+
+
+def _refresh_media_stem_targets(
+    media_stem_to_strm_path: Dict[str, Path],
+    media_stem_to_target: Dict[str, Path],
+) -> Tuple[int, int]:
+    """
+    批量补全 stem → 整理目标路径。返回 (已映射数, 总数)。
+    """
+    pending_paths: List[Path] = []
+    stem_by_src: Dict[str, str] = {}
+    for stem, strm_path in media_stem_to_strm_path.items():
+        if stem in media_stem_to_target:
+            continue
+        src = strm_path.as_posix()
+        stem_by_src[src] = stem
+        pending_paths.append(strm_path)
+
+    if pending_paths:
+        query_srcs: List[str] = []
+        for p in pending_paths:
+            src = p.as_posix()
+            query_srcs.append(src)
+            mapped = _map_local_path_to_db(src)
+            if mapped != src:
+                query_srcs.append(mapped)
+        histories = _batch_load_transfer_histories_by_srcs(query_srcs)
+        still_miss: List[Path] = []
+        for p in pending_paths:
+            src = p.as_posix()
+            mapped = _map_local_path_to_db(src)
+            history = histories.get(mapped) or histories.get(src)
+            if history and history.dest:
+                media_stem_to_target[stem_by_src[src]] = Path(history.dest)
+            else:
+                still_miss.append(p)
+
+        for p in still_miss:
+            history = _get_transfer_history_by_strm_path(None, p)
+            if history and history.dest:
+                media_stem_to_target[stem_by_src[p.as_posix()]] = Path(history.dest)
+
+    return len(media_stem_to_target), len(media_stem_to_strm_path)
+
+
+def _build_dir_to_media_stems(media_files: List[dict]) -> Dict[str, List[str]]:
+    dir_to_media_stems: Dict[str, List[str]] = {}
+    for m_item in media_files:
+        m_path = m_item.get("_full_path", m_item.get("name", ""))
+        m_parent = str(Path(m_path).parent)
+        m_stem = Path(m_item.get("name", "")).stem
+        dir_to_media_stems.setdefault(m_parent, []).append(m_stem)
+    return dir_to_media_stems
+
+
+def _match_stem_for_subtitle(sub_name: str, candidate_stems: List[str]) -> Optional[str]:
+    if not candidate_stems:
+        return None
+    if len(candidate_stems) == 1:
+        return candidate_stems[0]
+    ep_match = re.search(r"[Ss](\d+)[Ee](\d+)", sub_name)
+    if ep_match:
+        for cstem in candidate_stems:
+            m_ep = re.search(r"[Ss](\d+)[Ee](\d+)", cstem)
+            if m_ep and m_ep.group(1) == ep_match.group(1) and m_ep.group(2) == ep_match.group(2):
+                return cstem
+    best = max(candidate_stems, key=lambda s: len(s) if s in sub_name else 0)
+    if best in sub_name:
+        return best
+    return candidate_stems[0]
+
+
+def _place_subtitles_to_targets(
+    subtitle_files: List[dict],
+    downloaded_subtitle_paths: List[Path],
+    media_files: List[dict],
+    media_stem_to_strm_path: Dict[str, Path],
+    media_stem_to_target: Dict[str, Path],
+) -> Tuple[int, int]:
+    """将已下载字幕放置到整理目标目录。返回 (成功数, miss数)。"""
+    place_ok = 0
+    place_miss = 0
+    dir_to_media_stems = _build_dir_to_media_stems(media_files)
+
+    for sub_item, local_path in zip(subtitle_files, downloaded_subtitle_paths):
+        sub_full_path = sub_item.get("_full_path", sub_item.get("name", ""))
+        sub_name = Path(sub_full_path).name
+        sub_parent = str(Path(sub_full_path).parent)
+        candidate_stems = dir_to_media_stems.get(sub_parent, [])
+        matched_stem = _match_stem_for_subtitle(sub_name, candidate_stems)
+        strm_target = media_stem_to_target.get(matched_stem) if matched_stem else None
+        if not strm_target and matched_stem:
+            strm_path = media_stem_to_strm_path.get(matched_stem)
+            if strm_path:
+                history = _get_transfer_history_by_strm_path(None, strm_path)
+                if history and history.dest:
+                    strm_target = Path(history.dest)
+                    media_stem_to_target[matched_stem] = strm_target
+
+        if not strm_target:
+            place_miss += 1
+            logger.warning(f"【P115ShareStrm】未找到对应 STRM 目标路径，跳过字幕: {sub_name}")
+            continue
+
+        lang_tag = _extract_subtitle_lang_tag(sub_name)
+        new_name = _truncate_filename(strm_target.stem + lang_tag + local_path.suffix)
+        dest_path = strm_target.parent / new_name
+        try:
+            if dest_path.exists() and dest_path.read_bytes() == local_path.read_bytes():
+                logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
+                place_ok += 1
+                continue
+        except Exception:
+            pass
+        idx = 1
+        while dest_path.exists():
+            new_name = _truncate_filename(strm_target.stem + lang_tag + f".{idx}" + local_path.suffix)
+            dest_path = strm_target.parent / new_name
+            idx += 1
+        try:
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(local_path), str(dest_path))
+            logger.info(f"【P115ShareStrm】字幕放置到目标: {new_name}")
+            place_ok += 1
+        except Exception as e:
+            place_miss += 1
+            logger.warning(f"【P115ShareStrm】字幕放置失败 {sub_name}: {e}")
+
+    return place_ok, place_miss
+
+
+def _serialize_stem_paths(media_stem_to_strm_path: Dict[str, Path]) -> Dict[str, str]:
+    return {stem: path.as_posix() for stem, path in media_stem_to_strm_path.items()}
+
+
+def _deserialize_stem_paths(data: Dict[str, str]) -> Dict[str, Path]:
+    return {stem: Path(path) for stem, path in (data or {}).items()}
+
+
+def _start_subtitle_finalize_job(
+    share_code: str,
+    receive_code: str,
+    subtitle_files: List[dict],
+    save_path_obj: Path,
+    user_id: Optional[str],
+    media_files: List[dict],
+    media_stem_to_strm_path: Dict[str, Path],
+    media_stem_to_target: Optional[Dict[str, Path]] = None,
+    job_id: Optional[str] = None,
+    retry_count: int = 0,
+) -> str:
+    """持久化并启动字幕后台收尾线程，返回 job_id。"""
+    jid = job_id or str(uuid4())
+    task_queue.subtitle_job_upsert({
+        "job_id": jid,
+        "share_code": share_code,
+        "receive_code": receive_code,
+        "user_id": user_id,
+        "save_path": str(save_path_obj),
+        "subtitle_files": subtitle_files,
+        "media_files": media_files,
+        "media_stem_to_strm_path": _serialize_stem_paths(media_stem_to_strm_path),
+        "media_stem_to_target": {
+            k: v.as_posix() for k, v in (media_stem_to_target or {}).items()
+        },
+        "created_at": time(),
+        "stage": "waiting_transfer",
+        "retry_count": retry_count,
+    })
+    t = Thread(
+        target=_finalize_subtitles_async,
+        args=(
+            jid,
+            share_code,
+            receive_code,
+            subtitle_files,
+            save_path_obj,
+            user_id,
+            media_files,
+            media_stem_to_strm_path,
+            dict(media_stem_to_target or {}),
+        ),
+        daemon=True,
+    )
+    t.start()
+    task_queue.metrics_subtitle_bg_started()
+    return jid
+
+
+def _finalize_subtitles_async(
+    job_id: str,
+    share_code: str,
+    receive_code: str,
+    subtitle_files: List[dict],
+    save_path_obj: Path,
+    user_id: Optional[str],
+    media_files: List[dict],
+    media_stem_to_strm_path: Dict[str, Path],
+    media_stem_to_target: Dict[str, Path],
+):
+    """
+    后台收尾：轮询整理映射 +（如需）等审核通过，再下载并放置字幕，不堵塞主队列。
+    """
+    task_queue.metrics_subtitle_bg_inc()
+    started = time()
+    media_stem_to_target = dict(media_stem_to_target or {})
+    retry_btn = [[{
+        "text": "🔁 重试下载字幕",
+        "callback_data": f"[PLUGIN]p115sharestrm|retry_sub:{share_code}:{receive_code}",
+    }]]
+
+    try:
+        try:
+            finalize_hours = int(configer.subtitle_finalize_timeout_hours or 6)
+        except (TypeError, ValueError):
+            finalize_hours = 6
+        try:
+            audit_hours = int(configer.subtitle_audit_poll_timeout_hours or 6)
+        except (TypeError, ValueError):
+            audit_hours = 6
+        finalize_hours = max(1, finalize_hours)
+        audit_hours = max(1, audit_hours)
+        deadline = time() + finalize_hours * 3600
+        audit_deadline = time() + audit_hours * 3600
+
+        logger.info(
+            f"【P115ShareStrm】已启动字幕后台收尾: {share_code} "
+            f"(job={job_id}, 整理超时 {finalize_hours}h, 审核超时 {audit_hours}h)"
+        )
+        task_queue.subtitle_job_update_stage(job_id, "waiting_transfer")
+
+        client = ShareP115Client(configer.cookies)
+        interval = 10
+        audit_ok = False
+        attempt = 0
+
+        while time() < deadline and not task_queue._cancel_event.is_set():
+            attempt += 1
+            mapped, total = _refresh_media_stem_targets(media_stem_to_strm_path, media_stem_to_target)
+            if attempt == 1 or attempt % 6 == 0:
+                logger.info(
+                    f"【P115ShareStrm】字幕收尾映射进度 {mapped}/{total}: {share_code}"
+                )
+
+            state = _get_share_state(client, share_code, receive_code)
+            if state == 7:
+                logger.warning(f"【P115ShareStrm】字幕后台收尾发现链接已过期: {share_code}")
+                task_queue.subtitle_job_update_stage(job_id, "failed")
+                task_queue._notify(
+                    user_id,
+                    "【115分享STRM】字幕下载失败",
+                    f"❌ {share_code}\n原因: 链接已失效或在审核期间过期",
+                    buttons=retry_btn,
+                )
+                task_queue.subtitle_job_remove(job_id)
+                return
+
+            if state is not None and state != 0:
+                audit_ok = True
+                task_queue.subtitle_job_update_stage(job_id, "placing")
+                # 审核已通过：映射齐全则立即下载；否则至少等一会补映射
+                if total == 0 or mapped >= total or (mapped > 0 and time() >= started + 30):
+                    break
+                if time() >= started + 120:
+                    # 已审核通过超过 2 分钟仍未齐全，先下载能放的
+                    break
+            else:
+                task_queue.subtitle_job_update_stage(job_id, "waiting_audit")
+                if time() >= audit_deadline:
+                    break
+
+            if _interruptible_sleep(interval, task_queue._cancel_event):
+                logger.info(f"【P115ShareStrm】字幕后台收尾已取消: {share_code}")
+                return
+            interval = min(60, interval + 5)
+
+        if task_queue._cancel_event.is_set():
+            return
+
+        if not audit_ok:
+            # 最后再查一次状态
+            state = _get_share_state(client, share_code, receive_code)
+            if state is not None and state != 0 and state != 7:
+                audit_ok = True
+            elif state == 0 or state is None:
+                logger.warning(f"【P115ShareStrm】字幕后台收尾审核轮询超时: {share_code}")
+                task_queue.subtitle_job_update_stage(job_id, "failed")
+                task_queue._notify(
+                    user_id,
+                    "【115分享STRM】字幕下载失败",
+                    f"❌ {share_code}\n原因: 链接审核轮询超时 ({audit_hours}小时)",
+                    buttons=retry_btn,
+                )
+                task_queue.subtitle_job_remove(job_id)
+                return
+            elif state == 7:
+                task_queue.subtitle_job_update_stage(job_id, "failed")
+                task_queue._notify(
+                    user_id,
+                    "【115分享STRM】字幕下载失败",
+                    f"❌ {share_code}\n原因: 链接已失效",
+                    buttons=retry_btn,
+                )
+                task_queue.subtitle_job_remove(job_id)
+                return
+
+        _refresh_media_stem_targets(media_stem_to_strm_path, media_stem_to_target)
+        task_queue.subtitle_job_update_stage(job_id, "placing")
+        logger.info(f"【P115ShareStrm】开始后台下载字幕，共 {len(subtitle_files)} 个: {share_code}")
+        downloaded_subtitle_paths, subtitle_fail_count = _download_subtitles_from_share(
+            client, share_code, receive_code, subtitle_files, save_path_obj
+        )
+        subtitle_count = len(downloaded_subtitle_paths)
+        place_ok, place_miss = 0, 0
+        if downloaded_subtitle_paths and configer.moviepilot_transfer:
+            place_ok, place_miss = _place_subtitles_to_targets(
+                subtitle_files,
+                downloaded_subtitle_paths,
+                media_files,
+                media_stem_to_strm_path,
+                media_stem_to_target,
+            )
+        elif downloaded_subtitle_paths and not configer.moviepilot_transfer:
+            # 未开启 MP 整理：放到本地 STRM 同目录
+            for stem, strm_path in media_stem_to_strm_path.items():
+                media_stem_to_target.setdefault(stem, strm_path)
+            place_ok, place_miss = _place_subtitles_to_targets(
+                subtitle_files,
+                downloaded_subtitle_paths,
+                media_files,
+                media_stem_to_strm_path,
+                media_stem_to_target,
+            )
+
+        task_queue.metrics_add_place(place_ok, place_miss)
+        task_queue.metrics_set_last_finalize_seconds(time() - started)
+
+        msg = (
+            f"✅ 字幕后台收尾完成: {share_code}\n"
+            f"下载成功: {subtitle_count} 个"
+        )
+        if subtitle_fail_count:
+            msg += f"，下载失败 {subtitle_fail_count} 个"
+        msg += f"\n放置成功: {place_ok}，未匹配目标: {place_miss}"
+        buttons = retry_btn if (subtitle_fail_count or place_miss) else None
+        task_queue._notify(user_id, "【115分享STRM】字幕自动下载成功", msg, buttons=buttons)
+        task_queue.subtitle_job_update_stage(job_id, "done")
+        task_queue.subtitle_job_remove(job_id)
+    except Exception as e:
+        logger.error(f"【P115ShareStrm】字幕后台收尾异常: {e}", exc_info=True)
+        task_queue.subtitle_job_update_stage(job_id, "failed")
+        task_queue._notify(
+            user_id,
+            "【115分享STRM】字幕下载失败",
+            f"❌ {share_code}\n原因: {e}",
+            buttons=retry_btn,
+        )
+    finally:
+        task_queue.metrics_subtitle_bg_dec()
 
 
 def _truncate_filename(filename: str, max_bytes: int = 240) -> str:
@@ -1012,172 +1416,6 @@ def _get_share_state(client: ShareP115Client, share_code: str, receive_code: str
     return None
 
 
-def _background_download_subtitles(
-    client: ShareP115Client,
-    share_code: str,
-    receive_code: str,
-    subtitle_files: List[dict],
-    save_path_obj: Path,
-    user_id: Optional[str],
-    media_files: List[dict],
-    media_stem_to_strm_path: Dict[str, Path],
-    media_stem_to_target: Dict[str, Path],
-):
-    """
-    后台轮询等待分享链接审核通过，然后执行字幕下载与整理（防止堵塞主队列工作线程）
-    """
-    try:
-        timeout_hours = int(configer.subtitle_audit_poll_timeout_hours or 6)
-    except (TypeError, ValueError):
-        timeout_hours = 6
-    timeout_hours = max(1, timeout_hours)
-    # 约每 5 分钟检查一次：timeout_hours * 12
-    max_attempts = timeout_hours * 12
-    deadline = time() + timeout_hours * 3600
-    logger.info(
-        f"【P115ShareStrm】已为 {share_code} 启动字幕后台轮询下载任务"
-        f"（超时 {timeout_hours} 小时，最多约 {max_attempts} 次检查）..."
-    )
-
-    attempt = 0
-    while True:
-        attempt += 1
-        # 动态前置等待：前两次分别等 1 分钟、2 分钟，后续每 5 分钟检查一次
-        if attempt == 1:
-            sleep(60)
-        elif attempt == 2:
-            sleep(120)
-        else:
-            sleep(300)
-
-        logger.info(
-            f"【P115ShareStrm】字幕下载后台轮询：正在进行第 {attempt} 次状态检查"
-            f"（超时 {timeout_hours} 小时）: {share_code}"
-        )
-        state = _get_share_state(client, share_code, receive_code)
-
-        if state is not None and state != 0:
-            if state == 7:
-                logger.warning(f"【P115ShareStrm】字幕后台轮询发现链接已过期: {share_code}")
-                task_queue._notify(user_id, "【115分享STRM】字幕下载失败", f"❌ {share_code}\n原因: 链接已失效或在审核期间过期")
-                return
-
-            logger.info(f"【P115ShareStrm】字幕后台轮询检测到审核已通过！开始下载字幕: {share_code}")
-            try:
-                downloaded_subtitle_paths, subtitle_fail_count = _download_subtitles_from_share(
-                    client, share_code, receive_code, subtitle_files, save_path_obj
-                )
-                subtitle_count = len(downloaded_subtitle_paths)
-
-                if downloaded_subtitle_paths:
-                    # 动态重新尝试从历史数据库中获取未命中的整理目标路径
-                    try:
-                        from app.db.transferhistory_oper import TransferHistoryOper
-                        _th_oper = TransferHistoryOper()
-                    except Exception as th_err:
-                        logger.warning(f"【P115ShareStrm】后台整理历史数据库连接失败: {th_err}")
-                        _th_oper = None
-
-                    # 预建 "分享内父目录" → "该目录下媒体stem列表" 的索引
-                    dir_to_media_stems: Dict[str, List[str]] = {}
-                    for m_item in media_files:
-                        m_path = m_item.get("_full_path", m_item.get("name", ""))
-                        m_parent = str(Path(m_path).parent)
-                        m_stem = Path(m_item.get("name", "")).stem
-                        if m_parent not in dir_to_media_stems:
-                            dir_to_media_stems[m_parent] = []
-                        dir_to_media_stems[m_parent].append(m_stem)
-
-                    for sub_item, local_path in zip(subtitle_files, downloaded_subtitle_paths):
-                        sub_full_path = sub_item.get("_full_path", sub_item.get("name", ""))
-                        sub_name = Path(sub_full_path).name
-                        sub_parent = str(Path(sub_full_path).parent)
-
-                        strm_target = None
-                        candidate_stems = dir_to_media_stems.get(sub_parent, [])
-
-                        # 挑选对应的 media_stem
-                        matched_stem = None
-                        if len(candidate_stems) == 1:
-                            matched_stem = candidate_stems[0]
-                        elif len(candidate_stems) > 1:
-                            ep_match = re.search(r"[Ss](\d+)[Ee](\d+)", sub_name)
-                            if ep_match:
-                                for cstem in candidate_stems:
-                                    m_ep = re.search(r"[Ss](\d+)[Ee](\d+)", cstem)
-                                    if m_ep and m_ep.group(1) == ep_match.group(1) and m_ep.group(2) == ep_match.group(2):
-                                        matched_stem = cstem
-                                        break
-                            if not matched_stem:
-                                best = max(
-                                    candidate_stems,
-                                    key=lambda s: len(s) if s in sub_name else 0,
-                                )
-                                if best in sub_name:
-                                    matched_stem = best
-                            if not matched_stem:
-                                matched_stem = candidate_stems[0]
-
-                        if matched_stem:
-                            strm_target = media_stem_to_target.get(matched_stem)
-                            # 如果先前没有获取到整理目标路径，尝试直接到数据库检索
-                            if not strm_target and _th_oper:
-                                strm_path = media_stem_to_strm_path.get(matched_stem)
-                                if strm_path:
-                                    history = _get_transfer_history_by_strm_path(_th_oper, strm_path)
-                                    if history and history.dest:
-                                        strm_target = Path(history.dest)
-                                        # 缓存在内存中
-                                        media_stem_to_target[matched_stem] = strm_target
-
-                        if strm_target:
-                            lang_tag = _extract_subtitle_lang_tag(sub_name)
-                            new_name = _truncate_filename(strm_target.stem + lang_tag + local_path.suffix)
-                            dest_path = strm_target.parent / new_name
-                            try:
-                                if dest_path.exists() and dest_path.read_bytes() == local_path.read_bytes():
-                                    logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
-                                    continue
-                            except Exception:
-                                pass
-                            idx = 1
-                            while dest_path.exists():
-                                new_name = _truncate_filename(strm_target.stem + lang_tag + f".{idx}" + local_path.suffix)
-                                dest_path = strm_target.parent / new_name
-                                idx += 1
-                            try:
-                                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.copy2(str(local_path), str(dest_path))
-                                logger.info(f"【P115ShareStrm】字幕放置到目标: {new_name}")
-                            except Exception as e:
-                                logger.warning(f"【P115ShareStrm】字幕放置失败 {sub_name}: {e}")
-                        else:
-                            logger.warning(f"【P115ShareStrm】未找到对应 STRM 目标路径，跳过字幕: {sub_name}")
-
-                msg = f"✅ 审核通过，字幕已后台自动下载并整理完成: {share_code}\n成功下载: {subtitle_count} 个"
-                if subtitle_fail_count:
-                    msg += f"，失败 {subtitle_fail_count} 个"
-
-                task_queue._notify(user_id, "【115分享STRM】字幕自动下载成功", msg)
-                return
-            except Exception as e:
-                logger.error(f"【P115ShareStrm】字幕后台下载处理异常: {e}", exc_info=True)
-
-        if time() >= deadline or attempt >= max_attempts:
-            break
-
-    logger.warning(f"【P115ShareStrm】字幕下载后台轮询超时 ({timeout_hours}小时): {share_code}")
-    task_queue._notify(
-        user_id,
-        "【115分享STRM】字幕下载失败",
-        f"❌ {share_code}\n原因: 链接审核轮询超时 ({timeout_hours}小时)",
-        buttons=[[{
-            "text": "🔁 重试下载字幕",
-            "callback_data": f"[PLUGIN]p115sharestrm|retry_sub:{share_code}:{receive_code}",
-        }]],
-    )
-
-
 def process_share_strm(
     share_code: str,
     receive_code: str,
@@ -1225,9 +1463,9 @@ def process_share_strm(
         # media stem（分享内）→ 生成的 STRM 本地路径，用于后续字幕直接放置
         media_stem_to_strm_path: Dict[str, Path] = {}
 
-        # 构建字幕文件后缀集合（按需）
+        # 构建字幕文件后缀集合（按需；字幕重试任务强制扫描字幕）
         subtitle_exts: set = set()
-        if configer.download_subtitle:
+        if configer.download_subtitle or sub_only:
             subtitle_exts = {
                 f".{ext.strip().lower()}"
                 for ext in configer.user_subtitle_ext.split(",")
@@ -1399,239 +1637,94 @@ def process_share_strm(
             media_stem_to_strm_path[Path(filename).stem] = strm_file_path
 
 
-        # 4. 第四步：全部生成完毕后，如果是全量任务，批量交由 MoviePilot 整理 STRM；如果是字幕重试任务，直接从历史库查出整理目标
-        # strm 本地源路径（posix）→ MoviePilot 整理后目标路径，用于字幕直接放置
-        strm_source_to_target: Dict[str, Path] = {}
+        # 4. 第四步：交由 MoviePilot 整理 STRM（主路径不等待；已整理过的跳过入队）
         media_stem_to_target: Dict[str, Path] = {}
         if configer.moviepilot_transfer:
-            from app.db.transferhistory_oper import TransferHistoryOper
-            _th_oper = TransferHistoryOper()
-
             if not sub_only and generated_strm_paths:
-                logger.info(f"【P115ShareStrm】开始批量整理 STRM，共 {len(generated_strm_paths)} 个文件")
-                transfer_chain = TransferChain()
-                # 1. 全部异步入队
+                query_srcs: List[str] = []
                 for strm_file_path in generated_strm_paths:
-                    try:
-                        stat = strm_file_path.stat()
-                        transfer_chain.do_transfer(
-                            fileitem=FileItem(
-                                storage="local",
-                                type="file",
-                                path=strm_file_path.as_posix(),
-                                name=strm_file_path.name,
-                                basename=strm_file_path.stem,
-                                extension="strm",
-                                size=stat.st_size,
-                                modify_time=stat.st_mtime,
-                            ),
-                            mediainfo=strm_to_mediainfo.get(strm_file_path.as_posix()),
-                            background=True,
-                        )
-                    except Exception as e:
-                        logger.warning(f"【P115ShareStrm】STRM 整理入队失败: {strm_file_path.name}: {e}")
-                logger.info("【P115ShareStrm】STRM 已全部入队，等待整理完成...")
-
-                # 2. 轮询等待所有 STRM 整理完成
-                # 优化：只有在需要下载并放置字幕，且本次分享确实包含字幕文件时，才需要等待以获取目标路径
-                need_wait = configer.download_subtitle and subtitle_files
-                
-                if need_wait:
-                    pending = set(strm_file_path.as_posix() for strm_file_path in generated_strm_paths)
-                    
-                    # 即使不需要等待放置字幕，也可以先通过预扫描清理掉已经整理过的记录（保持状态准确）
-                    for src in list(pending):
-                        history = _get_transfer_history_by_strm_path(_th_oper, Path(src))
-                        if history and history.dest:
-                            strm_source_to_target[src] = Path(history.dest)
-                            pending.remove(src)
-                    
-                    if pending:
-                        # 动态调整超时时间：如果队列积压严重，缩短等待时间
-                        qsize = task_queue.get_queue_size()
-                        base_timeout = configer.wait_organize_timeout
-                        if qsize > 50:
-                            timeout = min(base_timeout, 30)
-                        elif qsize > 20:
-                            timeout = min(base_timeout, 60)
-                        elif qsize > 10:
-                            timeout = min(base_timeout, 120)
-                        else:
-                            timeout = base_timeout
-
-                        skip_wait = len(pending) > 500 or (qsize > 0 and len(pending) > 100)
-                        if skip_wait:
-                            logger.warning(
-                                f"【P115ShareStrm】待整理文件过多 ({len(pending)}) 或队列积压 ({qsize})，"
-                                f"跳过整理等待（STRM 将在后台继续整理，但字幕可能无法自动归位）"
-                            )
-                        else:
-                            logger.info(f"【P115ShareStrm】剩余 {len(pending)} 个文件等待整理 (积压: {qsize}，超时: {timeout}s)...")
-                            interval = 2
-                            deadline = time() + timeout
-                            cancelled = False
-                            while pending and time() < deadline:
-                                if task_queue._cancel_event.is_set():
-                                    cancelled = True
-                                    logger.info("【P115ShareStrm】整理等待已取消（插件停止）")
-                                    break
-
-                                finished = set()
-                                for src in pending:
-                                    history = _get_transfer_history_by_strm_path(_th_oper, Path(src))
-                                    if history and history.dest:
-                                        strm_source_to_target[src] = Path(history.dest)
-                                        finished.add(src)
-
-                                if finished:
-                                    logger.info(f"【P115ShareStrm】整理完成新进度: {len(finished)} 个")
-                                    pending -= finished
-
-                                if pending and time() < deadline and not task_queue._cancel_event.is_set():
-                                    sleep(interval)
-
-                            if pending:
-                                if cancelled:
-                                    logger.warning(
-                                        f"【P115ShareStrm】整理等待已取消，仍有 {len(pending)} 个文件未完成"
-                                        f"（STRM 将在后台继续整理，但字幕可能无法自动归位）"
-                                    )
-                                elif time() >= deadline:
-                                    logger.warning(
-                                        f"【P115ShareStrm】STRM 整理等待超时 ({timeout}s)，跳过后续等待"
-                                        f"（STRM 将在后台继续整理，但字幕可能无法自动归位）: {pending}"
-                                    )
-                                else:
-                                    logger.warning(f"【P115ShareStrm】部分 STRM 整理异常未完成: {pending}")
-                            else:
-                                logger.info("【P115ShareStrm】STRM 批量整理全部完成")
-                    else:
-                        logger.info("【P115ShareStrm】所有文件均已整理过，无需等待")
-                else:
-                    logger.info("【P115ShareStrm】无需放置字幕，跳过整理等待")
-            elif sub_only:
-                # 在 sub_only 模式下，直接在 TransferHistory 中查找每个 strm_file_path 的整理位置
-                logger.info("【P115ShareStrm】仅重试下载字幕模式：直接检索历史整理记录...")
-                for stem, strm_path in media_stem_to_strm_path.items():
-                    history = _get_transfer_history_by_strm_path(_th_oper, strm_path)
+                    src = strm_file_path.as_posix()
+                    query_srcs.append(src)
+                    mapped = _map_local_path_to_db(src)
+                    if mapped != src:
+                        query_srcs.append(mapped)
+                histories = _batch_load_transfer_histories_by_srcs(query_srcs)
+                to_enqueue: List[Path] = []
+                already = 0
+                for strm_file_path in generated_strm_paths:
+                    src = strm_file_path.as_posix()
+                    mapped = _map_local_path_to_db(src)
+                    history = histories.get(mapped) or histories.get(src)
                     if history and history.dest:
-                        strm_source_to_target[strm_path.as_posix()] = Path(history.dest)
-                logger.info(f"【P115ShareStrm】历史整理记录检索完成，成功匹配到 {len(strm_source_to_target)}/{len(media_stem_to_strm_path)} 个目标路径")
+                        already += 1
+                        for stem, sp in media_stem_to_strm_path.items():
+                            if sp.as_posix() == src:
+                                media_stem_to_target[stem] = Path(history.dest)
+                                break
+                    else:
+                        to_enqueue.append(strm_file_path)
 
-            # 3. 构建 媒体 stem → STRM 整理目标路径 映射，供字幕放置使用
-            for stem, strm_path in media_stem_to_strm_path.items():
-                target = strm_source_to_target.get(strm_path.as_posix())
-                if target:
-                    media_stem_to_target[stem] = target
+                logger.info(
+                    f"【P115ShareStrm】开始批量整理 STRM，共 {len(generated_strm_paths)} 个文件"
+                    f"（已整理跳过 {already}，待入队 {len(to_enqueue)}）"
+                )
+                if to_enqueue:
+                    transfer_chain = TransferChain()
+                    for strm_file_path in to_enqueue:
+                        try:
+                            stat = strm_file_path.stat()
+                            transfer_chain.do_transfer(
+                                fileitem=FileItem(
+                                    storage="local",
+                                    type="file",
+                                    path=strm_file_path.as_posix(),
+                                    name=strm_file_path.name,
+                                    basename=strm_file_path.stem,
+                                    extension="strm",
+                                    size=stat.st_size,
+                                    modify_time=stat.st_mtime,
+                                ),
+                                mediainfo=strm_to_mediainfo.get(strm_file_path.as_posix()),
+                                background=True,
+                            )
+                        except Exception as e:
+                            logger.warning(f"【P115ShareStrm】STRM 整理入队失败: {strm_file_path.name}: {e}")
+                logger.info("【P115ShareStrm】STRM 处理完成（主路径不等待整理，字幕将后台收尾）")
+            elif sub_only:
+                logger.info("【P115ShareStrm】仅重试下载字幕模式：批量检索历史整理记录...")
+                _refresh_media_stem_targets(media_stem_to_strm_path, media_stem_to_target)
+                logger.info(
+                    f"【P115ShareStrm】历史整理记录检索完成，成功匹配到 "
+                    f"{len(media_stem_to_target)}/{len(media_stem_to_strm_path)} 个目标路径"
+                )
 
-        # 5. 第五步：下载字幕文件并放置（如开启）
+        # 5. 第五步：字幕一律后台收尾（不堵塞主队列）
         subtitle_count = 0
         subtitle_fail_count = 0
         subtitle_in_background = False
-        if configer.download_subtitle and subtitle_files:
-            share_state = _get_share_state(client, share_code, receive_code)
-            if share_state == 0:
-                logger.info(f"【P115ShareStrm】检测到分享链接 {share_code} 处于审核状态中，启动后台轮询下载字幕任务...")
-                subtitle_in_background = True
-                t = Thread(
-                    target=_background_download_subtitles,
-                    args=(
-                        ShareP115Client(configer.cookies),
-                        share_code,
-                        receive_code,
-                        subtitle_files,
-                        save_path_obj,
-                        user_id,
-                        media_files,
-                        media_stem_to_strm_path,
-                        media_stem_to_target,
-                    ),
-                    daemon=True
+        if (configer.download_subtitle or sub_only) and subtitle_files:
+            missing_strm = [
+                stem for stem, sp in media_stem_to_strm_path.items() if not sp.exists()
+            ]
+            if sub_only and missing_strm:
+                logger.warning(
+                    f"【P115ShareStrm】字幕重试发现 {len(missing_strm)} 个本地 STRM 缺失，"
+                    f"将仅对已有路径做后台收尾；如需完整重建请重新 /sharestrm"
                 )
-                t.start()
-            else:
-                logger.info(f"【P115ShareStrm】开始下载字幕文件，共 {len(subtitle_files)} 个")
-                downloaded_subtitle_paths, subtitle_fail_count = _download_subtitles_from_share(
-                    client, share_code, receive_code, subtitle_files, save_path_obj
-                )
-                subtitle_count = len(downloaded_subtitle_paths)
-                logger.info(
-                    f"【P115ShareStrm】字幕下载完成，成功 {subtitle_count} 个，失败 {subtitle_fail_count} 个"
-                )
-                if downloaded_subtitle_paths and configer.moviepilot_transfer and media_stem_to_target:
-                    # 直接将字幕复制到 STRM 整理目标目录，文件名以整理后的 STRM stem 为前缀，
-                    # 避免 ffprobe 等插件造成 STRM 与字幕文件名前缀不一致的问题
-                    #
-                    # 改进：不再使用基于纯文件名的 name_map（同名字幕会互相覆盖映射），
-                    # 而是直接通过字幕条目的 _full_path 父目录匹配同目录的媒体文件 stem，
-                    # 从而精确定位每个字幕对应的媒体目标路径。
-                    #
-                    # 预建 "分享内父目录" → "该目录下媒体stem列表" 的索引
-                    dir_to_media_stems: Dict[str, List[str]] = {}
-                    for m_item in media_files:
-                        m_path = m_item.get("_full_path", m_item.get("name", ""))
-                        m_parent = str(Path(m_path).parent)
-                        m_stem = Path(m_item.get("name", "")).stem
-                        if m_parent not in dir_to_media_stems:
-                            dir_to_media_stems[m_parent] = []
-                        dir_to_media_stems[m_parent].append(m_stem)
-
-                    for sub_item, local_path in zip(subtitle_files, downloaded_subtitle_paths):
-                        sub_full_path = sub_item.get("_full_path", sub_item.get("name", ""))
-                        sub_name = Path(sub_full_path).name
-                        sub_parent = str(Path(sub_full_path).parent)
-
-                        # 在同目录下寻找媒体文件 stem，确定字幕放置目标
-                        strm_target = None
-                        candidate_stems = dir_to_media_stems.get(sub_parent, [])
-                        if len(candidate_stems) == 1:
-                            # 同目录只有一个媒体文件，直接关联
-                            strm_target = media_stem_to_target.get(candidate_stems[0])
-                        elif len(candidate_stems) > 1:
-                            # 多媒体文件：先尝试集号匹配，再尝试公共前缀匹配
-                            ep_match = re.search(r"[Ss](\d+)[Ee](\d+)", sub_name)
-                            if ep_match:
-                                for cstem in candidate_stems:
-                                    m_ep = re.search(r"[Ss](\d+)[Ee](\d+)", cstem)
-                                    if m_ep and m_ep.group(1) == ep_match.group(1) and m_ep.group(2) == ep_match.group(2):
-                                        strm_target = media_stem_to_target.get(cstem)
-                                        break
-                            if not strm_target:
-                                # 回退：选公共前缀最长的
-                                best = max(
-                                    candidate_stems,
-                                    key=lambda s: len(s) if s in sub_name else 0,
-                                )
-                                if best in sub_name:
-                                    strm_target = media_stem_to_target.get(best)
-                            if not strm_target:
-                                # 最终兜底：取第一个
-                                strm_target = media_stem_to_target.get(candidate_stems[0])
-
-                        if strm_target:
-                            lang_tag = _extract_subtitle_lang_tag(sub_name)
-                            new_name = _truncate_filename(strm_target.stem + lang_tag + local_path.suffix)
-                            dest_path = strm_target.parent / new_name
-                            # 如果目标已存在且内容完全相同，则跳过（避免重复运行产生大量带序号的重复字幕）
-                            try:
-                                if dest_path.exists() and dest_path.read_bytes() == local_path.read_bytes():
-                                    logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
-                                    continue
-                            except Exception:
-                                pass
-                            idx = 1
-                            while dest_path.exists():
-                                new_name = _truncate_filename(strm_target.stem + lang_tag + f".{idx}" + local_path.suffix)
-                                dest_path = strm_target.parent / new_name
-                                idx += 1
-                            try:
-                                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.copy2(str(local_path), str(dest_path))
-                                logger.info(f"【P115ShareStrm】字幕放置到目标: {new_name}")
-                            except Exception as e:
-                                logger.warning(f"【P115ShareStrm】字幕放置失败 {sub_name}: {e}")
-                        else:
-                            logger.warning(f"【P115ShareStrm】未找到对应 STRM 目标路径，跳过字幕: {sub_name}")
+            logger.info(
+                f"【P115ShareStrm】启动字幕后台收尾任务，共 {len(subtitle_files)} 个字幕: {share_code}"
+            )
+            _start_subtitle_finalize_job(
+                share_code,
+                receive_code,
+                subtitle_files,
+                save_path_obj,
+                user_id,
+                media_files,
+                media_stem_to_strm_path,
+                media_stem_to_target,
+            )
+            subtitle_in_background = True
 
         return {
             "status": True,
@@ -1675,37 +1768,156 @@ class ShareTaskQueue:
         self._recent_tasks: Dict[str, float] = {}
         # 持久化文件路径，在 start() 中通过 settings 初始化
         self._persist_path: Optional[Path] = None
+        self._subtitle_jobs_path: Optional[Path] = None
+        # 字幕后台指标
+        self._subtitle_bg_active: int = 0
+        self._subtitle_bg_started_total: int = 0
+        self._subtitle_place_ok: int = 0
+        self._subtitle_place_miss: int = 0
+        self._last_finalize_seconds: float = 0.0
 
     # ── 持久化 ──────────────────────────────────────────────
+
+    def _get_data_dir(self) -> Path:
+        from app.core.config import settings
+        data_dir = Path(settings.PLUGIN_DATA_PATH) / "P115ShareStrm"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
 
     def _get_persist_path(self) -> Path:
         """懒加载持久化文件路径（避免模块加载时 settings 尚未就绪）"""
         if self._persist_path is None:
-            from app.core.config import settings
-            data_dir = Path(settings.PLUGIN_DATA_PATH) / "P115ShareStrm"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            self._persist_path = data_dir / "pending_tasks.json"
+            self._persist_path = self._get_data_dir() / "pending_tasks.json"
         return self._persist_path
 
-    def _load_tasks(self) -> List[Dict]:
-        """从 JSON 文件加载持久化任务列表，文件不存在或损坏时返回空列表"""
-        path = self._get_persist_path()
+    def _get_subtitle_jobs_path(self) -> Path:
+        if self._subtitle_jobs_path is None:
+            self._subtitle_jobs_path = self._get_data_dir() / "subtitle_jobs.json"
+        return self._subtitle_jobs_path
+
+    def _load_json_list(self, path: Path) -> List[Dict]:
         try:
             if path.exists():
                 return json.loads(path.read_text(encoding="utf-8"))
         except Exception as e:
-            logger.warning(f"【P115ShareStrm】读取持久化任务失败，将重置: {e}")
+            logger.warning(f"【P115ShareStrm】读取 {path.name} 失败，将重置: {e}")
         return []
+
+    def _save_json_list(self, path: Path, items: List[Dict]) -> None:
+        tmp = path.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as e:
+            logger.warning(f"【P115ShareStrm】写入 {path.name} 失败: {e}")
+
+    def _load_tasks(self) -> List[Dict]:
+        """从 JSON 文件加载持久化任务列表，文件不存在或损坏时返回空列表"""
+        return self._load_json_list(self._get_persist_path())
 
     def _save_tasks(self, tasks: List[Dict]) -> None:
         """原子写入：先写 .tmp 再 rename，防止崩溃导致文件损坏"""
-        path = self._get_persist_path()
-        tmp = path.with_suffix(".tmp")
-        try:
-            tmp.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(path)
-        except Exception as e:
-            logger.warning(f"【P115ShareStrm】写入持久化任务失败: {e}")
+        self._save_json_list(self._get_persist_path(), tasks)
+
+    def subtitle_job_upsert(self, job: Dict) -> None:
+        with self._lock:
+            jobs = self._load_json_list(self._get_subtitle_jobs_path())
+            jobs = [j for j in jobs if j.get("job_id") != job.get("job_id")]
+            jobs.append(job)
+            self._save_json_list(self._get_subtitle_jobs_path(), jobs)
+
+    def subtitle_job_update_stage(self, job_id: str, stage: str) -> None:
+        with self._lock:
+            jobs = self._load_json_list(self._get_subtitle_jobs_path())
+            for j in jobs:
+                if j.get("job_id") == job_id:
+                    j["stage"] = stage
+                    break
+            self._save_json_list(self._get_subtitle_jobs_path(), jobs)
+
+    def subtitle_job_remove(self, job_id: str) -> None:
+        with self._lock:
+            jobs = self._load_json_list(self._get_subtitle_jobs_path())
+            jobs = [j for j in jobs if j.get("job_id") != job_id]
+            self._save_json_list(self._get_subtitle_jobs_path(), jobs)
+
+    def get_subtitle_jobs_active_count(self) -> int:
+        with self._lock:
+            jobs = self._load_json_list(self._get_subtitle_jobs_path())
+            return len([
+                j for j in jobs
+                if j.get("stage") not in ("done", "failed")
+            ])
+
+    def metrics_subtitle_bg_inc(self) -> None:
+        with self._lock:
+            self._subtitle_bg_active += 1
+
+    def metrics_subtitle_bg_dec(self) -> None:
+        with self._lock:
+            self._subtitle_bg_active = max(0, self._subtitle_bg_active - 1)
+
+    def metrics_subtitle_bg_started(self) -> None:
+        with self._lock:
+            self._subtitle_bg_started_total += 1
+
+    def metrics_add_place(self, ok: int, miss: int) -> None:
+        with self._lock:
+            self._subtitle_place_ok += max(0, ok)
+            self._subtitle_place_miss += max(0, miss)
+
+    def metrics_set_last_finalize_seconds(self, seconds: float) -> None:
+        with self._lock:
+            self._last_finalize_seconds = max(0.0, float(seconds))
+
+    def get_metrics(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "subtitle_bg_active": self._subtitle_bg_active,
+                "subtitle_bg_started_total": self._subtitle_bg_started_total,
+                "subtitle_place_ok": self._subtitle_place_ok,
+                "subtitle_place_miss": self._subtitle_place_miss,
+                "last_finalize_seconds": round(self._last_finalize_seconds, 1),
+                "subtitle_jobs_pending": len([
+                    j for j in self._load_json_list(self._get_subtitle_jobs_path())
+                    if j.get("stage") not in ("done", "failed")
+                ]),
+            }
+
+    def _restore_subtitle_jobs(self) -> None:
+        jobs = self._load_json_list(self._get_subtitle_jobs_path())
+        pending = [j for j in jobs if j.get("stage") not in ("done", "failed")]
+        if not pending:
+            return
+        logger.info(f"【P115ShareStrm】从持久化恢复 {len(pending)} 个字幕收尾任务")
+        for job in pending:
+            try:
+                retry = int(job.get("retry_count", 0) or 0)
+                if retry >= self._MAX_RETRY:
+                    logger.warning(
+                        f"【P115ShareStrm】字幕收尾任务已达最大重试，放弃: {job.get('share_code')}"
+                    )
+                    self.subtitle_job_remove(job["job_id"])
+                    continue
+                job["retry_count"] = retry + 1
+                self.subtitle_job_upsert(job)
+                _start_subtitle_finalize_job(
+                    job["share_code"],
+                    job["receive_code"],
+                    job.get("subtitle_files") or [],
+                    Path(job.get("save_path") or configer.strm_save_path),
+                    job.get("user_id"),
+                    job.get("media_files") or [],
+                    _deserialize_stem_paths(job.get("media_stem_to_strm_path") or {}),
+                    {
+                        k: Path(v)
+                        for k, v in (job.get("media_stem_to_target") or {}).items()
+                    },
+                    job_id=job["job_id"],
+                    retry_count=job["retry_count"],
+                )
+            except Exception as e:
+                logger.warning(f"【P115ShareStrm】恢复字幕收尾任务失败: {e}")
 
     def _persist_add(self, task_id: str, share_code: str, receive_code: str,
                      user_id: Optional[str], tmdbid: Optional[int], mtype: Optional[str],
@@ -1775,6 +1987,7 @@ class ShareTaskQueue:
 
         # 恢复持久化任务（在 _lock 外执行，避免死锁）
         self._restore_persisted_tasks()
+        self._restore_subtitle_jobs()
 
     def stop(self):
         """停止工作线程，并中断整理等待等长耗时操作"""
@@ -1895,7 +2108,7 @@ class ShareTaskQueue:
                 if result.get("status"):
                     if sub_only:
                         if result.get("subtitle_in_background"):
-                            msg = f"⏳ 字幕重新下载已转为后台轮询，等待链接审核通过后自动下载整理: {share_code}"
+                            msg = f"⏳ 字幕重新下载已转为后台收尾: {share_code}\n（STRM 已完成 / 字幕后台处理中）"
                         else:
                             msg = (
                                 f"✅ 字幕重新下载完成: {share_code}\n"
@@ -1915,7 +2128,7 @@ class ShareTaskQueue:
                             if result.get("subtitle_fail_count"):
                                 msg += f"，失败 {result.get('subtitle_fail_count')} 个"
                         if result.get("subtitle_in_background"):
-                            msg += f"\n⏳ 分享链接审核中，字幕下载已转为后台排队轮询，审核通过后自动下载放置"
+                            msg += f"\n⏳ STRM 已完成 / 字幕后台处理中（审核通过并整理后自动放置）"
 
                     buttons = None
                     if not sub_only and result.get("subtitle_fail_count", 0) > 0:

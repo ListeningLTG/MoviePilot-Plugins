@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.58"
+    plugin_version = "1.0.62"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -285,6 +285,59 @@ class p115sharestrm(_PluginBase):
                                             },
                                         ],
                                     },
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "subtitle_finalize_timeout_hours",
+                                                            "label": "字幕收尾超时（小时）",
+                                                            "type": "number",
+                                                            "hint": "后台等整理映射并下载放置字幕的总超时，默认 6 小时",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "skip_wait_pending_threshold",
+                                                            "label": "跳过等待阈值（pending）",
+                                                            "type": "number",
+                                                            "hint": "待整理文件数超过此值时跳过同步等待（主路径已后台化）",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "skip_wait_pending_when_queued",
+                                                            "label": "积压时跳过阈值",
+                                                            "type": "number",
+                                                            "hint": "队列有积压且待整理数超过此值时跳过同步等待",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
                                     # ── 第二行：Cookie 与 地址 ──
                                     {
                                         "component": "VRow",
@@ -503,6 +556,9 @@ class p115sharestrm(_PluginBase):
             "download_subtitle": False,
             "user_subtitle_ext": "srt,ass,ssa",
             "subtitle_audit_poll_timeout_hours": 6,
+            "subtitle_finalize_timeout_hours": 6,
+            "skip_wait_pending_threshold": 500,
+            "skip_wait_pending_when_queued": 100,
         }
 
     def get_page(self) -> List[dict]:
@@ -512,6 +568,11 @@ class p115sharestrm(_PluginBase):
         queue_size = task_queue._queue.qsize() if task_queue._queue else 0
         processing_count = task_queue._processing_count
         is_running = task_queue._running
+        metrics = task_queue.get_metrics()
+        sub_bg = metrics.get("subtitle_bg_active", 0)
+        place_miss = metrics.get("subtitle_place_miss", 0)
+        place_ok = metrics.get("subtitle_place_ok", 0)
+        last_sec = metrics.get("last_finalize_seconds", 0)
 
         return [
             {
@@ -572,6 +633,72 @@ class p115sharestrm(_PluginBase):
                                                     "prepend-icon": "mdi-format-list-numbered",
                                                 },
                                                 "text": f"等待中: {queue_size} 个任务",
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 6, "md": 3},
+                                        "content": [
+                                            {
+                                                "component": "VChip",
+                                                "props": {
+                                                    "color": "info" if sub_bg > 0 else "default",
+                                                    "variant": "tonal",
+                                                    "prepend-icon": "mdi-subtitles",
+                                                },
+                                                "text": f"字幕后台: {sub_bg}",
+                                            }
+                                        ],
+                                    },
+                                ],
+                            },
+                            {
+                                "component": "VRow",
+                                "props": {"class": "mt-2"},
+                                "content": [
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 12, "md": 4},
+                                        "content": [
+                                            {
+                                                "component": "VChip",
+                                                "props": {
+                                                    "color": "success",
+                                                    "variant": "tonal",
+                                                    "prepend-icon": "mdi-check",
+                                                },
+                                                "text": f"字幕放置成功: {place_ok}",
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 12, "md": 4},
+                                        "content": [
+                                            {
+                                                "component": "VChip",
+                                                "props": {
+                                                    "color": "error" if place_miss > 0 else "default",
+                                                    "variant": "tonal",
+                                                    "prepend-icon": "mdi-alert",
+                                                },
+                                                "text": f"字幕未匹配(miss): {place_miss}",
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 12, "md": 4},
+                                        "content": [
+                                            {
+                                                "component": "VChip",
+                                                "props": {
+                                                    "color": "default",
+                                                    "variant": "tonal",
+                                                    "prepend-icon": "mdi-timer",
+                                                },
+                                                "text": f"最近收尾耗时: {last_sec}s",
                                             }
                                         ],
                                     },
