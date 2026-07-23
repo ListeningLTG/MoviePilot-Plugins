@@ -41,6 +41,16 @@ class ShareLinkExpiredError(Exception):
     pass
 
 
+class ShareSnapshotPendingError(Exception):
+    """分享快照正在生成中（errno 4100021），稍后可重试"""
+    pass
+
+
+def _is_snapshot_pending_error(exc: BaseException) -> bool:
+    msg = str(exc)
+    return "4100021" in msg or "正在生成文件快照" in msg
+
+
 _SHARE_SNAP_PROGRESS_INTERVAL = 10
 
 
@@ -801,6 +811,10 @@ class _ShareSnapFetcher:
             except Exception as e:
                 if "4100009" in str(e) or "4100010" in str(e):
                     raise ShareLinkExpiredError(f"分享链接已失效或已取消 ({e})") from e
+                if _is_snapshot_pending_error(e):
+                    raise ShareSnapshotPendingError(
+                        f"正在生成文件快照，请稍后重试 ({e})"
+                    ) from e
                 if is_waf_405(e):
                     handle_waf_405()
                 raise
@@ -812,7 +826,7 @@ class _ShareSnapFetcher:
 
         try:
             count, items = self._invoke(primary, payload)
-        except ShareRateLimitedError:
+        except (ShareRateLimitedError, ShareSnapshotPendingError, ShareLinkExpiredError):
             raise
         except Exception as primary_err:
             if primary_name.startswith("share_snap_app"):
@@ -821,7 +835,7 @@ class _ShareSnapFetcher:
                 )
                 try:
                     count, items = self._invoke(self._cookie, payload)
-                except ShareRateLimitedError:
+                except (ShareRateLimitedError, ShareSnapshotPendingError, ShareLinkExpiredError):
                     raise
                 except Exception as cookie_err:
                     logger.error(f"【P115ShareStrm】Cookie 端点也失败: {cookie_err}")
@@ -1003,7 +1017,7 @@ def iter_share_files(
 
         try:
             items = _fetcher.fetch_page(payload)
-        except ShareRateLimitedError:
+        except (ShareRateLimitedError, ShareSnapshotPendingError, ShareLinkExpiredError):
             raise
         except Exception as e:
             logger.error(f"【P115ShareStrm】请求分享列表失败: {e}")
@@ -2019,24 +2033,39 @@ def process_share_strm(
     except ShareLinkExpiredError as e:
         logger.warning(f"【P115ShareStrm】分享链接已失效: {share_code}")
         return {"status": False, "msg": str(e), "terminal": True}
+    except ShareSnapshotPendingError as e:
+        logger.warning(f"【P115ShareStrm】分享快照生成中: {share_code} - {e}")
+        return {
+            "status": False,
+            "msg": str(e),
+            "retryable": True,
+            "retry_reason": "snapshot",
+        }
     except ShareRateLimitedError as e:
         logger.warning(f"【P115ShareStrm】115 接口风控: {share_code} - {e}")
-        return {"status": False, "msg": str(e), "retryable": True}
+        return {
+            "status": False,
+            "msg": str(e),
+            "retryable": True,
+            "retry_reason": "rate_limit",
+        }
     except Exception as e:
         logger.error(f"【P115ShareStrm】逻辑执行异常: {e}", exc_info=True)
-        return {"status": False, "msg": str(e)}
+        return {"status": False, "msg": str(e), "retry_reason": "other"}
 
 
 class ShareTaskQueue:
     """
     异步任务队列管理器：通过单线程串行处理，避免并发风控。
-    支持 JSON 文件持久化，MP/插件重启后自动恢复未完成任务。
+    支持 JSON 文件持久化；可恢复失败按间隔延迟重入队，进程重启后按 next_retry_at 恢复。
     """
 
     # 去重时间窗口（秒）：同一 share_code 在此时间内只入队一次
     _DEDUP_WINDOW: float = 10.0
     # 单任务最大重试次数（超过后从持久化文件移除，不再重试）
     _MAX_RETRY: int = 3
+    # 可恢复失败的延迟重试间隔（秒）
+    _RETRY_INTERVAL_SEC: int = 300
 
     def __init__(self):
         self._queue: Queue = Queue()
@@ -2258,7 +2287,7 @@ class ShareTaskQueue:
             self._save_tasks(tasks)
 
     def _persist_increment_retry(self, task_id: str) -> int:
-        """将任务重试次数 +1，返回更新后的重试次数"""
+        """将任务重试次数 +1，写入 next_retry_at，返回更新后的重试次数"""
         with self._lock:
             tasks = self._load_tasks()
             count = 0
@@ -2266,9 +2295,56 @@ class ShareTaskQueue:
                 if t.get("task_id") == task_id:
                     t["retry_count"] = t.get("retry_count", 0) + 1
                     count = t["retry_count"]
+                    t["next_retry_at"] = time() + self._RETRY_INTERVAL_SEC
                     break
             self._save_tasks(tasks)
         return count
+
+    def _schedule_task_retry(
+        self,
+        task_id: str,
+        share_code: str,
+        receive_code: str,
+        user_id: Optional[str],
+        tmdbid: Optional[int],
+        mtype: Optional[str],
+        arg_str: Optional[str],
+        sub_only: bool,
+        wait_sec: Optional[float] = None,
+        retry_reason: str = "other",
+        retry_count: int = 0,
+    ) -> None:
+        """延迟后将已持久化任务重新放入内存队列（不经过去重）。"""
+
+        def _retry_worker():
+            delay = (
+                float(self._RETRY_INTERVAL_SEC)
+                if wait_sec is None
+                else max(0.0, float(wait_sec))
+            )
+            logger.info(
+                f"【P115ShareStrm】任务将在 {delay:.0f}s 后自动重试: {share_code} "
+                f"(id={task_id}, retry={retry_count}/{self._MAX_RETRY}, reason={retry_reason})"
+            )
+            if delay > 0 and _interruptible_sleep(delay, self._cancel_event):
+                logger.info(f"【P115ShareStrm】延迟重试已取消: {share_code} (id={task_id})")
+                return
+            if not self._running or self._cancel_event.is_set():
+                logger.info(
+                    f"【P115ShareStrm】队列已停止，跳过延迟重试入队: {share_code} (id={task_id})"
+                )
+                return
+            with self._lock:
+                self._pending_codes.add(share_code)
+            self._queue.put(
+                (task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str, sub_only)
+            )
+            logger.info(
+                f"【P115ShareStrm】延迟重试已重新入队: {share_code} (id={task_id})，"
+                f"当前队列待处理: {self._queue.qsize()}"
+            )
+
+        Thread(target=_retry_worker, daemon=True, name=f"p115-retry-{share_code}").start()
 
     # ── 公共接口 ─────────────────────────────────────────────
 
@@ -2357,34 +2433,69 @@ class ShareTaskQueue:
         return True
 
     def _restore_persisted_tasks(self) -> None:
-        """从持久化文件恢复未完成任务，重新放入内存队列"""
+        """从持久化文件恢复未完成任务：到期立即入队，未到期则按剩余时间延迟重试。"""
         tasks = self._load_tasks()
         if not tasks:
             return
         logger.info(f"【P115ShareStrm】从持久化文件恢复 {len(tasks)} 个待处理任务")
+        now = time()
         for t in tasks:
             share_code = t.get("share_code")
-            if t.get("retry_count", 0) >= self._MAX_RETRY:
-                logger.warning(
-                    f"【P115ShareStrm】任务已达最大重试次数，跳过: {share_code} (id={t.get('task_id')})"
-                )
-                self._persist_remove(t["task_id"])
+            task_id = t.get("task_id")
+            if not share_code or not task_id:
                 continue
-            
+            retry_count = int(t.get("retry_count", 0) or 0)
+            if retry_count >= self._MAX_RETRY:
+                logger.warning(
+                    f"【P115ShareStrm】任务已达最大重试次数，跳过: {share_code} (id={task_id})"
+                )
+                self._persist_remove(task_id)
+                continue
+
+            receive_code = t.get("receive_code")
+            user_id = t.get("user_id")
+            tmdbid = t.get("tmdbid")
+            mtype = t.get("mtype")
+            arg_str = t.get("arg_str")
+            sub_only = t.get("sub_only", False)
+
+            next_retry_at = t.get("next_retry_at")
+            remaining = 0.0
+            if next_retry_at is not None:
+                try:
+                    remaining = float(next_retry_at) - now
+                except (TypeError, ValueError):
+                    remaining = 0.0
+
             with self._lock:
                 self._pending_codes.add(share_code)
-                
-            self._queue.put((
-                t["task_id"],
-                share_code,
-                t["receive_code"],
-                t.get("user_id"),
-                t.get("tmdbid"),
-                t.get("mtype"),
-                t.get("arg_str"),
-                t.get("sub_only", False),
-            ))
-            logger.info(f"【P115ShareStrm】已恢复任务: {share_code} (重试次数: {t.get('retry_count', 0)})")
+
+            if remaining > 0:
+                logger.info(
+                    f"【P115ShareStrm】恢复任务将在 {remaining:.0f}s 后重试: {share_code} "
+                    f"(重试次数: {retry_count})"
+                )
+                self._schedule_task_retry(
+                    task_id,
+                    share_code,
+                    receive_code,
+                    user_id,
+                    tmdbid,
+                    mtype,
+                    arg_str,
+                    sub_only,
+                    wait_sec=remaining,
+                    retry_reason="restore",
+                    retry_count=retry_count,
+                )
+                continue
+
+            self._queue.put(
+                (task_id, share_code, receive_code, user_id, tmdbid, mtype, arg_str, sub_only)
+            )
+            logger.info(
+                f"【P115ShareStrm】已恢复任务: {share_code} (重试次数: {retry_count})"
+            )
 
     def get_queue_size(self) -> int:
         """返回当前队列待处理任务数"""
@@ -2452,28 +2563,13 @@ class ShareTaskQueue:
                     self._notify(user_id, "【115分享STRM】完成", msg, buttons=buttons)
                     # 成功：从持久化文件移除
                     self._persist_remove(task_id)
+                    release_pending = True
                 else:
-                    if result.get("retryable"):
-                        retry_count = self._persist_increment_retry(task_id)
-                        if retry_count >= self._MAX_RETRY:
-                            logger.error(
-                                f"【P115ShareStrm】115 风控重试已达上限 ({self._MAX_RETRY})，放弃: {share_code}"
-                            )
-                            self._persist_remove(task_id)
-                            self._notify(
-                                user_id,
-                                "【115分享STRM】放弃",
-                                f"❌ {share_code}\n115 接口风控，已重试 {self._MAX_RETRY} 次\n原因: {result.get('msg')}",
-                            )
-                        else:
-                            self._notify(
-                                user_id,
-                                "【115分享STRM】风控等待",
-                                f"⏳ {share_code}\n115 接口限流，将在重启后自动重试 "
-                                f"(第 {retry_count}/{self._MAX_RETRY} 次)\n{result.get('msg')}",
-                            )
-                    elif result.get("terminal"):
-                        logger.warning(f"【P115ShareStrm】任务遇到不可恢复错误，放弃: {share_code}")
+                    release_pending = True
+                    if result.get("terminal"):
+                        logger.warning(
+                            f"【P115ShareStrm】任务遇到不可恢复错误，放弃: {share_code}"
+                        )
                         self._persist_remove(task_id)
                         self._notify(
                             user_id,
@@ -2482,25 +2578,75 @@ class ShareTaskQueue:
                         )
                     else:
                         retry_count = self._persist_increment_retry(task_id)
+                        retry_reason = result.get("retry_reason") or (
+                            "rate_limit" if result.get("retryable") else "other"
+                        )
+                        wait_min = max(1, self._RETRY_INTERVAL_SEC // 60)
                         if retry_count >= self._MAX_RETRY:
                             logger.error(
-                                f"【P115ShareStrm】任务失败且已达最大重试次数 ({self._MAX_RETRY})，放弃: {share_code}"
+                                f"【P115ShareStrm】任务失败且已达最大重试次数 "
+                                f"({self._MAX_RETRY})，放弃: {share_code} (reason={retry_reason})"
                             )
                             self._persist_remove(task_id)
-                            self._notify(
-                                user_id,
-                                "【115分享STRM】放弃",
-                                f"❌ {share_code}\n已重试 {self._MAX_RETRY} 次，放弃处理\n原因: {result.get('msg')}",
+                            abandon_title = (
+                                "【115分享STRM】放弃"
                             )
+                            if retry_reason == "rate_limit":
+                                abandon_msg = (
+                                    f"❌ {share_code}\n115 接口风控，已重试 {self._MAX_RETRY} 次\n"
+                                    f"原因: {result.get('msg')}"
+                                )
+                            elif retry_reason == "snapshot":
+                                abandon_msg = (
+                                    f"❌ {share_code}\n快照生成等待已重试 {self._MAX_RETRY} 次，放弃处理\n"
+                                    f"原因: {result.get('msg')}"
+                                )
+                            else:
+                                abandon_msg = (
+                                    f"❌ {share_code}\n已重试 {self._MAX_RETRY} 次，放弃处理\n"
+                                    f"原因: {result.get('msg')}"
+                                )
+                            self._notify(user_id, abandon_title, abandon_msg)
                         else:
-                            self._notify(
+                            # 延迟重试期间保留 pending，避免同链接重复入队
+                            release_pending = False
+                            if retry_reason == "snapshot":
+                                title = "【115分享STRM】快照等待"
+                                body = (
+                                    f"⏳ {share_code}\n正在生成文件快照，将在 {wait_min} 分钟后自动重试 "
+                                    f"(第 {retry_count}/{self._MAX_RETRY} 次)\n{result.get('msg')}"
+                                )
+                            elif retry_reason == "rate_limit":
+                                title = "【115分享STRM】风控等待"
+                                body = (
+                                    f"⏳ {share_code}\n115 接口限流，将在 {wait_min} 分钟后自动重试 "
+                                    f"(第 {retry_count}/{self._MAX_RETRY} 次)\n{result.get('msg')}"
+                                )
+                            else:
+                                title = "【115分享STRM】失败"
+                                body = (
+                                    f"❌ {share_code}\n原因: {result.get('msg')}\n"
+                                    f"将在 {wait_min} 分钟后自动重试 "
+                                    f"(第 {retry_count}/{self._MAX_RETRY} 次)"
+                                )
+                            self._notify(user_id, title, body)
+                            self._schedule_task_retry(
+                                task_id,
+                                share_code,
+                                receive_code,
                                 user_id,
-                                "【115分享STRM】失败",
-                                f"❌ {share_code}\n原因: {result.get('msg')}\n将在重启后自动重试 (第 {retry_count}/{self._MAX_RETRY} 次)",
+                                tmdbid,
+                                mtype,
+                                arg_str,
+                                sub_only,
+                                wait_sec=float(self._RETRY_INTERVAL_SEC),
+                                retry_reason=retry_reason,
+                                retry_count=retry_count,
                             )
 
-                with self._lock:
-                    self._pending_codes.discard(share_code)
+                if release_pending:
+                    with self._lock:
+                        self._pending_codes.discard(share_code)
 
                 self._queue.task_done()
                 self._processing_count = max(0, self._processing_count - 1)
