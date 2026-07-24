@@ -213,16 +213,24 @@ def _interruptible_sleep(seconds: float, cancel_event: Event) -> bool:
     return cancel_event.is_set()
 
 
+# 字幕所需媒体整理映射的最长等待（秒）；超时后回退到本地 STRM 目录
+_SUBTITLE_MAP_GRACE_SEC = 180
+
+
 def _refresh_media_stem_targets(
     media_stem_to_strm_path: Dict[str, Path],
     media_stem_to_target: Dict[str, Path],
+    stems_filter: Optional[Set[str]] = None,
 ) -> Tuple[int, int]:
     """
     批量补全 stem → 整理目标路径。返回 (已映射数, 总数)。
+    stems_filter 非空时只刷新/统计这些 stem（字幕所需）。
     """
     pending_paths: List[Path] = []
     stem_by_src: Dict[str, str] = {}
     for stem, strm_path in media_stem_to_strm_path.items():
+        if stems_filter is not None and stem not in stems_filter:
+            continue
         if stem in media_stem_to_target:
             continue
         src = strm_path.as_posix()
@@ -253,6 +261,10 @@ def _refresh_media_stem_targets(
             if history and history.dest:
                 media_stem_to_target[stem_by_src[p.as_posix()]] = Path(history.dest)
 
+    if stems_filter is not None:
+        total = len(stems_filter)
+        mapped = sum(1 for s in stems_filter if s in media_stem_to_target)
+        return mapped, total
     return len(media_stem_to_target), len(media_stem_to_strm_path)
 
 
@@ -283,16 +295,37 @@ def _match_stem_for_subtitle(sub_name: str, candidate_stems: List[str]) -> Optio
     return candidate_stems[0]
 
 
+def _required_stems_for_subtitles(
+    subtitle_files: List[dict],
+    media_files: List[dict],
+) -> Set[str]:
+    """根据字幕与媒体同目录/集数匹配，得到放置字幕真正需要的媒体 stem 集合。"""
+    dir_to_media_stems = _build_dir_to_media_stems(media_files)
+    required: Set[str] = set()
+    for sub_item in subtitle_files:
+        sub_full_path = sub_item.get("_full_path", sub_item.get("name", ""))
+        sub_name = Path(sub_full_path).name
+        sub_parent = str(Path(sub_full_path).parent)
+        matched = _match_stem_for_subtitle(sub_name, dir_to_media_stems.get(sub_parent, []))
+        if matched:
+            required.add(matched)
+    return required
+
+
 def _place_subtitles_to_targets(
     subtitle_files: List[dict],
     downloaded_subtitle_paths: List[Path],
     media_files: List[dict],
     media_stem_to_strm_path: Dict[str, Path],
     media_stem_to_target: Dict[str, Path],
-) -> Tuple[int, int]:
-    """将已下载字幕放置到整理目标目录。返回 (成功数, miss数)。"""
+) -> Tuple[int, int, int]:
+    """
+    将已下载字幕放置到整理目标目录。
+    返回 (成功数, miss数, 回退到本地 STRM 目录数)。
+    """
     place_ok = 0
     place_miss = 0
+    place_fallback = 0
     dir_to_media_stems = _build_dir_to_media_stems(media_files)
 
     for sub_item, local_path in zip(subtitle_files, downloaded_subtitle_paths):
@@ -302,6 +335,7 @@ def _place_subtitles_to_targets(
         candidate_stems = dir_to_media_stems.get(sub_parent, [])
         matched_stem = _match_stem_for_subtitle(sub_name, candidate_stems)
         strm_target = media_stem_to_target.get(matched_stem) if matched_stem else None
+        used_fallback = False
         if not strm_target and matched_stem:
             strm_path = media_stem_to_strm_path.get(matched_stem)
             if strm_path:
@@ -309,10 +343,20 @@ def _place_subtitles_to_targets(
                 if history and history.dest:
                     strm_target = Path(history.dest)
                     media_stem_to_target[matched_stem] = strm_target
+                else:
+                    # 整理记录缺失：回退放到本地 STRM 同目录
+                    strm_target = strm_path
+                    media_stem_to_target[matched_stem] = strm_path
+                    used_fallback = True
+                    logger.warning(
+                        f"【P115ShareStrm】整理记录缺失，字幕回退放到 STRM 目录: {sub_name} -> {strm_path.parent}"
+                    )
 
         if not strm_target:
             place_miss += 1
-            logger.warning(f"【P115ShareStrm】未找到对应 STRM 目标路径，跳过字幕: {sub_name}")
+            logger.warning(
+                f"【P115ShareStrm】未找到整理目标，字幕跳过: {sub_name}"
+            )
             continue
 
         lang_tag = _extract_subtitle_lang_tag(sub_name)
@@ -322,6 +366,8 @@ def _place_subtitles_to_targets(
             if dest_path.exists() and dest_path.read_bytes() == local_path.read_bytes():
                 logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
                 place_ok += 1
+                if used_fallback:
+                    place_fallback += 1
                 continue
         except Exception:
             pass
@@ -333,13 +379,17 @@ def _place_subtitles_to_targets(
         try:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(local_path), str(dest_path))
-            logger.info(f"【P115ShareStrm】字幕放置到目标: {new_name}")
+            if used_fallback:
+                logger.info(f"【P115ShareStrm】字幕已回退放置到 STRM 目录: {new_name}")
+                place_fallback += 1
+            else:
+                logger.info(f"【P115ShareStrm】字幕放置到目标: {new_name}")
             place_ok += 1
         except Exception as e:
             place_miss += 1
             logger.warning(f"【P115ShareStrm】字幕放置失败 {sub_name}: {e}")
 
-    return place_ok, place_miss
+    return place_ok, place_miss, place_fallback
 
 
 def _serialize_stem_paths(media_stem_to_strm_path: Dict[str, Path]) -> Dict[str, str]:
@@ -403,16 +453,16 @@ def _schedule_subtitle_receive_retry(
             task_queue.subtitle_job_remove(job_id)
             return
 
-        place_ok, place_miss = 0, 0
+        place_ok, place_miss, place_fallback = 0, 0, 0
         if downloaded and configer.moviepilot_transfer:
-            place_ok, place_miss = _place_subtitles_to_targets(
+            place_ok, place_miss, place_fallback = _place_subtitles_to_targets(
                 subtitle_files, downloaded, media_files,
                 media_stem_to_strm_path, media_stem_to_target,
             )
         elif downloaded:
             for stem, sp in media_stem_to_strm_path.items():
                 media_stem_to_target.setdefault(stem, sp)
-            place_ok, place_miss = _place_subtitles_to_targets(
+            place_ok, place_miss, place_fallback = _place_subtitles_to_targets(
                 subtitle_files, downloaded, media_files,
                 media_stem_to_strm_path, media_stem_to_target,
             )
@@ -420,7 +470,17 @@ def _schedule_subtitle_receive_retry(
         msg = f"✅ 字幕限制接收重试完成: {share_code}\n下载成功: {len(downloaded)} 个"
         if fail_count:
             msg += f"，失败 {fail_count} 个"
-        task_queue._notify(user_id, "【115分享STRM】字幕自动下载成功", msg, buttons=retry_btn if fail_count else None)
+        msg += f"\n放置成功: {place_ok}，未匹配目标: {place_miss}"
+        if place_fallback:
+            msg += f"\n整理记录缺失，已回退到 STRM 目录: {place_fallback} 个"
+        if place_miss:
+            msg += "\n未找到整理目标，字幕跳过"
+        task_queue._notify(
+            user_id,
+            "【115分享STRM】字幕自动下载成功",
+            msg,
+            buttons=retry_btn if (fail_count or place_miss) else None,
+        )
         task_queue.subtitle_job_update_stage(job_id, "done")
         task_queue.subtitle_job_remove(job_id)
 
@@ -490,6 +550,7 @@ def _finalize_subtitles_async(
 ):
     """
     后台收尾：轮询整理映射 +（如需）等审核通过，再下载并放置字幕，不堵塞主队列。
+    仅等待字幕真正需要的媒体 stem；整理记录缺失时 grace 后回退到本地 STRM 目录。
     """
     task_queue.metrics_subtitle_bg_inc()
     started = time()
@@ -513,9 +574,12 @@ def _finalize_subtitles_async(
         deadline = time() + finalize_hours * 3600
         audit_deadline = time() + audit_hours * 3600
 
+        required_stems = _required_stems_for_subtitles(subtitle_files, media_files)
         logger.info(
             f"【P115ShareStrm】已启动字幕后台收尾: {share_code} "
-            f"(job={job_id}, 整理超时 {finalize_hours}h, 审核超时 {audit_hours}h)"
+            f"(job={job_id}, 字幕={len(subtitle_files)}, 所需映射={len(required_stems)}, "
+            f"整理超时 {finalize_hours}h, 审核超时 {audit_hours}h, "
+            f"映射 grace {_SUBTITLE_MAP_GRACE_SEC}s)"
         )
         task_queue.subtitle_job_update_stage(job_id, "waiting_transfer")
 
@@ -531,40 +595,58 @@ def _finalize_subtitles_async(
         interval = audit_min
         audit_ok = False
         attempt = 0
+        last_state_check = 0.0
+        # 分享状态查询间隔与审核轮询下限对齐，避免每次映射刷新都打 115
+        state_check_interval = float(audit_min)
 
         while time() < deadline and not task_queue._cancel_event.is_set():
             attempt += 1
-            mapped, total = _refresh_media_stem_targets(media_stem_to_strm_path, media_stem_to_target)
+            mapped, total = _refresh_media_stem_targets(
+                media_stem_to_strm_path,
+                media_stem_to_target,
+                stems_filter=required_stems,
+            )
             if attempt == 1 or attempt % 6 == 0:
                 logger.info(
-                    f"【P115ShareStrm】字幕收尾映射进度 {mapped}/{total}: {share_code}"
+                    f"【P115ShareStrm】字幕收尾映射进度 {mapped}/{total}（仅字幕所需）: {share_code}"
                 )
 
-            state = _get_share_state(client, share_code, receive_code)
-            if state == 7:
-                logger.warning(f"【P115ShareStrm】字幕后台收尾发现链接已过期: {share_code}")
-                task_queue.subtitle_job_update_stage(job_id, "failed")
-                task_queue._notify(
-                    user_id,
-                    "【115分享STRM】字幕下载失败",
-                    f"❌ {share_code}\n原因: 链接已失效或在审核期间过期",
-                    buttons=retry_btn,
-                )
-                task_queue.subtitle_job_remove(job_id)
-                return
+            now = time()
+            should_check_state = (not audit_ok) and (
+                attempt == 1 or now - last_state_check >= state_check_interval
+            )
+            if should_check_state:
+                last_state_check = now
+                state = _get_share_state(client, share_code, receive_code)
+                if state == 7:
+                    logger.warning(f"【P115ShareStrm】字幕后台收尾发现链接已过期: {share_code}")
+                    task_queue.subtitle_job_update_stage(job_id, "failed")
+                    task_queue._notify(
+                        user_id,
+                        "【115分享STRM】字幕下载失败",
+                        f"❌ {share_code}\n原因: 链接已失效或在审核期间过期",
+                        buttons=retry_btn,
+                    )
+                    task_queue.subtitle_job_remove(job_id)
+                    return
+                if state is not None and state != 0:
+                    audit_ok = True
+                    task_queue.subtitle_job_update_stage(job_id, "placing")
+                    logger.info(f"【P115ShareStrm】字幕收尾审核已通过，开始等待所需映射: {share_code}")
+                else:
+                    task_queue.subtitle_job_update_stage(job_id, "waiting_audit")
 
-            if state is not None and state != 0:
-                audit_ok = True
-                task_queue.subtitle_job_update_stage(job_id, "placing")
-                # 审核已通过：映射齐全则立即下载；否则至少等一会补映射
-                if total == 0 or mapped >= total or (mapped > 0 and time() >= started + 30):
+            if audit_ok:
+                if total == 0 or mapped >= total:
                     break
-                if time() >= started + 120:
-                    # 已审核通过超过 2 分钟仍未齐全，先下载能放的
+                if now >= started + _SUBTITLE_MAP_GRACE_SEC:
+                    logger.warning(
+                        f"【P115ShareStrm】字幕所需映射 grace 到期仍缺 {total - mapped}/{total}，"
+                        f"进入放置（缺整理记录将回退 STRM 目录）: {share_code}"
+                    )
                     break
             else:
-                task_queue.subtitle_job_update_stage(job_id, "waiting_audit")
-                if time() >= audit_deadline:
+                if now >= audit_deadline:
                     break
 
             if _interruptible_sleep(interval, task_queue._cancel_event):
@@ -602,7 +684,11 @@ def _finalize_subtitles_async(
                 task_queue.subtitle_job_remove(job_id)
                 return
 
-        _refresh_media_stem_targets(media_stem_to_strm_path, media_stem_to_target)
+        _refresh_media_stem_targets(
+            media_stem_to_strm_path,
+            media_stem_to_target,
+            stems_filter=required_stems,
+        )
         task_queue.subtitle_job_update_stage(job_id, "placing")
         logger.info(f"【P115ShareStrm】开始后台下载字幕，共 {len(subtitle_files)} 个: {share_code}")
         try:
@@ -628,9 +714,9 @@ def _finalize_subtitles_async(
             )
             return
         subtitle_count = len(downloaded_subtitle_paths)
-        place_ok, place_miss = 0, 0
+        place_ok, place_miss, place_fallback = 0, 0, 0
         if downloaded_subtitle_paths and configer.moviepilot_transfer:
-            place_ok, place_miss = _place_subtitles_to_targets(
+            place_ok, place_miss, place_fallback = _place_subtitles_to_targets(
                 subtitle_files,
                 downloaded_subtitle_paths,
                 media_files,
@@ -641,7 +727,7 @@ def _finalize_subtitles_async(
             # 未开启 MP 整理：放到本地 STRM 同目录
             for stem, strm_path in media_stem_to_strm_path.items():
                 media_stem_to_target.setdefault(stem, strm_path)
-            place_ok, place_miss = _place_subtitles_to_targets(
+            place_ok, place_miss, place_fallback = _place_subtitles_to_targets(
                 subtitle_files,
                 downloaded_subtitle_paths,
                 media_files,
@@ -659,6 +745,10 @@ def _finalize_subtitles_async(
         if subtitle_fail_count:
             msg += f"，下载失败 {subtitle_fail_count} 个"
         msg += f"\n放置成功: {place_ok}，未匹配目标: {place_miss}"
+        if place_fallback:
+            msg += f"\n整理记录缺失，已回退到 STRM 目录: {place_fallback} 个"
+        if place_miss:
+            msg += "\n未找到整理目标，字幕跳过"
         buttons = retry_btn if (subtitle_fail_count or place_miss) else None
         task_queue._notify(user_id, "【115分享STRM】字幕自动下载成功", msg, buttons=buttons)
         task_queue.subtitle_job_update_stage(job_id, "done")
