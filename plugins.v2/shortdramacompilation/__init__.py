@@ -42,7 +42,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -378,19 +378,32 @@ class shortdramacompilation(_PluginBase):
             runtimes = tmdb_info.get("episode_run_time") or []
             if isinstance(runtimes, list) and runtimes:
                 valid_runtimes = [float(r) for r in runtimes if float(r) > 0]
-                if valid_runtimes and all(r <= float(self._episode_duration) for r in valid_runtimes):
-                    logger.info(
-                        f"【短剧自动分类】策略 2 命中：TMDB 标注单集片长 {valid_runtimes} 分钟 ≤ 阈值 {self._episode_duration} -> 判定为 [短剧]"
-                    )
-                    self._update_cache(tmdb_id, title, True)
-                    return True
+                if valid_runtimes:
+                    if all(r <= float(self._episode_duration) for r in valid_runtimes):
+                        logger.info(
+                            f"【短剧自动分类】策略 2 命中：TMDB 标注单集片长 {valid_runtimes} 分钟 ≤ 阈值 {self._episode_duration} -> 判定为 [短剧]"
+                        )
+                        self._update_cache(tmdb_id, title, True)
+                        return True
+                    elif any(r > float(self._episode_duration) for r in valid_runtimes):
+                        logger.info(
+                            f"【短剧自动分类】策略 2 确定：TMDB 标注单集片长 {valid_runtimes} 分钟 > 阈值 {self._episode_duration} -> 确定为 [普通长剧]，终结后续探测"
+                        )
+                        self._update_cache(tmdb_id, title, False)
+                        return False
 
         # Step 3: 豆瓣单集片长解析匹配
         if self._enable_douban_runtime and mediainfo:
             douban_id = mediainfo.douban_id
             if douban_id:
                 douban_runtime = self.__get_douban_runtime(douban_id)
-                if 0 < douban_runtime <= float(self._episode_duration):
+                if douban_runtime > float(self._episode_duration):
+                    logger.info(
+                        f"【短剧自动分类】策略 3 确定：豆瓣标注单集片长 {douban_runtime} 分钟 > 阈值 {self._episode_duration} -> 确定为 [普通长剧]，终结后续探测"
+                    )
+                    self._update_cache(tmdb_id, title, False)
+                    return False
+                elif 0 < douban_runtime <= float(self._episode_duration):
                     logger.info(
                         f"【短剧自动分类】策略 3 命中：豆瓣标注单集片长 {douban_runtime} 分钟 ≤ 阈值 {self._episode_duration} -> 判定为 [短剧]"
                     )
