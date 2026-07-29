@@ -1,11 +1,15 @@
+import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import threading
 import time
+import urllib.request
+from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Dict, Tuple, Optional
+from typing import Any, List, Dict, Tuple, Optional, Union
 from urllib.parse import unquote
 
 from app.core.config import settings
@@ -34,11 +38,11 @@ class shortdramacompilation(_PluginBase):
     # 插件名称
     plugin_name = "短剧自动分类"
     # 插件描述
-    plugin_desc = "网络短剧自动分类到独立目录，支持STRM格式、整理预览直显及一次性直存。"
+    plugin_desc = "多策略自动分类微短剧到独立目录，支持平台ID匹配、TMDB/豆瓣片长、STRM/文件FFprobe探测及本地JSON结果缓存。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.0.5"
+    plugin_version = "0.1.0"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -56,6 +60,14 @@ class shortdramacompilation(_PluginBase):
     _category_dir = ""
     _category_name = "短剧"
     _episode_duration = 8
+    _enable_network_check = True
+    _short_drama_networks = "8020"
+    _enable_tmdb_runtime = True
+    _enable_douban_runtime = True
+    _enable_ffprobe = True
+    _enable_cache = True
+
+    _cache_data = {}
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -65,6 +77,51 @@ class shortdramacompilation(_PluginBase):
             self._category_dir = config.get("category_dir") or ""
             self._category_name = config.get("category_name") or "短剧"
             self._episode_duration = config.get("episode_duration") or 8
+            self._enable_network_check = config.get("enable_network_check") if config.get("enable_network_check") is not None else True
+            self._short_drama_networks = config.get("short_drama_networks") or "8020"
+            self._enable_tmdb_runtime = config.get("enable_tmdb_runtime") if config.get("enable_tmdb_runtime") is not None else True
+            self._enable_douban_runtime = config.get("enable_douban_runtime") if config.get("enable_douban_runtime") is not None else True
+            self._enable_ffprobe = config.get("enable_ffprobe") if config.get("enable_ffprobe") is not None else True
+            self._enable_cache = config.get("enable_cache") if config.get("enable_cache") is not None else True
+
+        self._load_cache()
+
+    @property
+    def _cache_file_path(self) -> Path:
+        cache_dir = settings.CONFIG_PATH / "plugins" / "shortdramacompilation"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir / "cache.json"
+
+    def _load_cache(self):
+        with lock:
+            path = self._cache_file_path
+            if path.exists():
+                try:
+                    self._cache_data = json.loads(path.read_text(encoding="utf-8"))
+                    logger.info(f"【短剧自动分类】成功加载本地 JSON 缓存，共记录 {len(self._cache_data)} 条剧集结果")
+                except Exception as e:
+                    logger.error(f"【短剧自动分类】读取缓存文件失败: {e}")
+                    self._cache_data = {}
+            else:
+                self._cache_data = {}
+
+    def _update_cache(self, tmdb_id: Union[int, str], title: str, is_short_drama: bool):
+        if not self._enable_cache or not tmdb_id:
+            return
+        key = str(tmdb_id)
+        with lock:
+            self._cache_data[key] = {
+                "title": title or "",
+                "is_short_drama": bool(is_short_drama),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            try:
+                self._cache_file_path.write_text(
+                    json.dumps(self._cache_data, ensure_ascii=False, indent=2),
+                    encoding="utf-8"
+                )
+            except Exception as e:
+                logger.error(f"【短剧自动分类】保存缓存文件失败: {e}")
 
     def get_state(self) -> bool:
         return True if self._enabled and (self._category_dir or self._category_name) and self._episode_duration else False
@@ -89,33 +146,31 @@ class shortdramacompilation(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'props': {'cols': 12, 'md': 4},
                                 'content': [
                                     {
                                         'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'enabled',
-                                            'label': '启用插件',
-                                        }
+                                        'props': {'model': 'enabled', 'label': '启用插件'}
                                     }
                                 ]
                             },
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'props': {'cols': 12, 'md': 4},
                                 'content': [
                                     {
                                         'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'notify',
-                                            'label': '发送消息通知',
-                                        }
+                                        'props': {'model': 'notify', 'label': '发送消息通知'}
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {'model': 'enable_cache', 'label': '持久化 JSON 缓存'}
                                     }
                                 ]
                             }
@@ -126,69 +181,31 @@ class shortdramacompilation(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3,
-                                },
+                                'props': {'cols': 12, 'md': 3},
                                 'content': [
                                     {
                                         'component': 'VTextField',
-                                        'props': {
-                                            'model': 'category_name',
-                                            'label': '二级分类名称',
-                                            'placeholder': '短剧'
-                                        }
+                                        'props': {'model': 'category_name', 'label': '二级分类名称', 'placeholder': '短剧'}
                                     }
                                 ]
                             },
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 4,
-                                },
+                                'props': {'cols': 12, 'md': 6},
                                 'content': [
                                     {
                                         'component': 'VTextField',
-                                        'props': {
-                                            'model': 'category_dir',
-                                            'label': '分类目录绝对路径',
-                                            'placeholder': '/media/短剧'
-                                        }
+                                        'props': {'model': 'category_dir', 'label': '分类目录绝对路径', 'placeholder': '/media/短剧'}
                                     }
                                 ]
                             },
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3,
-                                },
+                                'props': {'cols': 12, 'md': 3},
                                 'content': [
                                     {
                                         'component': 'VTextField',
-                                        'props': {
-                                            'model': 'episode_duration',
-                                            'label': '单集时长阈值（分钟）',
-                                            'placeholder': '8'
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 2,
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'delay',
-                                            'label': '入库延迟时间（秒）',
-                                            'placeholder': '0'
-                                        }
+                                        'props': {'model': 'delay', 'label': '入库延迟时间（秒）', 'placeholder': '0'}
                                     }
                                 ]
                             }
@@ -199,16 +216,84 @@ class shortdramacompilation(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
+                                'props': {'cols': 12, 'md': 3},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {'model': 'episode_duration', 'label': '单集时长阈值（分钟）', 'placeholder': '8'}
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 3},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {'model': 'enable_network_check', 'label': '开启平台ID匹配'}
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {'model': 'short_drama_networks', 'label': '短剧平台 ID 列表', 'placeholder': '8020'}
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {'model': 'enable_tmdb_runtime', 'label': '开启 TMDB 片长匹配'}
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {'model': 'enable_douban_runtime', 'label': '开启豆瓣片长匹配'}
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {'model': 'enable_ffprobe', 'label': '开启 FFprobe 探测(兜底)'}
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12},
                                 'content': [
                                     {
                                         'component': 'VAlert',
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '【全流程分类】小于单集时长的视频/STRM文件自动注入“短剧”分类。支持在MP【整理预览】中直接预览短剧路径，并一次性直存至短剧目录。需要系统安装FFmpeg。'
+                                            'text': '【多策略管道分类】1.TMDB播出平台ID -> 2.TMDB标注片长 -> 3.豆瓣标注片长 -> 4.FFprobe探测。判定结果自动存入 cache.json，下次整理直接 0ms 响应，支持手动在 cache.json 文件中修改判定结果。'
                                         }
                                     }
                                 ]
@@ -222,18 +307,149 @@ class shortdramacompilation(_PluginBase):
             "notify": True,
             "delay": '0',
             "category_name": '短剧',
-            "category_dir": '短剧',
-            "episode_duration": '8'
+            "category_dir": '',
+            "episode_duration": '8',
+            "enable_network_check": True,
+            "short_drama_networks": '8020',
+            "enable_tmdb_runtime": True,
+            "enable_douban_runtime": True,
+            "enable_ffprobe": True,
+            "enable_cache": True,
         }
 
     def get_page(self) -> List[dict]:
         pass
 
+    def check_is_short_drama(self, mediainfo: Optional[MediaInfo], video_path: Optional[str] = None) -> bool:
+        """
+        多策略判定入口（按优先级：缓存 -> 平台ID -> TMDB片长 -> 豆瓣片长 -> FFprobe探测）
+        """
+        if not self.get_state():
+            return False
+
+        tmdb_id = mediainfo.tmdb_id if mediainfo else None
+        title = mediainfo.title if mediainfo else ""
+
+        # Step 0: 查询本地 JSON 缓存 (0ms 响应)
+        if self._enable_cache and tmdb_id:
+            key = str(tmdb_id)
+            if key in self._cache_data:
+                cache_item = self._cache_data[key]
+                if isinstance(cache_item, dict) and "is_short_drama" in cache_item:
+                    res = bool(cache_item["is_short_drama"])
+                    logger.info(
+                        f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 本地缓存判定结果 -> {'[短剧]' if res else '[普通长剧]'}"
+                    )
+                    return res
+                elif isinstance(cache_item, bool):
+                    logger.info(
+                        f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 本地缓存判定结果 -> {'[短剧]' if cache_item else '[普通长剧]'}"
+                    )
+                    return cache_item
+
+        # 获取 tmdb_info
+        tmdb_info = None
+        if mediainfo and mediainfo.tmdb_info:
+            tmdb_info = mediainfo.tmdb_info
+        elif tmdb_id:
+            try:
+                from app.modules.themoviedb import TheMovieDbModule
+                tmdb_info = TheMovieDbModule().tmdb_info(tmdb_id, MediaType.TV)
+            except Exception as e:
+                logger.debug(f"【短剧自动分类】获取 TMDB {tmdb_id} 详情失败: {e}")
+
+        # Step 1: TMDB 播出平台 Network ID 匹配
+        if self._enable_network_check and tmdb_info:
+            networks = tmdb_info.get("networks") or []
+            if networks and isinstance(networks, list):
+                configured_nets = [s.strip() for s in str(self._short_drama_networks).split(",") if s.strip()]
+                for net in networks:
+                    net_id = str(net.get("id"))
+                    if net_id in configured_nets:
+                        net_name = net.get("name") or net_id
+                        logger.info(
+                            f"【短剧自动分类】策略 1 命中：TMDB 播出平台 '{net_name}' (ID: {net_id}) 属于短剧平台 -> 判定为 [短剧]"
+                        )
+                        self._update_cache(tmdb_id, title, True)
+                        return True
+
+        # Step 2: TMDB 单集片长 (S1E1 / episode_run_time) 匹配
+        if self._enable_tmdb_runtime and tmdb_info:
+            runtimes = tmdb_info.get("episode_run_time") or []
+            if isinstance(runtimes, list) and runtimes:
+                valid_runtimes = [float(r) for r in runtimes if float(r) > 0]
+                if valid_runtimes and all(r <= float(self._episode_duration) for r in valid_runtimes):
+                    logger.info(
+                        f"【短剧自动分类】策略 2 命中：TMDB 标注单集片长 {valid_runtimes} 分钟 ≤ 阈值 {self._episode_duration} -> 判定为 [短剧]"
+                    )
+                    self._update_cache(tmdb_id, title, True)
+                    return True
+
+        # Step 3: 豆瓣单集片长解析匹配
+        if self._enable_douban_runtime and mediainfo:
+            douban_id = mediainfo.douban_id
+            if douban_id:
+                douban_runtime = self.__get_douban_runtime(douban_id)
+                if 0 < douban_runtime <= float(self._episode_duration):
+                    logger.info(
+                        f"【短剧自动分类】策略 3 命中：豆瓣标注单集片长 {douban_runtime} 分钟 ≤ 阈值 {self._episode_duration} -> 判定为 [短剧]"
+                    )
+                    self._update_cache(tmdb_id, title, True)
+                    return True
+
+        # Step 4: FFprobe 媒体文件真实时长探测 (兜底)
+        if self._enable_ffprobe and video_path:
+            duration = self.__get_duration(str(video_path))
+            if duration > float(self._episode_duration):
+                logger.info(
+                    f"【短剧自动分类】策略 4 探测：FFprobe 文件片长 {duration} 分钟 > 阈值 {self._episode_duration} -> 判定为 [普通长剧]"
+                )
+                self._update_cache(tmdb_id, title, False)
+                return False
+            elif 0 < duration <= float(self._episode_duration):
+                logger.info(
+                    f"【短剧自动分类】策略 4 命中：FFprobe 文件片长 {duration} 分钟 ≤ 阈值 {self._episode_duration} -> 判定为 [短剧]"
+                )
+                self._update_cache(tmdb_id, title, True)
+                return True
+
+        # 终极处理：若确定了 tmdb_id，但未被判为短剧，则保存 False 结果到缓存
+        if tmdb_id:
+            self._update_cache(tmdb_id, title, False)
+        return False
+
+    def __get_douban_runtime(self, douban_id: Union[int, str]) -> float:
+        """
+        抓取豆瓣页面并解析 '单集片长'
+        """
+        url = f"https://movie.douban.com/subject/{douban_id}/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as response:
+                html = response.read().decode('utf-8', errors='ignore')
+                match = re.search(r'单集片长:?\s*</span>\s*([^<]+)', html)
+                if match:
+                    text = match.group(1).strip()
+                    min_match = re.search(r'(\d+)\s*分(?:\s*(\d+)\s*秒)?', text)
+                    if min_match:
+                        mins = float(min_match.group(1))
+                        secs = float(min_match.group(2)) if min_match.group(2) else 0.0
+                        return mins + (secs / 60.0)
+                    digit_match = re.search(r'(\d+(?:\.\d+)?)', text)
+                    if digit_match:
+                        return float(digit_match.group(1))
+        except Exception as e:
+            logger.debug(f"【短剧自动分类】获取豆瓣 {douban_id} 单集片长失败: {e}")
+        return 0.0
+
     @eventmanager.register(ChainEventType.TransferRenameBuild)
     def on_transfer_rename_build(self, event: Event):
         """
-        1. 重命名构建事件 Hook：在整理预览及实际整理渲染模板前，检测视频/STRM时长。
-        若属于短剧，注入 rename_dict["category"] = "短剧"，使预览与模板渲染直接生效。
+        1. 重命名构建事件 Hook：在整理预览及实际整理渲染模板前，识别短剧。
+        若属于短剧，注入 rename_dict["category"] = "短剧"。
         """
         if not self.get_state():
             return
@@ -247,16 +463,11 @@ class shortdramacompilation(_PluginBase):
         if not isinstance(rename_dict, dict):
             return
 
-        # 验证后缀
         if Path(source_path).suffix.lower() not in settings.RMT_MEDIAEXT:
             return
 
-        # 测算时长
-        duration = self.__get_duration(str(source_path))
-        if 0 < duration <= float(self._episode_duration):
-            logger.info(
-                f"【短剧自动分类】预览/整理上下文构建：源文件 {source_path} 识别时长 {duration} 分钟 ≤ 阈值 {self._episode_duration}，注入分类：{self._category_name}"
-            )
+        mediainfo = rename_dict.get("__mediainfo__")
+        if self.check_is_short_drama(mediainfo=mediainfo, video_path=str(source_path)):
             rename_dict["category"] = self._category_name
             if rename_dict.get("__mediainfo__"):
                 rename_dict["__mediainfo__"].category = self._category_name
@@ -264,8 +475,8 @@ class shortdramacompilation(_PluginBase):
     @eventmanager.register(ChainEventType.TransferRename)
     def on_transfer_rename(self, event: Event):
         """
-        1.2 重命名渲染改写 Hook：在整理预览及实际整理计算渲染路径后，改写相对路径，
-        确保【整理预览】界面直接展示短剧分类目录路径。
+        1.2 重命名渲染改写 Hook：在整理预览及实际整理计算渲染路径后，改写为短剧绝对路径，
+        确保【整理预览】界面直接展示短剧分类目录绝对路径。
         """
         if not self.get_state() or not self._category_dir:
             return
@@ -278,22 +489,22 @@ class shortdramacompilation(_PluginBase):
         if not source_path:
             return
 
-        # 验证后缀
         if Path(source_path).suffix.lower() not in settings.RMT_MEDIAEXT:
             return
 
-        # 测算时长
-        duration = self.__get_duration(str(source_path))
-        if 0 < duration <= float(self._episode_duration):
+        mediainfo = data.rename_dict.get("__mediainfo__") if data.rename_dict else None
+        if self.check_is_short_drama(mediainfo=mediainfo, video_path=str(source_path)):
+            if data.rename_dict and data.rename_dict.get("__mediainfo__"):
+                data.rename_dict["__mediainfo__"].category = self._category_name
+
             category_dir_path = Path(self._category_dir)
             current_base_path = Path(data.path)
 
-            # 如果当前基础路径未包含短剧目录
             if not str(current_base_path).startswith(str(category_dir_path)):
                 try:
                     clean_abs_target = (category_dir_path / data.render_str).as_posix()
                     logger.info(
-                        f"【短剧自动分类】整理预览/重命名改写：源文件 {source_path} 识别时长 {duration} 分钟 ≤ 阈值 {self._episode_duration}，直显短剧绝对路径 -> {clean_abs_target}"
+                        f"【短剧自动分类】整理预览/重命名改写：源文件 {source_path} 识别为短剧，直显短剧绝对路径 -> {clean_abs_target}"
                     )
                     data.updated = True
                     data.updated_str = clean_abs_target
@@ -316,16 +527,13 @@ class shortdramacompilation(_PluginBase):
             return
 
         source_path = data.fileitem.path
-        duration = self.__get_duration(str(source_path))
-        if 0 < duration <= float(self._episode_duration):
-            # 修正媒体类别为“短剧”，使 MP 入库通知卡片中的“类别：”由“国漫/国产剧”更新为“短剧”
+        if self.check_is_short_drama(mediainfo=data.mediainfo, video_path=str(source_path)):
             if data.mediainfo:
                 data.mediainfo.category = self._category_name
 
             category_dir_path = Path(self._category_dir)
             target_path = data.target_path
 
-            # 如果当前计算出的目标路径尚未包含短剧目录，进行路径改写
             if not str(target_path).startswith(str(category_dir_path)):
                 tv_name = data.mediainfo.title if (data.mediainfo and data.mediainfo.title) else None
                 parts = target_path.parts
@@ -370,7 +578,6 @@ class shortdramacompilation(_PluginBase):
         target_path = sample_file.parent
         category_dir_path = Path(self._category_dir)
 
-        # 已在短剧目录，无需再次移动
         if str(target_path).startswith(str(category_dir_path)):
             if self._notify:
                 self.post_message(
@@ -380,7 +587,6 @@ class shortdramacompilation(_PluginBase):
                 )
             return
 
-        # 若不在短剧目录，进行后置兜底移动
         with lock:
             if len(file_list) > 3:
                 check_files = random.choices(file_list, k=3)
@@ -388,21 +594,10 @@ class shortdramacompilation(_PluginBase):
                 check_files = file_list
 
             need_category = False
-            valid_durations = []
             for file in check_files:
-                duration = self.__get_duration(file)
-                if duration <= 0:
-                    logger.warning(f"【短剧自动分类】{file} 无法获取有效时长（可能超时或链接不可达），跳过分类移动")
-                    valid_durations.clear()
+                if self.check_is_short_drama(mediainfo=mediainfo, video_path=file):
+                    need_category = True
                     break
-                if duration > float(self._episode_duration):
-                    logger.info(f"【短剧自动分类】{file} 时长 {duration} 分钟 > 阈值 {self._episode_duration} 分钟，判定为普通长剧，不移动")
-                    valid_durations.clear()
-                    break
-                valid_durations.append(duration)
-
-            if valid_durations:
-                need_category = True
 
             if need_category:
                 if self._delay and float(self._delay) > 0:

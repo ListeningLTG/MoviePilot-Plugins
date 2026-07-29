@@ -248,11 +248,12 @@
   "shortdramacompilation": {
     "name": "短剧自动分类",
     "description": "网络短剧自动分类到独立目录，支持STRM格式、整理预览直显及一次性直存。",
-    "version": "0.0.5",
+    "version": "0.1.0",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v0.1.0": "重大升级：引入多策略管道(平台ID/TMDB片长/豆瓣片长/FFprobe)与TMDB ID双向可编辑JSON缓存",
       "v0.0.5": "同步更新通知卡片中的类别为短剧，插件文本通知受通知开关控制",
       "v0.0.4": "完美消除预览路径中的 /../ 符号，直接显示短剧绝对路径",
       "v0.0.3": "新增整理预览界面的短剧目录直显改写",
