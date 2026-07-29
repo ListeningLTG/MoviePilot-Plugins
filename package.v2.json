@@ -244,5 +244,16 @@
       "v2.5.0": "优化",
       "v2.2.0": "首次提交代码"
     }
+  },
+  "shortdramacompilation": {
+    "name": "短剧自动分类",
+    "description": "网络短剧自动分类到独立目录，支持STRM格式、整理预览直显及一次性直存。",
+    "version": "0.0.1",
+    "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg",
+    "author": "ListeningLTG",
+    "level": 1,
+    "history": {
+      "v1.0.0": "短剧自动分类，首次提交"
+    }
   }
 }
