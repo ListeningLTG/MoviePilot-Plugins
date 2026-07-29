@@ -36,7 +36,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.0.1"
+    plugin_version = "0.0.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -280,8 +280,20 @@ class shortdramacompilation(_PluginBase):
 
             # 如果当前计算出的目标路径尚未包含短剧目录，进行路径改写
             if not str(target_path).startswith(str(category_dir_path)):
-                tv_name = data.mediainfo.title if (data.mediainfo and data.mediainfo.title) else target_path.parent.name
-                new_target = category_dir_path / tv_name / target_path.name
+                tv_name = data.mediainfo.title if (data.mediainfo and data.mediainfo.title) else None
+                parts = target_path.parts
+                idx = -1
+                if tv_name:
+                    for i, part in enumerate(parts):
+                        if part == tv_name:
+                            idx = i
+                            break
+                if idx != -1:
+                    rel_subpath = Path(*parts[idx:])
+                else:
+                    rel_subpath = Path(target_path.name)
+
+                new_target = category_dir_path / rel_subpath
                 logger.info(f"【短剧自动分类】整理拦截重定向：目标路径由 {target_path} 修正为 {new_target}")
                 data.target_path = new_target
 
@@ -328,18 +340,28 @@ class shortdramacompilation(_PluginBase):
             else:
                 check_files = file_list
 
-            need_category = True
+            need_category = False
+            valid_durations = []
             for file in check_files:
                 duration = self.__get_duration(file)
-                if duration > float(self._episode_duration):
-                    need_category = False
+                if duration <= 0:
+                    logger.warning(f"【短剧自动分类】{file} 无法获取有效时长（可能超时或链接不可达），跳过分类移动")
+                    valid_durations.clear()
                     break
+                if duration > float(self._episode_duration):
+                    logger.info(f"【短剧自动分类】{file} 时长 {duration} 分钟 > 阈值 {self._episode_duration} 分钟，判定为普通长剧，不移动")
+                    valid_durations.clear()
+                    break
+                valid_durations.append(duration)
+
+            if valid_durations:
+                need_category = True
 
             if need_category:
                 if self._delay and float(self._delay) > 0:
                     time.sleep(float(self._delay))
 
-                logger.info(f"【短剧自动分类】兜底机制触发：{target_path} 开始二次移动...")
+                logger.info(f"【短剧自动分类】确认属于短剧，兜底机制触发：{target_path} 开始二次移动...")
                 self.__move_files(target_path=target_path)
 
     @classmethod
@@ -380,6 +402,8 @@ class shortdramacompilation(_PluginBase):
 
         cmd = [
             'ffprobe', '-v', 'error',
+            '-probesize', '1000000',
+            '-analyzeduration', '2000000',
             '-show_entries', 'format=duration',
             '-of', 'default=noprint_wrappers=1:nokey=1',
             probe_target
