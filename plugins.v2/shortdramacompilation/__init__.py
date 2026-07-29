@@ -1,3 +1,4 @@
+import os
 import random
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ from app.plugins import _PluginBase
 from app.schemas import (
     TransferInfo,
     TransferRenameBuildEventData,
+    TransferRenameEventData,
     TransferInterceptEventData,
 )
 from app.schemas.types import (
@@ -36,7 +38,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.0.2"
+    plugin_version = "0.0.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -256,6 +258,46 @@ class shortdramacompilation(_PluginBase):
                 f"【短剧自动分类】预览/整理上下文构建：源文件 {source_path} 识别时长 {duration} 分钟 ≤ 阈值 {self._episode_duration}，注入分类：{self._category_name}"
             )
             rename_dict["category"] = self._category_name
+
+    @eventmanager.register(ChainEventType.TransferRename)
+    def on_transfer_rename(self, event: Event):
+        """
+        1.2 重命名渲染改写 Hook：在整理预览及实际整理计算渲染路径后，改写相对路径，
+        确保【整理预览】界面直接展示短剧分类目录路径。
+        """
+        if not self.get_state() or not self._category_dir:
+            return
+        data = event.event_data
+        if not isinstance(data, TransferRenameEventData):
+            return
+        if not data.path or not data.render_str:
+            return
+        source_path = data.source_path or (data.source_item.path if data.source_item else None)
+        if not source_path:
+            return
+
+        # 验证后缀
+        if Path(source_path).suffix.lower() not in settings.RMT_MEDIAEXT:
+            return
+
+        # 测算时长
+        duration = self.__get_duration(str(source_path))
+        if 0 < duration <= float(self._episode_duration):
+            category_dir_path = Path(self._category_dir)
+            current_base_path = Path(data.path)
+
+            # 如果当前基础路径未包含短剧目录
+            if not str(current_base_path).startswith(str(category_dir_path)):
+                try:
+                    rel_dir = os.path.relpath(category_dir_path, current_base_path)
+                    new_render_str = (Path(rel_dir) / data.render_str).as_posix()
+                    logger.info(
+                        f"【短剧自动分类】整理预览重命名改写：源文件 {source_path} 识别时长 {duration} 分钟 ≤ 阈值 {self._episode_duration}，修正预览路径相对前缀 -> {new_render_str}"
+                    )
+                    data.updated = True
+                    data.updated_str = new_render_str
+                except Exception as e:
+                    logger.error(f"【短剧自动分类】改写重命名相对路径失败: {e}")
 
     @eventmanager.register(ChainEventType.TransferIntercept)
     def on_transfer_intercept(self, event: Event):
