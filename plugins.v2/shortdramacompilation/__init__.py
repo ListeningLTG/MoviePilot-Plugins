@@ -38,7 +38,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.0.3"
+    plugin_version = "0.0.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -289,15 +289,14 @@ class shortdramacompilation(_PluginBase):
             # 如果当前基础路径未包含短剧目录
             if not str(current_base_path).startswith(str(category_dir_path)):
                 try:
-                    rel_dir = os.path.relpath(category_dir_path, current_base_path)
-                    new_render_str = (Path(rel_dir) / data.render_str).as_posix()
+                    clean_abs_target = (category_dir_path / data.render_str).as_posix()
                     logger.info(
-                        f"【短剧自动分类】整理预览重命名改写：源文件 {source_path} 识别时长 {duration} 分钟 ≤ 阈值 {self._episode_duration}，修正预览路径相对前缀 -> {new_render_str}"
+                        f"【短剧自动分类】整理预览/重命名改写：源文件 {source_path} 识别时长 {duration} 分钟 ≤ 阈值 {self._episode_duration}，直显短剧绝对路径 -> {clean_abs_target}"
                     )
                     data.updated = True
-                    data.updated_str = new_render_str
+                    data.updated_str = clean_abs_target
                 except Exception as e:
-                    logger.error(f"【短剧自动分类】改写重命名相对路径失败: {e}")
+                    logger.error(f"【短剧自动分类】改写重命名路径失败: {e}")
 
     @eventmanager.register(ChainEventType.TransferIntercept)
     def on_transfer_intercept(self, event: Event):
