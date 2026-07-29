@@ -28,7 +28,7 @@ from app.utils.system import SystemUtils
 lock = threading.Lock()
 
 
-class ShortDramaCompilation(_PluginBase):
+class shortdramacompilation(_PluginBase):
     # 插件名称
     plugin_name = "短剧自动分类"
     # 插件描述
