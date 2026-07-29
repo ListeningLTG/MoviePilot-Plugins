@@ -38,7 +38,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.0.4"
+    plugin_version = "0.0.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -258,6 +258,8 @@ class shortdramacompilation(_PluginBase):
                 f"【短剧自动分类】预览/整理上下文构建：源文件 {source_path} 识别时长 {duration} 分钟 ≤ 阈值 {self._episode_duration}，注入分类：{self._category_name}"
             )
             rename_dict["category"] = self._category_name
+            if rename_dict.get("__mediainfo__"):
+                rename_dict["__mediainfo__"].category = self._category_name
 
     @eventmanager.register(ChainEventType.TransferRename)
     def on_transfer_rename(self, event: Event):
@@ -316,6 +318,10 @@ class shortdramacompilation(_PluginBase):
         source_path = data.fileitem.path
         duration = self.__get_duration(str(source_path))
         if 0 < duration <= float(self._episode_duration):
+            # 修正媒体类别为“短剧”，使 MP 入库通知卡片中的“类别：”由“国漫/国产剧”更新为“短剧”
+            if data.mediainfo:
+                data.mediainfo.category = self._category_name
+
             category_dir_path = Path(self._category_dir)
             target_path = data.target_path
 
