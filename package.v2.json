@@ -271,11 +271,12 @@
   "OrganizeAnalyzer": {
     "name": "媒体整理异常分析",
     "description": "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、整理失败及重集等异常。",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "icon": "mdi-file-find-outline",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.3": "优化",
       "v1.0.2": "优化",
       "v1.0.1": "修复后台任务执行模式选项",
       "v1.0.0": "媒体整理异常分析插件，首次提交"

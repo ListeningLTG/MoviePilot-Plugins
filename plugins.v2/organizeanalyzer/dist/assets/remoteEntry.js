@@ -1,5 +1,5 @@
 // MoviePilot V2 Vue Remote Module Federation Entry for OrganizeAnalyzer
-import { h, ref, onMounted, computed, defineComponent } from 'vue';
+import { h, ref, onMounted, defineComponent } from 'vue';
 
 const AppPage = defineComponent({
   name: 'OrganizeAnalyzerAppPage',
@@ -58,7 +58,7 @@ const AppPage = defineComponent({
           };
         }
       } catch (err) {
-        console.error('Fetch stats failed', err);
+        console.error('[OrganizeAnalyzer] Fetch stats failed', err);
       }
     };
 
@@ -76,7 +76,7 @@ const AppPage = defineComponent({
           exceptions.value = res.data;
         }
       } catch (err) {
-        console.error('Fetch exceptions failed', err);
+        console.error('[OrganizeAnalyzer] Fetch exceptions failed', err);
       } finally {
         loading.value = false;
       }
@@ -89,7 +89,7 @@ const AppPage = defineComponent({
         await fetchStats();
         await fetchExceptions();
       } catch (err) {
-        console.error('Trigger analyze failed', err);
+        console.error('[OrganizeAnalyzer] Trigger analyze failed', err);
       } finally {
         analyzing.value = false;
       }
@@ -101,7 +101,7 @@ const AppPage = defineComponent({
         await fetchStats();
         await fetchExceptions();
       } catch (err) {
-        console.error('Ignore item failed', err);
+        console.error('[OrganizeAnalyzer] Ignore item failed', err);
       }
     };
 
@@ -111,7 +111,7 @@ const AppPage = defineComponent({
         await fetchStats();
         await fetchExceptions();
       } catch (err) {
-        console.error('Clear ignored failed', err);
+        console.error('[OrganizeAnalyzer] Clear ignored failed', err);
       }
     };
 
@@ -121,7 +121,7 @@ const AppPage = defineComponent({
         showCronDialog.value = false;
         await fetchStats();
       } catch (err) {
-        console.error('Save cron config failed', err);
+        console.error('[OrganizeAnalyzer] Save cron config failed', err);
       }
     };
 
@@ -384,20 +384,25 @@ const AppPage = defineComponent({
   }
 });
 
+// Module Factory matching Vite / Module Federation contract:
+// container.get(module) returns a Promise resolving to a factory function () => Promise<{ default: Component }>
+const moduleFactory = () => Promise.resolve({ default: AppPage });
+
 const moduleMap = {
-  './AppPage': () => Promise.resolve({ default: AppPage }),
-  './Page': () => Promise.resolve({ default: AppPage }),
-  './Config': () => Promise.resolve({ default: AppPage }),
-  './Dashboard': () => Promise.resolve({ default: AppPage }),
-  'AppPage': () => Promise.resolve({ default: AppPage }),
-  'Page': () => Promise.resolve({ default: AppPage })
+  './AppPage': () => Promise.resolve(moduleFactory),
+  './AppPageMain': () => Promise.resolve(moduleFactory),
+  './AppPageOrganizeAnalyzer': () => Promise.resolve(moduleFactory),
+  './AppPageStart': () => Promise.resolve(moduleFactory),
+  './Page': () => Promise.resolve(moduleFactory),
+  './Config': () => Promise.resolve(moduleFactory),
+  './Dashboard': () => Promise.resolve(moduleFactory),
+  'AppPage': () => Promise.resolve(moduleFactory),
+  'Page': () => Promise.resolve(moduleFactory)
 };
 
 export const get = (module) => {
-  if (moduleMap[module]) {
-    return moduleMap[module]();
-  }
-  return Promise.resolve({ default: AppPage });
+  const getter = moduleMap[module] || (() => Promise.resolve(moduleFactory));
+  return getter();
 };
 
 export const init = (shareScope) => {

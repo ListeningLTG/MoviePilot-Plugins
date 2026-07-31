@@ -17,7 +17,7 @@ class OrganizeAnalyzer(_PluginBase):
     plugin_name = "媒体整理异常分析"
     plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、整理失败及重集等异常。"
     plugin_icon = "mdi-file-find-outline"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "organizeanalyzer_"
     plugin_order = 15
@@ -42,19 +42,21 @@ class OrganizeAnalyzer(_PluginBase):
         self._cron_mode = config.get("cron_mode", "incremental")
         self._notify = bool(config.get("notify", False))
         self._storage = AnalyzerStorage(self.get_data_path())
+        logger.info(f"【{self.plugin_name}】初始化完成 (版本: v{self.plugin_version}, 状态: {'启用' if self._enabled else '禁用'}, 定时: {'开启' if self._cron_enabled else '关闭'}[{self._cron_mode}])")
 
     def get_state(self) -> bool:
         return self._enabled
 
     def get_render_mode(self) -> Tuple[str, str]:
         """声明支持 Vue 动态模块联邦模式"""
+        logger.debug(f"【{self.plugin_name}】提供 Vue 渲染模式资源路径: ('vue', 'dist/assets')")
         return "vue", "dist/assets"
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
         """在 MoviePilot 左侧边栏【整理】分类下挂载独立菜单"""
         if not self.get_state():
             return []
-        return [
+        nav_items = [
             {
                 "nav_key": "main",
                 "title": "异常整理分析",
@@ -64,6 +66,8 @@ class OrganizeAnalyzer(_PluginBase):
                 "order": 20,
             }
         ]
+        logger.info(f"【{self.plugin_name}】聚合侧边栏导航菜单: {nav_items}")
+        return nav_items
 
     def get_dashboard(self, key: str = None, **kwargs) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], List[dict]]]:
         """不向 MP 首页仪表盘添加小卡片"""
@@ -76,9 +80,11 @@ class OrganizeAnalyzer(_PluginBase):
     def get_service(self) -> List[Dict[str, Any]]:
         """注册后台定时周期服务"""
         if not self.get_state() or not self._cron_enabled or not self._cron:
+            logger.info(f"【{self.plugin_name}】未开启定时服务，跳过 Cron 注册")
             return []
         try:
             mode_desc = "增量" if self._cron_mode == "incremental" else "全量"
+            logger.info(f"【{self.plugin_name}】注册后台 Cron 定时服务: [{self._cron}] (模式: {mode_desc})")
             return [
                 {
                     "id": "OrganizeAnalyzer.CronService",
@@ -113,24 +119,26 @@ class OrganizeAnalyzer(_PluginBase):
         if mode == "incremental":
             date_after = current_data.get("last_run_time") or None
 
-        logger.info(f"【{self.plugin_name}】开始执行 [{mode}] 分析... (上次时间: {date_after or '全量'})")
+        logger.info(f"【{self.plugin_name}】🚀 开始执行 [{mode}] 分析... (检索过滤时间: {date_after or '全量扫描'})")
         histories = self._query_transfer_histories(date_after=date_after)
+        logger.info(f"【{self.plugin_name}】从数据库读取到了 {len(histories)} 条 TransferHistory 历史记录")
 
         exceptions, max_id = OrganizeAnalyzerCore.analyze(histories, self._config)
         result_data = self._storage.update_analysis_results(exceptions, mode=mode, max_history_id=max_id)
 
         summary = result_data.get("summary", {})
-        logger.info(f"【{self.plugin_name}】分析完成！未处理异常总数: {summary.get('total', 0)}")
+        logger.info(f"【{self.plugin_name}】✅ 分析完成！本次识别到未处理异常总数: {summary.get('total', 0)} (多文件覆盖: {summary.get('merged_files', 0)}, 英文未中文化: {summary.get('english_title', 0)}, 未识别: {summary.get('unidentified', 0)}, 失败: {summary.get('failed_status', 0)}, 重复集: {summary.get('duplicate_episode', 0)})")
 
         # 消息推送
         if self._notify and summary.get("total", 0) > 0:
+            logger.info(f"【{self.plugin_name}】正在触发系统消息通知...")
             self._send_notification(summary, result_data.get("exceptions", []), mode=mode)
 
         return result_data
 
     def run_cron_analysis(self):
         """定时任务回调"""
-        logger.info(f"【{self.plugin_name}】触发定时[{self._cron_mode}]分析...")
+        logger.info(f"【{self.plugin_name}】⏰ 触发定时 [{self._cron_mode}] 巡检分析...")
         self.run_analysis(mode=self._cron_mode)
 
     def _send_notification(self, summary: dict, exceptions: list, mode: str = "incremental"):
@@ -214,6 +222,7 @@ class OrganizeAnalyzer(_PluginBase):
 
     # --- API 实现 ---
     async def api_get_stats(self) -> dict:
+        logger.info(f"【{self.plugin_name}】API 请求 [GET /stats]")
         if not self._storage:
             self._storage = AnalyzerStorage(self.get_data_path())
         data = self._storage.load_data()
@@ -231,6 +240,7 @@ class OrganizeAnalyzer(_PluginBase):
         }
 
     async def api_get_exceptions(self, status: str = "active", type_filter: str = "", keyword: str = "") -> dict:
+        logger.info(f"【{self.plugin_name}】API 请求 [GET /exceptions] (status={status}, type={type_filter}, kw={keyword})")
         if not self._storage:
             self._storage = AnalyzerStorage(self.get_data_path())
         data = self._storage.load_data()
@@ -259,6 +269,7 @@ class OrganizeAnalyzer(_PluginBase):
         }
 
     async def api_run_analyze(self, mode: str = "incremental") -> dict:
+        logger.info(f"【{self.plugin_name}】API 请求 [POST /analyze] (mode={mode})")
         result = self.run_analysis(mode=mode)
         return {
             "code": 0,
@@ -267,6 +278,7 @@ class OrganizeAnalyzer(_PluginBase):
         }
 
     async def api_ignore_exception(self, key: str = "") -> dict:
+        logger.info(f"【{self.plugin_name}】API 请求 [POST /ignore] (key={key})")
         if not key:
             return {"code": 400, "msg": "key 参数不能为空"}
         if not self._storage:
@@ -275,12 +287,14 @@ class OrganizeAnalyzer(_PluginBase):
         return {"code": 0 if ok else 500, "msg": "操作成功" if ok else "保存失败"}
 
     async def api_clear_ignored(self) -> dict:
+        logger.info(f"【{self.plugin_name}】API 请求 [POST /clear_ignored]")
         if not self._storage:
             self._storage = AnalyzerStorage(self.get_data_path())
         ok = self._storage.clear_ignored()
         return {"code": 0 if ok else 500, "msg": "已清空忽略标记" if ok else "保存失败"}
 
     async def api_get_cron_config(self) -> dict:
+        logger.info(f"【{self.plugin_name}】API 请求 [GET /cron_config]")
         return {
             "code": 0,
             "msg": "success",
@@ -293,6 +307,7 @@ class OrganizeAnalyzer(_PluginBase):
         }
 
     async def api_save_cron_config(self, cron_enabled: bool = True, cron: str = "0 3 * * *", cron_mode: str = "incremental", notify: bool = False) -> dict:
+        logger.info(f"【{self.plugin_name}】API 请求 [POST /save_cron_config] (enabled={cron_enabled}, cron={cron}, mode={cron_mode}, notify={notify})")
         self._cron_enabled = bool(cron_enabled)
         self._cron = cron or "0 3 * * *"
         self._cron_mode = cron_mode if cron_mode in ["incremental", "full"] else "incremental"
@@ -376,7 +391,7 @@ class OrganizeAnalyzer(_PluginBase):
                                             "label": "定时分析执行模式",
                                             "items": [
                                                 {"title": "增量分析 (推荐，高效速度快)", "value": "incremental"},
-                                                {"title": "全量分析 (完整重新检索)", "value": "full"},
+                                                {"title": "全量分析 (重新完整检索)", "value": "full"},
                                             ],
                                         },
                                     }
@@ -547,4 +562,5 @@ class OrganizeAnalyzer(_PluginBase):
 
     def stop_service(self):
         """停止插件"""
+        logger.info(f"【{self.plugin_name}】停止插件后台服务")
         pass
