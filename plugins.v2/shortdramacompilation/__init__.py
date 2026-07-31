@@ -42,7 +42,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.2.2"
+    plugin_version = "0.2.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -399,10 +399,24 @@ class shortdramacompilation(_PluginBase):
 
         # Step B: 24 小时超时或首次获取，从 mediainfo 或 TMDB 刷新判断
         is_anime = False
-        if mediainfo and mediainfo.genre:
-            genres = [str(g).lower() for g in mediainfo.genre]
-            if any(g in ["动画", "animation", "anime", "短片"] for g in genres):
+        if mediainfo:
+            genre_ids = getattr(mediainfo, "genre_ids", None) or []
+            if 16 in genre_ids or "16" in [str(i) for i in genre_ids]:
                 is_anime = True
+            else:
+                genres = getattr(mediainfo, "genres", None) or []
+                for g in genres:
+                    if isinstance(g, dict):
+                        g_id = g.get("id")
+                        g_name = str(g.get("name", "")).lower()
+                        if g_id == 16 or any(kw in g_name for kw in ["动画", "animation", "anime", "短片"]):
+                            is_anime = True
+                            break
+                    elif isinstance(g, (str, int)):
+                        g_str = str(g).lower()
+                        if g_str == "16" or any(kw in g_str for kw in ["动画", "animation", "anime", "短片"]):
+                            is_anime = True
+                            break
 
         if not is_anime and tmdb_id:
             try:

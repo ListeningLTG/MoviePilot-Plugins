@@ -248,11 +248,12 @@
   "shortdramacompilation": {
     "name": "短剧自动分类",
     "description": "网络短剧自动分类到独立目录，支持STRM格式、整理预览直显及一次性直存。",
-    "version": "0.2.2",
+    "version": "0.2.3",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v0.2.3": "紧急修复：修复 MoviePilot 新版 MediaInfo 对象中无 genre 属性导致的 AttributeError，安全使用 genres 与 genre_ids",
       "v0.2.2": "修复预览改写：解除未配置 category_dir 时对预览/拦截 Hook 的限制，实现未设绝对路径时自动将默认二级分类(如国产剧)动态替换为短剧分类",
       "v0.2.1": "紧急修复：增加 self.name 属性与 data.source 字符串赋值，彻底解决整理入库时触发 'shortdramacompilation object has no attribute name' 异常报错",
       "v0.2.0": "重大升级：新增动画短剧独立分类目录路由，支持24小时TTL自动刷新TMDB动画类型缓存",
