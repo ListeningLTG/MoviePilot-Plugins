@@ -384,15 +384,25 @@ const AppPage = defineComponent({
   }
 });
 
-// Module Federation API Export
-export const get = async (moduleName) => {
-  if (moduleName === './AppPage' || moduleName === 'AppPage') {
-    return () => ({ default: AppPage });
-  }
-  return () => ({ default: AppPage });
+const moduleMap = {
+  './AppPage': () => Promise.resolve({ default: AppPage }),
+  './Page': () => Promise.resolve({ default: AppPage }),
+  './Config': () => Promise.resolve({ default: AppPage }),
+  './Dashboard': () => Promise.resolve({ default: AppPage }),
+  'AppPage': () => Promise.resolve({ default: AppPage }),
+  'Page': () => Promise.resolve({ default: AppPage })
 };
 
-export const init = async () => {};
+export const get = (module) => {
+  if (moduleMap[module]) {
+    return moduleMap[module]();
+  }
+  return Promise.resolve({ default: AppPage });
+};
+
+export const init = (shareScope) => {
+  return Promise.resolve();
+};
 
 export default {
   get,
