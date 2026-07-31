@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 from apscheduler.triggers.cron import CronTrigger
@@ -17,7 +18,7 @@ class OrganizeAnalyzer(_PluginBase):
     plugin_name = "媒体整理异常分析"
     plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、整理失败及重集等异常。"
     plugin_icon = "mdi-file-find-outline"
-    plugin_version = "1.1.4"
+    plugin_version = "1.1.5"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "organizeanalyzer_"
     plugin_order = 15
@@ -296,7 +297,15 @@ class OrganizeAnalyzer(_PluginBase):
 
         # 排序支持
         if sort_by == "file_count":
-            filtered.sort(key=lambda x: int(x.get("file_count", 1)), reverse=(sort_order == "desc"))
+            def _get_fc(item):
+                if "file_count" in item and item["file_count"] is not None:
+                    return int(item["file_count"])
+                src = str(item.get("src") or "")
+                detail = str(item.get("detail") or "")
+                m = re.search(r"(\d+)\s*个源文件", src) or re.search(r"(\d+)\s*个源文件", detail) or re.search(r"(\d+)\s*个不同的目标文件", detail)
+                return int(m.group(1)) if m else 1
+
+            filtered.sort(key=_get_fc, reverse=(sort_order == "desc"))
         elif sort_by == "date":
             filtered.sort(key=lambda x: str(x.get("date") or ""), reverse=(sort_order == "desc"))
 

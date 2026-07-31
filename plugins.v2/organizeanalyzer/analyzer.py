@@ -117,19 +117,34 @@ class OrganizeAnalyzerCore:
         # 2. 检测未识别 / TMDB缺失 (detect_unidentified)
         if detect_unidentified:
             for r in records:
-                is_unk = not r["tmdbid"] or r["tmdbid"] == 0 or "未知" in r["title"] or "Unknown" in r["title"]
+                title = r["title"] or ""
+                has_tmdbid = r["tmdbid"] and int(r["tmdbid"]) > 0
+                if has_tmdbid:
+                    # 有有效 TMDB ID 则已识别，不进行标记（避免误报"未知死亡"等带"未知"的正常标题）
+                    is_unk = False
+                else:
+                    # 无 TMDB ID 时，进一步用标题关键字兜底：标题为空、纯"未知"、或 Unknown
+                    title_strip = title.strip()
+                    is_unk = (
+                        not title_strip
+                        or title_strip in ("未知", "Unknown", "unknown")
+                        or title_strip.lower() == "unknown"
+                    )
+                    # 也接受任何 TMDB ID 缺失的情况（无论标题如何），因为核心就是 TMDB 匹配失败
+                    is_unk = True
+
                 if is_unk:
                     key = cls._generate_key("unidentified", str(r["id"]))
                     exceptions.append({
                         "key": key,
                         "type": "unidentified",
                         "type_name": "未识别/TMDB缺失",
-                        "title": r["title"] or "未知",
+                        "title": title or "未知",
                         "history_id": r["id"],
                         "src": r["src"],
                         "dest": r["dest"],
                         "date": r["date"],
-                        "detail": f"TMDB ID: {r['tmdbid'] or '缺失'}, 整理标题: {r['title']}",
+                        "detail": f"TMDB ID: {r['tmdbid'] or '缺失'}, 整理标题: {title}",
                         "status": "active"
                     })
 
