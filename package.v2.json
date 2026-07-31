@@ -272,7 +272,7 @@
     "name": "媒体整理异常分析",
     "description": "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、整理失败及重集等异常。",
     "version": "1.0.0",
-    "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/main/icons/organize_analyzer.png",
+    "icon": "mdi-file-find-outline",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
