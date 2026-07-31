@@ -42,7 +42,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -105,7 +105,15 @@ class shortdramacompilation(_PluginBase):
             else:
                 self._cache_data = {}
 
-    def _update_cache(self, tmdb_id: Union[int, str], title: str, is_short_drama: bool):
+    def _update_cache(
+        self,
+        tmdb_id: Union[int, str],
+        title: str,
+        is_short_drama: bool,
+        strategy: str = "",
+        strategy_type: str = "runtime",
+        runtime: float = 0.0,
+    ):
         if not self._enable_cache or not tmdb_id:
             return
         key = str(tmdb_id)
@@ -113,6 +121,9 @@ class shortdramacompilation(_PluginBase):
             self._cache_data[key] = {
                 "title": title or "",
                 "is_short_drama": bool(is_short_drama),
+                "strategy": strategy or "",
+                "strategy_type": strategy_type or "runtime",
+                "runtime": round(float(runtime), 1) if runtime else 0.0,
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             try:
@@ -313,7 +324,6 @@ class shortdramacompilation(_PluginBase):
             "short_drama_networks": '8020',
             "enable_tmdb_runtime": True,
             "enable_douban_runtime": True,
-            "enable_ffprobe": True,
             "enable_cache": True,
         }
 
@@ -327,25 +337,41 @@ class shortdramacompilation(_PluginBase):
         if not self.get_state():
             return False
 
+        if mediainfo and mediainfo.type and mediainfo.type != MediaType.TV:
+            return False
+
         tmdb_id = mediainfo.tmdb_id if mediainfo else None
         title = mediainfo.title if mediainfo else ""
 
-        # Step 0: 查询本地 JSON 缓存 (0ms 响应)
+        # Step 0: 查询本地 JSON 缓存 (包含动态片长阈值评估)
         if self._enable_cache and tmdb_id:
             key = str(tmdb_id)
             if key in self._cache_data:
                 cache_item = self._cache_data[key]
                 if isinstance(cache_item, dict) and "is_short_drama" in cache_item:
+                    st_type = cache_item.get("strategy_type", "runtime")
+                    cached_runtime = float(cache_item.get("runtime", 0.0))
+                    threshold = float(self._episode_duration)
+
+                    if st_type in ["network", "manual"]:
+                        res = bool(cache_item["is_short_drama"])
+                        logger.info(
+                            f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 平台/手动缓存判定结果 -> {'[短剧]' if res else '[普通长剧]'}"
+                        )
+                        return res
+
+                    if cached_runtime > 0:
+                        dynamic_res = (cached_runtime <= threshold)
+                        logger.info(
+                            f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 片长缓存，动态比对(记录片长: {cached_runtime}m, 当前阈值: {threshold}m) -> {'[短剧]' if dynamic_res else '[普通长剧]'}"
+                        )
+                        return dynamic_res
+
                     res = bool(cache_item["is_short_drama"])
                     logger.info(
                         f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 本地缓存判定结果 -> {'[短剧]' if res else '[普通长剧]'}"
                     )
                     return res
-                elif isinstance(cache_item, bool):
-                    logger.info(
-                        f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 本地缓存判定结果 -> {'[短剧]' if cache_item else '[普通长剧]'}"
-                    )
-                    return cache_item
 
         # 获取 tmdb_info
         tmdb_info = None
@@ -367,10 +393,11 @@ class shortdramacompilation(_PluginBase):
                     net_id = str(net.get("id"))
                     if net_id in configured_nets:
                         net_name = net.get("name") or net_id
+                        strategy_msg = f"策略1: TMDB 播出平台 '{net_name}'"
                         logger.info(
                             f"【短剧自动分类】策略 1 命中：TMDB 播出平台 '{net_name}' (ID: {net_id}) 属于短剧平台 -> 判定为 [短剧]"
                         )
-                        self._update_cache(tmdb_id, title, True)
+                        self._update_cache(tmdb_id, title, True, strategy=strategy_msg, strategy_type="network", runtime=0.0)
                         return True
 
         # Step 2: TMDB 单集片长 (S1E1 / episode_run_time) 匹配
@@ -379,17 +406,20 @@ class shortdramacompilation(_PluginBase):
             if isinstance(runtimes, list) and runtimes:
                 valid_runtimes = [float(r) for r in runtimes if float(r) > 0]
                 if valid_runtimes:
+                    rt = valid_runtimes[0]
                     if all(r <= float(self._episode_duration) for r in valid_runtimes):
+                        strategy_msg = f"策略2: TMDB 标注片长 ({rt}m ≤ 阈值)"
                         logger.info(
                             f"【短剧自动分类】策略 2 命中：TMDB 标注单集片长 {valid_runtimes} 分钟 ≤ 阈值 {self._episode_duration} -> 判定为 [短剧]"
                         )
-                        self._update_cache(tmdb_id, title, True)
+                        self._update_cache(tmdb_id, title, True, strategy=strategy_msg, strategy_type="runtime", runtime=rt)
                         return True
                     elif any(r > float(self._episode_duration) for r in valid_runtimes):
+                        strategy_msg = f"策略2: TMDB 标注片长 ({rt}m > 阈值)"
                         logger.info(
                             f"【短剧自动分类】策略 2 确定：TMDB 标注单集片长 {valid_runtimes} 分钟 > 阈值 {self._episode_duration} -> 确定为 [普通长剧]，终结后续探测"
                         )
-                        self._update_cache(tmdb_id, title, False)
+                        self._update_cache(tmdb_id, title, False, strategy=strategy_msg, strategy_type="runtime", runtime=rt)
                         return False
 
         # Step 3: 豆瓣单集片长解析匹配
@@ -398,37 +428,41 @@ class shortdramacompilation(_PluginBase):
             if douban_id:
                 douban_runtime = self.__get_douban_runtime(douban_id)
                 if douban_runtime > float(self._episode_duration):
+                    strategy_msg = f"策略3: 豆瓣标注片长 ({douban_runtime}m > 阈值)"
                     logger.info(
                         f"【短剧自动分类】策略 3 确定：豆瓣标注单集片长 {douban_runtime} 分钟 > 阈值 {self._episode_duration} -> 确定为 [普通长剧]，终结后续探测"
                     )
-                    self._update_cache(tmdb_id, title, False)
+                    self._update_cache(tmdb_id, title, False, strategy=strategy_msg, strategy_type="runtime", runtime=douban_runtime)
                     return False
                 elif 0 < douban_runtime <= float(self._episode_duration):
+                    strategy_msg = f"策略3: 豆瓣标注片长 ({douban_runtime}m ≤ 阈值)"
                     logger.info(
                         f"【短剧自动分类】策略 3 命中：豆瓣标注单集片长 {douban_runtime} 分钟 ≤ 阈值 {self._episode_duration} -> 判定为 [短剧]"
                     )
-                    self._update_cache(tmdb_id, title, True)
+                    self._update_cache(tmdb_id, title, True, strategy=strategy_msg, strategy_type="runtime", runtime=douban_runtime)
                     return True
 
         # Step 4: FFprobe 媒体文件真实时长探测 (兜底)
         if self._enable_ffprobe and video_path:
             duration = self.__get_duration(str(video_path))
             if duration > float(self._episode_duration):
+                strategy_msg = f"策略4: FFprobe 探测 ({duration}m > 阈值)"
                 logger.info(
                     f"【短剧自动分类】策略 4 探测：FFprobe 文件片长 {duration} 分钟 > 阈值 {self._episode_duration} -> 判定为 [普通长剧]"
                 )
-                self._update_cache(tmdb_id, title, False)
+                self._update_cache(tmdb_id, title, False, strategy=strategy_msg, strategy_type="runtime", runtime=duration)
                 return False
             elif 0 < duration <= float(self._episode_duration):
+                strategy_msg = f"策略4: FFprobe 探测 ({duration}m ≤ 阈值)"
                 logger.info(
                     f"【短剧自动分类】策略 4 命中：FFprobe 文件片长 {duration} 分钟 ≤ 阈值 {self._episode_duration} -> 判定为 [短剧]"
                 )
-                self._update_cache(tmdb_id, title, True)
+                self._update_cache(tmdb_id, title, True, strategy=strategy_msg, strategy_type="runtime", runtime=duration)
                 return True
 
         # 终极处理：若确定了 tmdb_id，但未被判为短剧，则保存 False 结果到缓存
         if tmdb_id:
-            self._update_cache(tmdb_id, title, False)
+            self._update_cache(tmdb_id, title, False, strategy="未满足短剧条件", strategy_type="runtime", runtime=0.0)
         return False
 
     def __get_douban_runtime(self, douban_id: Union[int, str]) -> float:
@@ -480,6 +514,8 @@ class shortdramacompilation(_PluginBase):
             return
 
         mediainfo = rename_dict.get("__mediainfo__")
+        if mediainfo and mediainfo.type and mediainfo.type != MediaType.TV:
+            return
         if self.check_is_short_drama(mediainfo=mediainfo, video_path=str(source_path)):
             rename_dict["category"] = self._category_name
             if rename_dict.get("__mediainfo__"):
@@ -506,6 +542,8 @@ class shortdramacompilation(_PluginBase):
             return
 
         mediainfo = data.rename_dict.get("__mediainfo__") if data.rename_dict else None
+        if mediainfo and mediainfo.type and mediainfo.type != MediaType.TV:
+            return
         if self.check_is_short_drama(mediainfo=mediainfo, video_path=str(source_path)):
             if data.rename_dict and data.rename_dict.get("__mediainfo__"):
                 data.rename_dict["__mediainfo__"].category = self._category_name
