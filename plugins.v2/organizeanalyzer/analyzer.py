@@ -266,9 +266,34 @@ class OrganizeAnalyzerCore:
 
         # 7. 检测离群/格式异常集数 (detect_invalid_episode)
         if detect_invalid_ep:
+            invalid_ep_threshold = int(config.get("invalid_episode_threshold", 500))
+            
+            # 第一步：按媒体分组收集本次扫描到的所有集数
+            media_episodes: Dict[str, Set[int]] = {}
             for r in records:
+                media_key = r["tmdbid"] if r["tmdbid"] else r["title"]
+                if media_key:
+                    ep_nums = [int(n) for n in re.findall(r"\d+", r["episodes"] or "")]
+                    if media_key not in media_episodes:
+                        media_episodes[media_key] = set()
+                    media_episodes[media_key].update(ep_nums)
+
+            # 第二步：二次遍历，检测离群集数
+            for r in records:
+                media_key = r["tmdbid"] if r["tmdbid"] else r["title"]
                 ep_nums = [int(n) for n in re.findall(r"\d+", r["episodes"] or "")]
-                if any(n > 500 for n in ep_nums):
+                
+                is_invalid = False
+                for n in ep_nums:
+                    if n > invalid_ep_threshold:
+                        # 检查连续性：当前批次中是否有 n-1 或 n+1 的集数存在
+                        all_eps = media_episodes.get(media_key, set())
+                        has_continuity = (n - 1) in all_eps or (n + 1) in all_eps
+                        if not has_continuity:
+                            is_invalid = True
+                            break
+                            
+                if is_invalid:
                     key = cls._generate_key("invalid_episode", str(r["id"]))
                     exceptions.append({
                         "key": key,
@@ -279,7 +304,7 @@ class OrganizeAnalyzerCore:
                         "src": r["src"],
                         "dest": r["dest"],
                         "date": r["date"],
-                        "detail": f"解析集数数值过大 [{r['episodes']}]，超过阈值 500",
+                        "detail": f"解析集数数值过大 [{r['episodes']}] (超阈值 {invalid_ep_threshold}) 且无前后连续集数，疑似误提取了分辨率/日期",
                         "status": "active"
                     })
 

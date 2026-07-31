@@ -19,8 +19,20 @@
         </div>
       </div>
       <div class="d-flex ga-2">
-        <v-btn color="primary" :loading="analyzing" prepend-icon="mdi-play" @click="triggerAnalyze('incremental')">立即增量分析</v-btn>
-        <v-btn color="secondary" :loading="analyzing" prepend-icon="mdi-refresh" @click="triggerAnalyze('full')">立即全量分析</v-btn>
+        <v-btn color="primary" :disabled="analyzing" @click="triggerAnalyze('incremental')">
+          <template v-slot:prepend>
+            <v-progress-circular v-if="analyzing" indeterminate size="20" width="2"></v-progress-circular>
+            <v-icon v-else>mdi-play</v-icon>
+          </template>
+          立即增量分析
+        </v-btn>
+        <v-btn color="secondary" :disabled="analyzing" @click="triggerAnalyze('full')">
+          <template v-slot:prepend>
+            <v-progress-circular v-if="analyzing" indeterminate size="20" width="2"></v-progress-circular>
+            <v-icon v-else>mdi-refresh</v-icon>
+          </template>
+          立即全量分析
+        </v-btn>
         <v-btn color="info" variant="tonal" prepend-icon="mdi-clock-outline" @click="showCronDialog = true">定时配置</v-btn>
         <v-btn color="warning" variant="outlined" prepend-icon="mdi-delete-sweep" @click="clearIgnored">清空忽略</v-btn>
       </div>

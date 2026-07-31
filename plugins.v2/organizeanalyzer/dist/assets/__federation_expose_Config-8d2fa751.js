@@ -27,10 +27,12 @@ const config = ref(JSON.parse(JSON.stringify(props.initialConfig || {})));
 if (config.value.min_merged_files === undefined) config.value.min_merged_files = 2;
 if (config.value.cron_mode === undefined) config.value.cron_mode = 'incremental';
 if (config.value.cron === undefined) config.value.cron = '0 3 * * *';
+if (config.value.invalid_episode_threshold === undefined) config.value.invalid_episode_threshold = 500;
 
 const save = () => {
   // 转换部分类型
   config.value.min_merged_files = parseInt(config.value.min_merged_files) || 2;
+  config.value.invalid_episode_threshold = parseInt(config.value.invalid_episode_threshold) || 500;
   emit('save', config.value);
 };
 
@@ -52,7 +54,7 @@ return (_ctx, _cache) => {
     default: _withCtx(() => [
       _createVNode(_component_v_card_text, null, {
         default: _withCtx(() => [
-          _cache[15] || (_cache[15] = _createElementVNode("div", { class: "text-subtitle-1 mb-4 font-weight-bold" }, " 全局设置 ", -1)),
+          _cache[16] || (_cache[16] = _createElementVNode("div", { class: "text-subtitle-1 mb-4 font-weight-bold" }, " 全局设置 ", -1)),
           _createVNode(_component_v_row, { dense: "" }, {
             default: _withCtx(() => [
               _createVNode(_component_v_col, {
@@ -141,7 +143,7 @@ return (_ctx, _cache) => {
             _: 1
           }),
           _createVNode(_component_v_divider, { class: "my-4" }),
-          _cache[16] || (_cache[16] = _createElementVNode("div", { class: "text-subtitle-1 mb-4 font-weight-bold" }, " 异常检测规则开关及参数 ", -1)),
+          _cache[17] || (_cache[17] = _createElementVNode("div", { class: "text-subtitle-1 mb-4 font-weight-bold" }, " 异常检测规则开关及参数 ", -1)),
           _createVNode(_component_v_row, { dense: "" }, {
             default: _withCtx(() => [
               _createVNode(_component_v_col, {
@@ -264,8 +266,24 @@ return (_ctx, _cache) => {
                   _createVNode(_component_v_switch, {
                     modelValue: config.value.detect_invalid_episode,
                     "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((config.value.detect_invalid_episode) = $event)),
-                    label: "检测离群/格式异常集数 (>500)",
+                    label: `检测离群/格式异常集数 (>${config.value.invalid_episode_threshold || 500})`,
                     color: "primary",
+                    density: "compact",
+                    "hide-details": ""
+                  }, null, 8, ["modelValue", "label"])
+                ]),
+                _: 1
+              }),
+              _createVNode(_component_v_col, {
+                cols: "12",
+                md: "6"
+              }, {
+                default: _withCtx(() => [
+                  _createVNode(_component_v_text_field, {
+                    modelValue: config.value.invalid_episode_threshold,
+                    "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.value.invalid_episode_threshold) = $event)),
+                    type: "number",
+                    label: "离群集数判断阈值",
                     density: "compact",
                     "hide-details": ""
                   }, null, 8, ["modelValue"])
@@ -276,7 +294,7 @@ return (_ctx, _cache) => {
                 default: _withCtx(() => [
                   _createVNode(_component_v_textarea, {
                     modelValue: config.value.ignore_paths,
-                    "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.value.ignore_paths) = $event)),
+                    "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((config.value.ignore_paths) = $event)),
                     label: "忽略路径关键词白名单 (英文逗号分隔)",
                     placeholder: "/downloads/, /temp/",
                     rows: "2",
@@ -298,9 +316,9 @@ return (_ctx, _cache) => {
           _createVNode(_component_v_spacer),
           _createVNode(_component_v_btn, {
             variant: "text",
-            onClick: _cache[14] || (_cache[14] = $event => (_ctx.$emit('close')))
+            onClick: _cache[15] || (_cache[15] = $event => (_ctx.$emit('close')))
           }, {
-            default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
+            default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
               _createTextVNode("取消", -1)
             ]))]),
             _: 1
@@ -310,7 +328,7 @@ return (_ctx, _cache) => {
             variant: "elevated",
             onClick: save
           }, {
-            default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
+            default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
               _createTextVNode("保存设置", -1)
             ]))]),
             _: 1

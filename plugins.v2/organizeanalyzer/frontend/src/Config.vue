@@ -50,7 +50,10 @@
           <v-switch v-model="config.detect_missing_dest" label="检测目标物理文件缺失/0字节 (本地路径)" color="primary" density="compact" hide-details></v-switch>
         </v-col>
         <v-col cols="12" md="6">
-          <v-switch v-model="config.detect_invalid_episode" label="检测离群/格式异常集数 (>500)" color="primary" density="compact" hide-details></v-switch>
+          <v-switch v-model="config.detect_invalid_episode" :label="`检测离群/格式异常集数 (>${config.invalid_episode_threshold || 500})`" color="primary" density="compact" hide-details></v-switch>
+        </v-col>
+        <v-col cols="12" md="6">
+          <v-text-field v-model="config.invalid_episode_threshold" type="number" label="离群集数判断阈值" density="compact" hide-details></v-text-field>
         </v-col>
         <v-col cols="12">
           <v-textarea v-model="config.ignore_paths" label="忽略路径关键词白名单 (英文逗号分隔)" placeholder="/downloads/, /temp/" rows="2" density="compact" class="mt-2" hide-details></v-textarea>
@@ -84,10 +87,12 @@ const config = ref(JSON.parse(JSON.stringify(props.initialConfig || {})))
 if (config.value.min_merged_files === undefined) config.value.min_merged_files = 2
 if (config.value.cron_mode === undefined) config.value.cron_mode = 'incremental'
 if (config.value.cron === undefined) config.value.cron = '0 3 * * *'
+if (config.value.invalid_episode_threshold === undefined) config.value.invalid_episode_threshold = 500
 
 const save = () => {
   // 转换部分类型
   config.value.min_merged_files = parseInt(config.value.min_merged_files) || 2
+  config.value.invalid_episode_threshold = parseInt(config.value.invalid_episode_threshold) || 500
   emit('save', config.value)
 }
 </script>

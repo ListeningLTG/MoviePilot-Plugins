@@ -201,6 +201,7 @@ onMounted(() => {
 return (_ctx, _cache) => {
   const _component_v_icon = _resolveComponent("v-icon");
   const _component_v_chip = _resolveComponent("v-chip");
+  const _component_v_progress_circular = _resolveComponent("v-progress-circular");
   const _component_v_btn = _resolveComponent("v-btn");
   const _component_v_card = _resolveComponent("v-card");
   const _component_v_col = _resolveComponent("v-col");
@@ -259,33 +260,61 @@ return (_ctx, _cache) => {
       _createElementVNode("div", _hoisted_5, [
         _createVNode(_component_v_btn, {
           color: "primary",
-          loading: analyzing.value,
-          "prepend-icon": "mdi-play",
+          disabled: analyzing.value,
           onClick: _cache[0] || (_cache[0] = $event => (triggerAnalyze('incremental')))
         }, {
-          default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
-            _createTextVNode("立即增量分析", -1)
-          ]))]),
+          prepend: _withCtx(() => [
+            (analyzing.value)
+              ? (_openBlock(), _createBlock(_component_v_progress_circular, {
+                  key: 0,
+                  indeterminate: "",
+                  size: "20",
+                  width: "2"
+                }))
+              : (_openBlock(), _createBlock(_component_v_icon, { key: 1 }, {
+                  default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
+                    _createTextVNode("mdi-play", -1)
+                  ]))]),
+                  _: 1
+                }))
+          ]),
+          default: _withCtx(() => [
+            _cache[15] || (_cache[15] = _createTextVNode(" 立即增量分析 ", -1))
+          ]),
           _: 1
-        }, 8, ["loading"]),
+        }, 8, ["disabled"]),
         _createVNode(_component_v_btn, {
           color: "secondary",
-          loading: analyzing.value,
-          "prepend-icon": "mdi-refresh",
+          disabled: analyzing.value,
           onClick: _cache[1] || (_cache[1] = $event => (triggerAnalyze('full')))
         }, {
-          default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
-            _createTextVNode("立即全量分析", -1)
-          ]))]),
+          prepend: _withCtx(() => [
+            (analyzing.value)
+              ? (_openBlock(), _createBlock(_component_v_progress_circular, {
+                  key: 0,
+                  indeterminate: "",
+                  size: "20",
+                  width: "2"
+                }))
+              : (_openBlock(), _createBlock(_component_v_icon, { key: 1 }, {
+                  default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
+                    _createTextVNode("mdi-refresh", -1)
+                  ]))]),
+                  _: 1
+                }))
+          ]),
+          default: _withCtx(() => [
+            _cache[17] || (_cache[17] = _createTextVNode(" 立即全量分析 ", -1))
+          ]),
           _: 1
-        }, 8, ["loading"]),
+        }, 8, ["disabled"]),
         _createVNode(_component_v_btn, {
           color: "info",
           variant: "tonal",
           "prepend-icon": "mdi-clock-outline",
           onClick: _cache[2] || (_cache[2] = $event => (showCronDialog.value = true))
         }, {
-          default: _withCtx(() => [...(_cache[16] || (_cache[16] = [
+          default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
             _createTextVNode("定时配置", -1)
           ]))]),
           _: 1
@@ -296,7 +325,7 @@ return (_ctx, _cache) => {
           "prepend-icon": "mdi-delete-sweep",
           onClick: clearIgnored
         }, {
-          default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
+          default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
             _createTextVNode("清空忽略", -1)
           ]))]),
           _: 1
@@ -317,7 +346,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[18] || (_cache[18] = _createElementVNode("div", { class: "text-subtitle-2 font-weight-medium" }, "未处理异常总数", -1)),
+                _cache[20] || (_cache[20] = _createElementVNode("div", { class: "text-subtitle-2 font-weight-medium" }, "未处理异常总数", -1)),
                 _createElementVNode("div", _hoisted_6, _toDisplayString(summary.value.total || 0), 1)
               ]),
               _: 1
@@ -337,7 +366,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[19] || (_cache[19] = _createElementVNode("div", { class: "text-subtitle-2" }, "多文件覆盖冲突", -1)),
+                _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-subtitle-2" }, "多文件覆盖冲突", -1)),
                 _createElementVNode("div", _hoisted_7, _toDisplayString(summary.value.merged_files || 0), 1)
               ]),
               _: 1
@@ -357,7 +386,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[20] || (_cache[20] = _createElementVNode("div", { class: "text-subtitle-2" }, "英文标题未中文化", -1)),
+                _cache[22] || (_cache[22] = _createElementVNode("div", { class: "text-subtitle-2" }, "英文标题未中文化", -1)),
                 _createElementVNode("div", _hoisted_8, _toDisplayString(summary.value.english_title || 0), 1)
               ]),
               _: 1
@@ -377,7 +406,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-subtitle-2" }, "未识别 / TMDB缺失", -1)),
+                _cache[23] || (_cache[23] = _createElementVNode("div", { class: "text-subtitle-2" }, "未识别 / TMDB缺失", -1)),
                 _createElementVNode("div", _hoisted_9, _toDisplayString(summary.value.unidentified || 0), 1)
               ]),
               _: 1
@@ -397,7 +426,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[22] || (_cache[22] = _createElementVNode("div", { class: "text-subtitle-2" }, "整理运行失败", -1)),
+                _cache[24] || (_cache[24] = _createElementVNode("div", { class: "text-subtitle-2" }, "整理运行失败", -1)),
                 _createElementVNode("div", _hoisted_10, _toDisplayString(summary.value.failed_status || 0), 1)
               ]),
               _: 1
@@ -417,7 +446,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[23] || (_cache[23] = _createElementVNode("div", { class: "text-subtitle-2" }, "重复季集冲突", -1)),
+                _cache[25] || (_cache[25] = _createElementVNode("div", { class: "text-subtitle-2" }, "重复季集冲突", -1)),
                 _createElementVNode("div", _hoisted_11, _toDisplayString(summary.value.duplicate_episode || 0), 1)
               ]),
               _: 1
@@ -437,7 +466,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[24] || (_cache[24] = _createElementVNode("div", { class: "text-subtitle-2" }, "目标缺失/0字节", -1)),
+                _cache[26] || (_cache[26] = _createElementVNode("div", { class: "text-subtitle-2" }, "目标缺失/0字节", -1)),
                 _createElementVNode("div", _hoisted_12, _toDisplayString(summary.value.missing_dest || 0), 1)
               ]),
               _: 1
@@ -473,19 +502,19 @@ return (_ctx, _cache) => {
                 }, {
                   default: _withCtx(() => [
                     _createVNode(_component_v_btn, { value: "active" }, {
-                      default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
+                      default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
                         _createTextVNode("未处理", -1)
                       ]))]),
                       _: 1
                     }),
                     _createVNode(_component_v_btn, { value: "ignored" }, {
-                      default: _withCtx(() => [...(_cache[26] || (_cache[26] = [
+                      default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
                         _createTextVNode("已忽略", -1)
                       ]))]),
                       _: 1
                     }),
                     _createVNode(_component_v_btn, { value: "all" }, {
-                      default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
+                      default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
                         _createTextVNode("全部", -1)
                       ]))]),
                       _: 1
@@ -545,7 +574,7 @@ return (_ctx, _cache) => {
       default: _withCtx(() => [
         _createVNode(_component_v_table, { hover: "" }, {
           default: _withCtx(() => [
-            _cache[28] || (_cache[28] = _createElementVNode("thead", null, [
+            _cache[30] || (_cache[30] = _createElementVNode("thead", null, [
               _createElementVNode("tr", null, [
                 _createElementVNode("th", {
                   class: "text-left",
@@ -621,7 +650,7 @@ return (_ctx, _cache) => {
         _createVNode(_component_v_card, null, {
           default: _withCtx(() => [
             _createVNode(_component_v_card_title, { class: "text-h6 pa-4" }, {
-              default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
+              default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
                 _createTextVNode("定时分析详细配置", -1)
               ]))]),
               _: 1
@@ -667,7 +696,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[10] || (_cache[10] = $event => (showCronDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
+                  default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -677,7 +706,7 @@ return (_ctx, _cache) => {
                   variant: "elevated",
                   onClick: saveCronConfig
                 }, {
-                  default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
+                  default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
                     _createTextVNode("保存生效", -1)
                   ]))]),
                   _: 1

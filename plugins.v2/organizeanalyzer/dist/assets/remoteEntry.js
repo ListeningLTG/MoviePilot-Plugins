@@ -61,13 +61,13 @@ const currentImports = {};
       let moduleMap = {
 "./AppPage":()=>{
       dynamicLoadingCss([], false, './AppPage');
-      return __federation_import('./__federation_expose_AppPage-edf76f50.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      return __federation_import('./__federation_expose_AppPage-5e8466eb.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Page":()=>{
       dynamicLoadingCss([], false, './Page');
       return __federation_import('./__federation_expose_Page-a3b95e60.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Config":()=>{
       dynamicLoadingCss([], false, './Config');
-      return __federation_import('./__federation_expose_Config-581d9eff.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      return __federation_import('./__federation_expose_Config-8d2fa751.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Dashboard":()=>{
       dynamicLoadingCss([], false, './Dashboard');
       return __federation_import('${__federation_expose_./Dashboard}').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};

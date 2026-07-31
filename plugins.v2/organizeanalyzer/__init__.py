@@ -17,7 +17,7 @@ class OrganizeAnalyzer(_PluginBase):
     plugin_name = "媒体整理异常分析"
     plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、整理失败及重集等异常。"
     plugin_icon = "mdi-file-find-outline"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "organizeanalyzer_"
     plugin_order = 15
@@ -100,11 +100,43 @@ class OrganizeAnalyzer(_PluginBase):
 
     @db_query
     def _query_transfer_histories(self, db: Session, date_after: Optional[str] = None):
-        """查询整理历史"""
+        """查询整理历史（已优化内存：分块查询并直接转换为轻量级字典）"""
+        query = db.query(
+            TransferHistory.id,
+            TransferHistory.src,
+            TransferHistory.dest,
+            TransferHistory.title,
+            TransferHistory.tmdbid,
+            TransferHistory.type,
+            TransferHistory.seasons,
+            TransferHistory.episodes,
+            TransferHistory.status,
+            TransferHistory.errmsg,
+            TransferHistory.date,
+            TransferHistory.files
+        )
         if date_after:
-            return db.query(TransferHistory).filter(TransferHistory.date > date_after).order_by(TransferHistory.id.asc()).all()
-        else:
-            return db.query(TransferHistory).order_by(TransferHistory.id.asc()).all()
+            query = query.filter(TransferHistory.date > date_after)
+            
+        query = query.order_by(TransferHistory.id.asc()).yield_per(2000)
+        
+        records = []
+        for row in query:
+            records.append({
+                "id": getattr(row, "id", 0),
+                "src": getattr(row, "src", "") or "",
+                "dest": getattr(row, "dest", "") or "",
+                "title": getattr(row, "title", "") or "",
+                "tmdbid": getattr(row, "tmdbid", 0) or 0,
+                "type": getattr(row, "type", "") or "",
+                "seasons": getattr(row, "seasons", "") or "",
+                "episodes": getattr(row, "episodes", "") or "",
+                "status": getattr(row, "status", True),
+                "errmsg": getattr(row, "errmsg", "") or "",
+                "date": getattr(row, "date", "") or "",
+                "files": getattr(row, "files", []) or [],
+            })
+        return records
 
     def run_analysis(self, mode: str = "incremental") -> Dict[str, Any]:
         """
