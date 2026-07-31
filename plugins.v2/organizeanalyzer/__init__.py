@@ -17,7 +17,7 @@ class OrganizeAnalyzer(_PluginBase):
     plugin_name = "媒体整理异常分析"
     plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、整理失败及重集等异常。"
     plugin_icon = "mdi-file-find-outline"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "organizeanalyzer_"
     plugin_order = 15
@@ -25,7 +25,9 @@ class OrganizeAnalyzer(_PluginBase):
 
     # 私有字段
     _enabled: bool = False
-    _cron: str = ""
+    _cron_enabled: bool = True
+    _cron: str = "0 3 * * *"
+    _cron_mode: str = "incremental"  # 'incremental' 增量 或 'full' 全量
     _notify: bool = False
     _config: dict = {}
     _storage: Optional[AnalyzerStorage] = None
@@ -35,12 +37,37 @@ class OrganizeAnalyzer(_PluginBase):
         config = config or {}
         self._config = config
         self._enabled = bool(config.get("enabled", False))
+        self._cron_enabled = bool(config.get("cron_enabled", True))
         self._cron = config.get("cron", "0 3 * * *")
+        self._cron_mode = config.get("cron_mode", "incremental")
         self._notify = bool(config.get("notify", False))
         self._storage = AnalyzerStorage(self.get_data_path())
 
     def get_state(self) -> bool:
         return self._enabled
+
+    def get_render_mode(self) -> Tuple[str, str]:
+        """声明支持 Vue 动态模块联邦模式"""
+        return "vue", "dist/assets"
+
+    def get_sidebar_nav(self) -> List[Dict[str, Any]]:
+        """在 MoviePilot 左侧边栏【整理】分类下挂载独立菜单"""
+        if not self.get_state():
+            return []
+        return [
+            {
+                "nav_key": "main",
+                "title": "异常整理分析",
+                "icon": "mdi-file-find-outline",
+                "section": "organize",
+                "permission": "manage",
+                "order": 20,
+            }
+        ]
+
+    def get_dashboard(self, key: str = None, **kwargs) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], List[dict]]]:
+        """不向 MP 首页仪表盘添加小卡片"""
+        return None
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
@@ -48,13 +75,14 @@ class OrganizeAnalyzer(_PluginBase):
 
     def get_service(self) -> List[Dict[str, Any]]:
         """注册后台定时周期服务"""
-        if not self.get_state() or not self._cron:
+        if not self.get_state() or not self._cron_enabled or not self._cron:
             return []
         try:
+            mode_desc = "增量" if self._cron_mode == "incremental" else "全量"
             return [
                 {
                     "id": "OrganizeAnalyzer.CronService",
-                    "name": "媒体整理异常定时分析",
+                    "name": f"媒体整理异常定时分析[{mode_desc}]",
                     "trigger": CronTrigger.from_crontab(self._cron),
                     "func": self.run_cron_analysis,
                     "kwargs": {},
@@ -87,28 +115,29 @@ class OrganizeAnalyzer(_PluginBase):
 
         logger.info(f"【{self.plugin_name}】开始执行 [{mode}] 分析... (上次时间: {date_after or '全量'})")
         histories = self._query_transfer_histories(date_after=date_after)
-        
+
         exceptions, max_id = OrganizeAnalyzerCore.analyze(histories, self._config)
         result_data = self._storage.update_analysis_results(exceptions, mode=mode, max_history_id=max_id)
-        
+
         summary = result_data.get("summary", {})
         logger.info(f"【{self.plugin_name}】分析完成！未处理异常总数: {summary.get('total', 0)}")
 
         # 消息推送
         if self._notify and summary.get("total", 0) > 0:
-            self._send_notification(summary, result_data.get("exceptions", []))
+            self._send_notification(summary, result_data.get("exceptions", []), mode=mode)
 
         return result_data
 
     def run_cron_analysis(self):
         """定时任务回调"""
-        logger.info(f"【{self.plugin_name}】触发定时增量分析...")
-        self.run_analysis(mode="incremental")
+        logger.info(f"【{self.plugin_name}】触发定时[{self._cron_mode}]分析...")
+        self.run_analysis(mode=self._cron_mode)
 
-    def _send_notification(self, summary: dict, exceptions: list):
+    def _send_notification(self, summary: dict, exceptions: list, mode: str = "incremental"):
         """发送异常报告系统通知"""
+        mode_desc = "全量" if mode == "full" else "增量"
         msg_lines = [
-            f"🔍 **{self.plugin_name} 结果通知**",
+            f"🔍 **{self.plugin_name} [{mode_desc}分析] 报告**",
             f"━━━━━━━━━━━━━━━━━━",
             f"📊 未处理异常总数: **{summary.get('total', 0)}**",
             f"• 多文件合并冲突: {summary.get('merged_files', 0)}",
@@ -118,7 +147,7 @@ class OrganizeAnalyzer(_PluginBase):
             f"• 重复季集冲突: {summary.get('duplicate_episode', 0)}",
             f"• 目标文件缺失/损坏: {summary.get('missing_dest', 0)}",
         ]
-        
+
         # 附带前 5 条未处理异常简明摘要
         active_items = [x for x in exceptions if x.get("status") != "ignored"][:5]
         if active_items:
@@ -158,7 +187,7 @@ class OrganizeAnalyzer(_PluginBase):
                 "endpoint": self.api_ignore_exception,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "标记忽略某条异常",
+                "summary": "标记/取消标记忽略某条异常",
             },
             {
                 "path": "/clear_ignored",
@@ -166,6 +195,20 @@ class OrganizeAnalyzer(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "清空忽略白名单",
+            },
+            {
+                "path": "/cron_config",
+                "endpoint": self.api_get_cron_config,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取定时任务配置",
+            },
+            {
+                "path": "/save_cron_config",
+                "endpoint": self.api_save_cron_config,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "保存定时任务配置",
             },
         ]
 
@@ -180,21 +223,33 @@ class OrganizeAnalyzer(_PluginBase):
             "data": {
                 "summary": data.get("summary", {}),
                 "last_run_time": data.get("last_run_time", ""),
+                "cron_enabled": self._cron_enabled,
+                "cron": self._cron,
+                "cron_mode": self._cron_mode,
+                "notify": self._notify,
             }
         }
 
-    async def api_get_exceptions(self, status: str = "active", type_filter: str = "") -> dict:
+    async def api_get_exceptions(self, status: str = "active", type_filter: str = "", keyword: str = "") -> dict:
         if not self._storage:
             self._storage = AnalyzerStorage(self.get_data_path())
         data = self._storage.load_data()
         all_items = data.get("exceptions", [])
-        
+
         filtered = []
+        kw = (keyword or "").strip().lower()
         for item in all_items:
             if status != "all" and item.get("status") != status:
                 continue
             if type_filter and item.get("type") != type_filter:
                 continue
+            if kw:
+                title = str(item.get("title") or "").lower()
+                src = str(item.get("src") or "").lower()
+                dest = str(item.get("dest") or "").lower()
+                detail = str(item.get("detail") or "").lower()
+                if kw not in title and kw not in src and kw not in dest and kw not in detail:
+                    continue
             filtered.append(item)
 
         return {
@@ -207,7 +262,7 @@ class OrganizeAnalyzer(_PluginBase):
         result = self.run_analysis(mode=mode)
         return {
             "code": 0,
-            "msg": "分析完成",
+            "msg": f"[{'全量' if mode=='full' else '增量'}]分析完成",
             "data": result.get("summary", {})
         }
 
@@ -217,13 +272,40 @@ class OrganizeAnalyzer(_PluginBase):
         if not self._storage:
             self._storage = AnalyzerStorage(self.get_data_path())
         ok = self._storage.ignore_exception(key)
-        return {"code": 0 if ok else 500, "msg": "已标记忽略" if ok else "保存失败"}
+        return {"code": 0 if ok else 500, "msg": "操作成功" if ok else "保存失败"}
 
     async def api_clear_ignored(self) -> dict:
         if not self._storage:
             self._storage = AnalyzerStorage(self.get_data_path())
         ok = self._storage.clear_ignored()
         return {"code": 0 if ok else 500, "msg": "已清空忽略标记" if ok else "保存失败"}
+
+    async def api_get_cron_config(self) -> dict:
+        return {
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "cron_enabled": self._cron_enabled,
+                "cron": self._cron,
+                "cron_mode": self._cron_mode,
+                "notify": self._notify,
+            }
+        }
+
+    async def api_save_cron_config(self, cron_enabled: bool = True, cron: str = "0 3 * * *", cron_mode: str = "incremental", notify: bool = False) -> dict:
+        self._cron_enabled = bool(cron_enabled)
+        self._cron = cron or "0 3 * * *"
+        self._cron_mode = cron_mode if cron_mode in ["incremental", "full"] else "incremental"
+        self._notify = bool(notify)
+
+        new_cfg = dict(self._config)
+        new_cfg["cron_enabled"] = self._cron_enabled
+        new_cfg["cron"] = self._cron
+        new_cfg["cron_mode"] = self._cron_mode
+        new_cfg["notify"] = self._notify
+        self.update_config(new_cfg)
+        self._config = new_cfg
+        return {"code": 0, "msg": "定时分析配置已保存"}
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """配置页面 Vuetify 表单"""
@@ -259,11 +341,43 @@ class OrganizeAnalyzer(_PluginBase):
                                 "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
+                                        "component": "VSwitch",
+                                        "props": {"model": "cron_enabled", "label": "开启后台定时分析"},
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
                                         "component": "VTextField",
                                         "props": {
                                             "model": "cron",
-                                            "label": "定时分析 Cron 表达式",
+                                            "label": "定时 Cron 表达式",
                                             "placeholder": "0 3 * * *",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "cron_mode",
+                                            "label": "定时分析执行模式",
+                                            "items": [
+                                                {"title": "增量分析 (推荐，高效速度快)", "value": "incremental"},
+                                                {"title": "全量分析 (完整重新检索)", "value": "full"},
+                                            ],
                                         },
                                     }
                                 ],
@@ -281,7 +395,7 @@ class OrganizeAnalyzer(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [
-                                    {"component": "VSubheader", "content": "【核心规则开关及参数】"}
+                                    {"component": "VSubheader", "content": "【异常检测规则开关及参数】"}
                                 ],
                             },
                             {
@@ -393,11 +507,13 @@ class OrganizeAnalyzer(_PluginBase):
                 ],
             }
         ]
-        
+
         default_model = {
             "enabled": False,
+            "cron_enabled": True,
             "notify": False,
             "cron": "0 3 * * *",
+            "cron_mode": "incremental",
             "min_merged_files": 2,
             "detect_merged_files": True,
             "detect_english_title": True,
@@ -409,86 +525,6 @@ class OrganizeAnalyzer(_PluginBase):
             "ignore_paths": "",
         }
         return form_schema, default_model
-
-    def get_dashboard(self, key: str = None, **kwargs) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], List[dict]]]:
-        """首页仪表盘卡片组"""
-        if not self._storage:
-            self._storage = AnalyzerStorage(self.get_data_path())
-        data = self._storage.load_data()
-        summary = data.get("summary", {})
-        last_time = data.get("last_run_time") or "尚未运行"
-
-        col_config = {"cols": 12, "md": 12}
-        global_config = {
-            "title": "媒体整理异常分析概览",
-            "refresh": 30,
-            "border": True,
-        }
-
-        page = [
-            {
-                "component": "VRow",
-                "content": [
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 12, "sm": 6, "md": 3},
-                        "content": [
-                            {
-                                "component": "VCard",
-                                "props": {"color": "error", "variant": "tonal", "class": "pa-2"},
-                                "content": [
-                                    {"component": "VCardTitle", "content": f"未处理异常总数: {summary.get('total', 0)}"},
-                                    {"component": "VCardSubtitle", "content": f"上次检测时间: {last_time}"},
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 12, "sm": 6, "md": 3},
-                        "content": [
-                            {
-                                "component": "VCard",
-                                "props": {"color": "warning", "variant": "tonal", "class": "pa-2"},
-                                "content": [
-                                    {"component": "VCardTitle", "content": f"多文件覆盖冲突: {summary.get('merged_files', 0)}"},
-                                    {"component": "VCardSubtitle", "content": f"英文未中文化: {summary.get('english_title', 0)}"},
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 12, "sm": 6, "md": 3},
-                        "content": [
-                            {
-                                "component": "VCard",
-                                "props": {"color": "info", "variant": "tonal", "class": "pa-2"},
-                                "content": [
-                                    {"component": "VCardTitle", "content": f"未识别/TMDB缺失: {summary.get('unidentified', 0)}"},
-                                    {"component": "VCardSubtitle", "content": f"整理状态失败: {summary.get('failed_status', 0)}"},
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 12, "sm": 6, "md": 3},
-                        "content": [
-                            {
-                                "component": "VCard",
-                                "props": {"color": "secondary", "variant": "tonal", "class": "pa-2"},
-                                "content": [
-                                    {"component": "VCardTitle", "content": f"重复季集: {summary.get('duplicate_episode', 0)}"},
-                                    {"component": "VCardSubtitle", "content": f"缺失/0字节: {summary.get('missing_dest', 0)}"},
-                                ],
-                            }
-                        ],
-                    },
-                ],
-            },
-        ]
-        return col_config, global_config, page
 
     def get_page(self) -> List[dict]:
         """插件详情页，显示说明与状态"""
