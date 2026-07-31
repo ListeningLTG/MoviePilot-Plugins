@@ -42,7 +42,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.2.3"
+    plugin_version = "0.2.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -117,6 +117,8 @@ class shortdramacompilation(_PluginBase):
         tmdb_id: Union[int, str],
         is_short: bool,
         strategy_type: str,
+        title: str = "",
+        strategy: str = "",
         runtime: float = 0.0,
         network_id: Optional[str] = None,
         is_anime: bool = False,
@@ -125,13 +127,17 @@ class shortdramacompilation(_PluginBase):
             return
         with lock:
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self._cache_data[str(tmdb_id)] = {
-                "is_short_drama": is_short,
-                "strategy_type": strategy_type,
-                "runtime": runtime,
-                "network_id": network_id,
-                "is_anime": is_anime,
-                "anime_checked_at": now_str,
+            key = str(tmdb_id)
+            existing = self._cache_data.get(key, {})
+            self._cache_data[key] = {
+                "title": title or existing.get("title", ""),
+                "is_short_drama": bool(is_short),
+                "strategy": strategy or existing.get("strategy", ""),
+                "strategy_type": strategy_type or existing.get("strategy_type", "runtime"),
+                "runtime": round(float(runtime), 1) if runtime else 0.0,
+                "network_id": network_id or existing.get("network_id"),
+                "is_anime": bool(is_anime),
+                "anime_checked_at": existing.get("anime_checked_at") or now_str,
                 "updated_at": now_str,
             }
             try:
@@ -476,12 +482,35 @@ class shortdramacompilation(_PluginBase):
         tmdb_id = mediainfo.tmdb_id if mediainfo else None
         title = mediainfo.title if mediainfo else ""
 
-        # Step 0: 查询本地 JSON 缓存
-        if self._enable_cache and tmdb_id and str(tmdb_id) in self._cache_data:
-            cache_item = self._cache_data[str(tmdb_id)]
-            if isinstance(cache_item, dict) and "is_short_drama" in cache_item:
-                logger.info(f"【短剧自动分类】TMDB ID {tmdb_id} ({title}) 命中本地缓存: {'[短剧]' if cache_item['is_short_drama'] else '[普通长剧]'}")
-                return bool(cache_item["is_short_drama"])
+        # Step 0: 查询本地 JSON 缓存 (包含动态片长阈值评估)
+        if self._enable_cache and tmdb_id:
+            key = str(tmdb_id)
+            if key in self._cache_data:
+                cache_item = self._cache_data[key]
+                if isinstance(cache_item, dict) and "is_short_drama" in cache_item:
+                    st_type = cache_item.get("strategy_type", "runtime")
+                    cached_runtime = float(cache_item.get("runtime", 0.0))
+                    threshold = float(self._episode_duration)
+
+                    if st_type in ["network", "manual"]:
+                        res = bool(cache_item["is_short_drama"])
+                        logger.info(
+                            f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 平台/手动缓存判定结果 -> {'[短剧]' if res else '[普通长剧]'}"
+                        )
+                        return res
+
+                    if cached_runtime > 0:
+                        dynamic_res = (cached_runtime <= threshold)
+                        logger.info(
+                            f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 片长缓存，动态比对(记录片长: {cached_runtime}m, 当前阈值: {threshold}m) -> {'[短剧]' if dynamic_res else '[普通长剧]'}"
+                        )
+                        return dynamic_res
+
+                    res = bool(cache_item["is_short_drama"])
+                    logger.info(
+                        f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 本地缓存判定结果 -> {'[短剧]' if res else '[普通长剧]'}"
+                    )
+                    return res
 
         # 获取 tmdb_info
         tmdb_info = None
@@ -504,8 +533,18 @@ class shortdramacompilation(_PluginBase):
             for net in networks:
                 net_id = str(net.get("id"))
                 if net_id in target_networks:
+                    net_name = net.get("name") or net_id
+                    strategy_desc = f"策略1: TMDB 播出平台 '{net_name}' (ID: {net_id})"
                     logger.info(f"【短剧自动分类】TMDB ID {tmdb_id} ({title}) 命中短剧平台 ID: {net_id}")
-                    self._update_cache(tmdb_id, True, "network", network_id=net_id, is_anime=is_anime)
+                    self._update_cache(
+                        tmdb_id=tmdb_id,
+                        is_short=True,
+                        strategy_type="network",
+                        title=title,
+                        strategy=strategy_desc,
+                        network_id=net_id,
+                        is_anime=is_anime,
+                    )
                     return True
 
         # Step 2: TMDB 单集片长策略
@@ -515,10 +554,19 @@ class shortdramacompilation(_PluginBase):
                 avg_runtime = sum(episode_run_time) / len(episode_run_time)
                 threshold = float(self._episode_duration)
                 is_short = (avg_runtime <= threshold)
+                strategy_desc = f"策略2: TMDB 标注片长 ({avg_runtime:.1f}m {'≤' if is_short else '>'} 阈值{threshold}m)"
                 logger.info(
                     f"【短剧自动分类】TMDB ID {tmdb_id} ({title}) TMDB 片长: {avg_runtime:.1f}分钟 (阈值: {threshold}m) -> {'[短剧]' if is_short else '[普通长剧]'}"
                 )
-                self._update_cache(tmdb_id, is_short, "tmdb_runtime", runtime=avg_runtime, is_anime=is_anime)
+                self._update_cache(
+                    tmdb_id=tmdb_id,
+                    is_short=is_short,
+                    strategy_type="tmdb_runtime",
+                    title=title,
+                    strategy=strategy_desc,
+                    runtime=avg_runtime,
+                    is_anime=is_anime,
+                )
                 return is_short
 
         # Step 3: 豆瓣单集片长策略
@@ -528,26 +576,54 @@ class shortdramacompilation(_PluginBase):
             if douban_runtime > 0:
                 threshold = float(self._episode_duration)
                 is_short = (douban_runtime <= threshold)
+                strategy_desc = f"策略3: 豆瓣标注片长 ({douban_runtime:.1f}m {'≤' if is_short else '>'} 阈值{threshold}m)"
                 logger.info(
                     f"【短剧自动分类】TMDB ID {tmdb_id} ({title}) 豆瓣片长: {douban_runtime:.1f}分钟 (阈值: {threshold}m) -> {'[短剧]' if is_short else '[普通长剧]'}"
                 )
-                self._update_cache(tmdb_id, is_short, "douban_runtime", runtime=douban_runtime, is_anime=is_anime)
+                self._update_cache(
+                    tmdb_id=tmdb_id,
+                    is_short=is_short,
+                    strategy_type="douban_runtime",
+                    title=title,
+                    strategy=strategy_desc,
+                    runtime=douban_runtime,
+                    is_anime=is_anime,
+                )
                 return is_short
 
         # Step 4: FFprobe 探测策略 (STRM URL 或 本地媒体文件)
         if self._enable_ffprobe and video_path:
             probe_target = self._resolve_probe_target(video_path)
             if probe_target:
-                duration_sec = self.__get_duration(probe_target)
-                if duration_sec > 0:
-                    duration_min = duration_sec / 60.0
+                duration_min = self.__get_duration(probe_target)
+                if duration_min > 0:
                     threshold = float(self._episode_duration)
                     is_short = (duration_min <= threshold)
+                    strategy_desc = f"策略4: FFprobe 探测 ({duration_min:.1f}m {'≤' if is_short else '>'} 阈值{threshold}m)"
                     logger.info(
                         f"【短剧自动分类】TMDB ID {tmdb_id} ({title}) FFprobe 探测片长: {duration_min:.1f}分钟 (阈值: {threshold}m) -> {'[短剧]' if is_short else '[普通长剧]'}"
                     )
-                    self._update_cache(tmdb_id, is_short, "ffprobe", runtime=duration_min, is_anime=is_anime)
+                    self._update_cache(
+                        tmdb_id=tmdb_id,
+                        is_short=is_short,
+                        strategy_type="ffprobe",
+                        title=title,
+                        strategy=strategy_desc,
+                        runtime=duration_min,
+                        is_anime=is_anime,
+                    )
                     return is_short
+
+        if tmdb_id:
+            self._update_cache(
+                tmdb_id=tmdb_id,
+                is_short=False,
+                strategy_type="default",
+                title=title,
+                strategy="未满足短剧条件",
+                runtime=0.0,
+                is_anime=is_anime,
+            )
 
         return False
 
