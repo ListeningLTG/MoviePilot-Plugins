@@ -10,8 +10,8 @@ export default defineConfig({
       filename: 'remoteEntry.js',
       exposes: {
         './AppPage': './src/AppPage.vue',
-        './Page': './src/AppPage.vue',
-        './Config': './src/AppPage.vue',
+        './Page': './src/Page.vue',
+        './Config': './src/Config.vue',
         './Dashboard': './src/AppPage.vue'
       },
       shared: {
