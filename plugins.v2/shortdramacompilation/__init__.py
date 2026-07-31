@@ -42,7 +42,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -53,6 +53,11 @@ class shortdramacompilation(_PluginBase):
     plugin_order = 29
     # 可使用的用户级别
     auth_level = 1
+
+    @property
+    def name(self) -> str:
+        """兼容 MoviePilot 获取插件名称属性"""
+        return self.plugin_name
 
     _enabled = False
     _notify = True
@@ -677,6 +682,7 @@ class shortdramacompilation(_PluginBase):
                     )
                     data.updated = True
                     data.updated_str = clean_abs_target
+                    data.source = self.plugin_name
                 except Exception as e:
                     logger.error(f"【短剧自动分类】改写重命名路径失败: {e}")
 
@@ -721,6 +727,7 @@ class shortdramacompilation(_PluginBase):
                 new_target = category_dir_path / rel_subpath
                 logger.info(f"【短剧自动分类】整理拦截重定向：目标路径由 {target_path} 修正为 {new_target}")
                 data.target_path = new_target
+                data.source = self.plugin_name
 
     @eventmanager.register(EventType.TransferComplete)
     def category_handler(self, event: Event):
