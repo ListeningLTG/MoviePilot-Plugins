@@ -61,7 +61,7 @@ const currentImports = {};
       let moduleMap = {
 "./AppPage":()=>{
       dynamicLoadingCss([], false, './AppPage');
-      return __federation_import('./__federation_expose_AppPage-5e8466eb.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      return __federation_import('./__federation_expose_AppPage-f0e40356.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Page":()=>{
       dynamicLoadingCss([], false, './Page');
       return __federation_import('./__federation_expose_Page-a3b95e60.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},

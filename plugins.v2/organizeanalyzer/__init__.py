@@ -17,7 +17,7 @@ class OrganizeAnalyzer(_PluginBase):
     plugin_name = "媒体整理异常分析"
     plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、整理失败及重集等异常。"
     plugin_icon = "mdi-file-find-outline"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "organizeanalyzer_"
     plugin_order = 15
@@ -271,8 +271,8 @@ class OrganizeAnalyzer(_PluginBase):
             }
         }
 
-    async def api_get_exceptions(self, status: str = "active", type_filter: str = "", keyword: str = "") -> dict:
-        logger.info(f"【{self.plugin_name}】API 请求 [GET /exceptions] (status={status}, type={type_filter}, kw={keyword})")
+    async def api_get_exceptions(self, status: str = "active", type_filter: str = "", keyword: str = "", page: int = 1, page_size: int = 50) -> dict:
+        logger.info(f"【{self.plugin_name}】API 请求 [GET /exceptions] (status={status}, type={type_filter}, kw={keyword}, page={page}, page_size={page_size})")
         if not self._storage:
             self._storage = AnalyzerStorage(self.get_data_path())
         data = self._storage.load_data()
@@ -294,10 +294,20 @@ class OrganizeAnalyzer(_PluginBase):
                     continue
             filtered.append(item)
 
+        total = len(filtered)
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), 200))
+        start = (page - 1) * page_size
+        paged = filtered[start: start + page_size]
+
         return {
             "code": 0,
             "msg": "success",
-            "data": filtered
+            "data": paged,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size if total > 0 else 1
         }
 
     async def api_run_analyze(self, mode: str = "incremental") -> dict:

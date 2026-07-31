@@ -90,7 +90,7 @@
         <v-col cols="12" sm="4" md="3">
           <v-btn-toggle
             v-model="statusFilter"
-            @update:modelValue="fetchExceptions"
+            @update:modelValue="() => { pagination.page = 1; fetchExceptions(); }"
             mandatory
             color="primary"
             density="compact"
@@ -103,7 +103,7 @@
         <v-col cols="12" sm="4" md="4">
           <v-select
             v-model="typeFilter"
-            @update:modelValue="fetchExceptions"
+            @update:modelValue="() => { pagination.page = 1; fetchExceptions(); }"
             label="筛选异常类型"
             density="compact"
             hide-details
@@ -138,9 +138,15 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-if="exceptions.length === 0">
+          <tr v-if="loading">
             <td colspan="6" class="text-center text-medium-emphasis py-6">
-              {{ loading ? '加载中...' : '暂无相关异常记录 🎉' }}
+              <v-progress-circular indeterminate size="24" width="2" class="mr-2"></v-progress-circular>
+              加载中...
+            </td>
+          </tr>
+          <tr v-else-if="exceptions.length === 0">
+            <td colspan="6" class="text-center text-medium-emphasis py-6">
+              暂无相关异常记录 🎉
             </td>
           </tr>
           <tr v-for="item in exceptions" :key="item.key">
@@ -169,6 +175,31 @@
           </tr>
         </tbody>
       </v-table>
+
+      <!-- 分页栏 -->
+      <div class="d-flex align-center justify-space-between px-4 py-3" v-if="pagination.total > 0">
+        <div class="text-caption text-medium-emphasis">
+          共 <strong>{{ pagination.total }}</strong> 条，当前第 {{ pagination.page }} / {{ pagination.total_pages }} 页
+        </div>
+        <div class="d-flex align-center ga-2">
+          <v-select
+            v-model="pagination.page_size"
+            :items="[20, 50, 100, 200]"
+            label="每页条数"
+            density="compact"
+            hide-details
+            style="width: 110px;"
+            @update:modelValue="() => { pagination.page = 1; fetchExceptions(); }"
+          ></v-select>
+          <v-pagination
+            v-model="pagination.page"
+            :length="pagination.total_pages"
+            :total-visible="7"
+            density="compact"
+            @update:modelValue="fetchExceptions"
+          ></v-pagination>
+        </div>
+      </div>
     </v-card>
 
     <!-- 定时分析配置弹窗 Cron Config Dialog -->
@@ -227,6 +258,7 @@ const showCronDialog = ref(false);
 const keyword = ref('');
 const statusFilter = ref('active');
 const typeFilter = ref('');
+const pagination = ref({ page: 1, page_size: 50, total: 0, total_pages: 1 });
 
 const stats = ref({
   summary: {
@@ -298,11 +330,16 @@ const fetchExceptions = async () => {
       params: {
         status: statusFilter.value,
         type_filter: typeFilter.value,
-        keyword: keyword.value
+        keyword: keyword.value,
+        page: pagination.value.page,
+        page_size: pagination.value.page_size
       }
     });
-    if (res && res.data) {
+    if (res && res.data !== undefined) {
       exceptions.value = res.data;
+      pagination.value.total = res.total || 0;
+      pagination.value.total_pages = res.total_pages || 1;
+      pagination.value.page = res.page || 1;
     }
   } catch (err) {
     console.error('[OrganizeAnalyzer] Fetch exceptions failed', err);
