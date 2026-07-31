@@ -166,3 +166,7 @@ cython_debug/
 
 *.zip
 helper
+
+# Node/Vue Frontend dependencies and build output
+node_modules/
+**/frontend/dist/
