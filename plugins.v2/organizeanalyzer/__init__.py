@@ -17,7 +17,7 @@ class OrganizeAnalyzer(_PluginBase):
     plugin_name = "媒体整理异常分析"
     plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、整理失败及重集等异常。"
     plugin_icon = "mdi-file-find-outline"
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "organizeanalyzer_"
     plugin_order = 15
@@ -271,8 +271,8 @@ class OrganizeAnalyzer(_PluginBase):
             }
         }
 
-    async def api_get_exceptions(self, status: str = "active", type_filter: str = "", keyword: str = "", page: int = 1, page_size: int = 50) -> dict:
-        logger.info(f"【{self.plugin_name}】API 请求 [GET /exceptions] (status={status}, type={type_filter}, kw={keyword}, page={page}, page_size={page_size})")
+    async def api_get_exceptions(self, status: str = "active", type_filter: str = "", keyword: str = "", page: int = 1, page_size: int = 50, sort_by: str = "", sort_order: str = "desc") -> dict:
+        logger.info(f"【{self.plugin_name}】API 请求 [GET /exceptions] (status={status}, type={type_filter}, kw={keyword}, page={page}, page_size={page_size}, sort_by={sort_by}, sort_order={sort_order})")
         if not self._storage:
             self._storage = AnalyzerStorage(self.get_data_path())
         data = self._storage.load_data()
@@ -293,6 +293,12 @@ class OrganizeAnalyzer(_PluginBase):
                 if kw not in title and kw not in src and kw not in dest and kw not in detail:
                     continue
             filtered.append(item)
+
+        # 排序支持
+        if sort_by == "file_count":
+            filtered.sort(key=lambda x: int(x.get("file_count", 1)), reverse=(sort_order == "desc"))
+        elif sort_by == "date":
+            filtered.sort(key=lambda x: str(x.get("date") or ""), reverse=(sort_order == "desc"))
 
         total = len(filtered)
         page = max(1, int(page))

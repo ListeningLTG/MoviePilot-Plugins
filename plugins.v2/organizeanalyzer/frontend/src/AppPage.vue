@@ -87,7 +87,7 @@
     <!-- 筛选与搜索工具条 Filters Bar -->
     <v-card class="mb-4 pa-3">
       <v-row align="center" dense>
-        <v-col cols="12" sm="4" md="3">
+        <v-col cols="12" sm="3" md="2">
           <v-btn-toggle
             v-model="statusFilter"
             @update:modelValue="() => { pagination.page = 1; fetchExceptions(); }"
@@ -100,7 +100,7 @@
             <v-btn value="all">全部</v-btn>
           </v-btn-toggle>
         </v-col>
-        <v-col cols="12" sm="4" md="4">
+        <v-col cols="12" sm="3" md="3">
           <v-select
             v-model="typeFilter"
             @update:modelValue="() => { pagination.page = 1; fetchExceptions(); }"
@@ -110,7 +110,17 @@
             :items="typeOptions"
           ></v-select>
         </v-col>
-        <v-col cols="12" sm="4" md="5">
+        <v-col cols="12" sm="3" md="3">
+          <v-select
+            v-model="sortBy"
+            @update:modelValue="() => { pagination.page = 1; fetchExceptions(); }"
+            label="排序规则"
+            density="compact"
+            hide-details
+            :items="sortOptions"
+          ></v-select>
+        </v-col>
+        <v-col cols="12" sm="3" md="4">
           <v-text-field
             v-model="keyword"
             @keyup.enter="fetchExceptions"
@@ -159,8 +169,22 @@
               <div class="font-weight-medium">{{ item.title || '未知' }}</div>
               <div class="text-caption text-medium-emphasis">{{ item.date }}</div>
             </td>
-            <td class="text-caption text-truncate" style="max-width: 200px;">{{ item.src || '-' }}</td>
-            <td class="text-caption text-truncate" style="max-width: 200px;">{{ item.dest || '-' }}</td>
+            <td 
+              class="text-caption text-truncate path-cell" 
+              style="max-width: 200px;"
+              :title="item.src ? `${item.src} (点击复制)` : ''"
+              @click="copyText(item.src)"
+            >
+              {{ item.src || '-' }}
+            </td>
+            <td 
+              class="text-caption text-truncate path-cell" 
+              style="max-width: 200px;"
+              :title="item.dest ? `${item.dest} (点击复制)` : ''"
+              @click="copyText(item.dest)"
+            >
+              {{ item.dest || '-' }}
+            </td>
             <td class="text-body-2 text-warning">{{ item.detail || '-' }}</td>
             <td class="text-center">
               <v-btn
@@ -240,6 +264,11 @@
         </v-card-actions>
       </v-card>
     </v-dialog>
+
+    <!-- 复制提示 Toast -->
+    <v-snackbar v-model="snackbar.show" :color="snackbar.color" timeout="2000" location="top">
+      {{ snackbar.text }}
+    </v-snackbar>
   </div>
 </template>
 
@@ -299,6 +328,15 @@ const typeOptions = [
   { title: '离群/格式异常集数', value: 'invalid_episode' }
 ];
 
+const sortBy = ref('date_desc');
+
+const sortOptions = [
+  { title: '默认排序 (时间最新)', value: 'date_desc' },
+  { title: '覆盖文件数倒序 (多 ➔ 少)', value: 'file_count_desc' },
+  { title: '覆盖文件数正序 (少 ➔ 多)', value: 'file_count_asc' },
+  { title: '时间正序 (最早)', value: 'date_asc' },
+];
+
 const cronModeOptions = [
   { title: '增量分析 (推荐，高速高效)', value: 'incremental' },
   { title: '全量分析 (重新完整扫描)', value: 'full' }
@@ -325,6 +363,22 @@ const fetchStats = async () => {
 
 const fetchExceptions = async () => {
   loading.value = true;
+  let sort_by = '';
+  let sort_order = 'desc';
+  if (sortBy.value === 'file_count_desc') {
+    sort_by = 'file_count';
+    sort_order = 'desc';
+  } else if (sortBy.value === 'file_count_asc') {
+    sort_by = 'file_count';
+    sort_order = 'asc';
+  } else if (sortBy.value === 'date_asc') {
+    sort_by = 'date';
+    sort_order = 'asc';
+  } else if (sortBy.value === 'date_desc') {
+    sort_by = 'date';
+    sort_order = 'desc';
+  }
+
   try {
     const res = await props.api.get(`plugin/${props.pluginId}/exceptions`, {
       params: {
@@ -332,7 +386,9 @@ const fetchExceptions = async () => {
         type_filter: typeFilter.value,
         keyword: keyword.value,
         page: pagination.value.page,
-        page_size: pagination.value.page_size
+        page_size: pagination.value.page_size,
+        sort_by: sort_by,
+        sort_order: sort_order
       }
     });
     if (res && res.data !== undefined) {
@@ -403,8 +459,48 @@ const getTypeColor = (type) => {
   }
 };
 
+const snackbar = ref({ show: false, text: '', color: 'success' });
+
+const copyText = (text) => {
+  if (!text || text === '-') return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      snackbar.value = { show: true, text: '已成功复制路径到剪贴板！', color: 'success' };
+    }).catch(() => {
+      fallbackCopy(text);
+    });
+  } else {
+    fallbackCopy(text);
+  }
+};
+
+const fallbackCopy = (text) => {
+  const textArea = document.createElement('textarea');
+  textArea.value = text;
+  document.body.appendChild(textArea);
+  textArea.select();
+  try {
+    document.execCommand('copy');
+    snackbar.value = { show: true, text: '已成功复制路径到剪贴板！', color: 'success' };
+  } catch (err) {
+    snackbar.value = { show: true, text: '复制失败，请手动复制', color: 'error' };
+  }
+  document.body.removeChild(textArea);
+};
+
 onMounted(() => {
   fetchStats();
   fetchExceptions();
 });
 </script>
+
+<style scoped>
+.path-cell {
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s;
+}
+.path-cell:hover {
+  color: rgb(var(--v-theme-primary));
+  text-decoration: underline;
+}
+</style>

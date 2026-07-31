@@ -1,0 +1,9 @@
+
+.path-cell[data-v-cd456497] {
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s;
+}
+.path-cell[data-v-cd456497]:hover {
+  color: rgb(var(--v-theme-primary));
+  text-decoration: underline;
+}

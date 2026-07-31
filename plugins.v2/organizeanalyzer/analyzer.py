@@ -191,7 +191,8 @@ class OrganizeAnalyzerCore:
                         "dest": dest,
                         "date": sample_h["date"],
                         "detail": f"检测到 {len(srcs)} 个源文件归并/覆盖到了同一个目标文件: {dest}",
-                        "status": "active"
+                        "status": "active",
+                        "file_count": len(srcs)
                     })
 
         # 5. 检测重复季集 (detect_duplicate_episode)
@@ -224,7 +225,8 @@ class OrganizeAnalyzerCore:
                         "dest": sample_h["dest"],
                         "date": sample_h["date"],
                         "detail": f"季集 [{sample_h['seasons']}{sample_h['episodes']}] 被多次整理到了 {len(dests)} 个不同的目标文件",
-                        "status": "active"
+                        "status": "active",
+                        "file_count": len(dests)
                     })
 
         # 6. 检测目标文件缺失/0字节 (detect_missing_dest)
