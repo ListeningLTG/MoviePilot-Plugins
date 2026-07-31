@@ -48,15 +48,62 @@ class ShortDramaScanner:
         self,
         source_dir: str,
         target_dir: str,
+        anime_target_dir: Optional[str] = None,
         episode_duration: float = DEFAULT_EPISODE_DURATION,
         short_networks: List[str] = None,
     ):
         self.source_dir = Path(source_dir).resolve()
         self.target_dir = Path(target_dir).resolve()
+        self.anime_target_dir = Path(anime_target_dir).resolve() if anime_target_dir else None
         self.episode_duration = float(episode_duration)
         self.short_networks = short_networks or DEFAULT_SHORT_NETWORKS
         self.cache_file = self._find_cache_file()
         self.cache_data: Dict[str, dict] = self._load_cache()
+
+    def check_is_anime(self, tmdb_id: Optional[str], folder_path: Path, tmdb_info: Optional[dict] = None) -> bool:
+        """检查剧集是否属于动画类型（包含 24 小时 TTL 缓存刷新机制）"""
+        now = datetime.now()
+
+        # Step A: 检查缓存
+        if tmdb_id and str(tmdb_id) in self.cache_data:
+            cache_item = self.cache_data[str(tmdb_id)]
+            if isinstance(cache_item, dict) and "is_anime" in cache_item:
+                checked_at_str = cache_item.get("anime_checked_at")
+                if checked_at_str:
+                    try:
+                        checked_at = datetime.strptime(checked_at_str, "%Y-%m-%d %H:%M:%S")
+                        if (now - checked_at).total_seconds() < 86400:
+                            return bool(cache_item["is_anime"])
+                    except Exception:
+                        pass
+
+        # Step B: 24 小时超时或首次获取
+        is_anime = False
+        if tmdb_info and tmdb_info.get("genres"):
+            for g in tmdb_info["genres"]:
+                g_id = g.get("id")
+                g_name = str(g.get("name", "")).lower()
+                if g_id == 16 or "动画" in g_name or "animation" in g_name:
+                    is_anime = True
+                    break
+
+        if not is_anime and tmdb_id:
+            info = tmdb_info or self.fetch_tmdb_info(tmdb_id)
+            if info and info.get("genres"):
+                for g in info["genres"]:
+                    g_id = g.get("id")
+                    g_name = str(g.get("name", "")).lower()
+                    if g_id == 16 or "动画" in g_name or "animation" in g_name:
+                        is_anime = True
+                        break
+
+        # Step C: 更新 cache 中的 is_anime 和 anime_checked_at
+        if tmdb_id and str(tmdb_id) in self.cache_data:
+            self.cache_data[str(tmdb_id)]["is_anime"] = is_anime
+            self.cache_data[str(tmdb_id)]["anime_checked_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+            self._save_cache()
+
+        return is_anime
 
     def _find_cache_file(self) -> Path:
         """选择可写的缓存文件路径"""
@@ -344,14 +391,22 @@ class ShortDramaScanner:
 
             is_short, strategy, tmdb_id, title = self.identify_show(folder)
             if is_short:
-                dest_path = self.target_dir / folder.name
+                # 检查动画类型并路由目标路径
+                is_anime = self.check_is_anime(tmdb_id, folder)
+                if is_anime and self.anime_target_dir:
+                    dest_path = self.anime_target_dir / folder.name
+                    category_label = "动画短剧"
+                else:
+                    dest_path = self.target_dir / folder.name
+                    category_label = "普通短剧"
+
                 results.append(
                     {
                         "folder_name": folder.name,
                         "title": title,
                         "tmdb_id": tmdb_id,
                         "tmdb_url": f"https://www.themoviedb.org/tv/{tmdb_id}" if tmdb_id else "N/A",
-                        "strategy": strategy,
+                        "strategy": f"{strategy} [{category_label}]",
                         "src_path": str(folder),
                         "dest_path": str(dest_path),
                     }
@@ -368,6 +423,8 @@ class ShortDramaScanner:
         lines.append("# 短剧扫描分析报告\n")
         lines.append(f"- **扫描源目录**: `{self.source_dir}`")
         lines.append(f"- **短剧目标目录**: `{self.target_dir}`")
+        if self.anime_target_dir:
+            lines.append(f"- **动画短剧独立目录**: `{self.anime_target_dir}`")
         lines.append(f"- **片长判定阈值**: `{self.episode_duration}` 分钟")
         lines.append(f"- **生成时间**: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`")
         lines.append(f"- **检测到短剧数量**: **{len(results)}** 部\n")
@@ -395,7 +452,6 @@ class ShortDramaScanner:
             print("[!] 没有需要移动的短剧。")
             return
 
-        self.target_dir.mkdir(parents=True, exist_ok=True)
         total = len(results)
         print(f"\n[*] 开始执行文件移动操作 (共 {total} 部)...")
 
@@ -408,6 +464,7 @@ class ShortDramaScanner:
             print(f"       -> {dest}")
 
             try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
                 if dest.exists():
                     # 如果目标位置已存在同名目录，合并内容
                     for sub_item in src.iterdir():
@@ -432,7 +489,7 @@ class ShortDramaScanner:
 def prompt_user():
     """交互式引导与可编辑核对函数"""
     print("\n================================================================================")
-    print("           MoviePilot 存量剧集 - 短剧批量识别与离线整理工具 (v0.1.0)           ")
+    print("           MoviePilot 存量剧集 - 短剧批量识别与离线整理工具 (v0.2.0)           ")
     print("================================================================================\n")
 
     # 1. 引导用户输入路径
@@ -455,8 +512,11 @@ def prompt_user():
         dest_path = Path(dest_path_str)
         break
 
+    anime_dest_path_str = input("\n3. 请输入【动画短剧独立目标目录】绝对路径 (直接回车表示不开启独立动画短剧目录):\n   例如: /vol1/1000/data/strm/shareStrm/动漫/短剧\n   路径: ").strip()
+    anime_dest_path = Path(anime_dest_path_str) if anime_dest_path_str else None
+
     while True:
-        duration_str = input(f"\n3. 请输入【单集片长判定阈值（分钟）】(直接回车默认使用 {DEFAULT_EPISODE_DURATION}): ").strip()
+        duration_str = input(f"\n4. 请输入【单集片长判定阈值（分钟）】(直接回车默认使用 {DEFAULT_EPISODE_DURATION}): ").strip()
         if not duration_str:
             episode_duration = float(DEFAULT_EPISODE_DURATION)
             break
@@ -474,7 +534,8 @@ def prompt_user():
     print("                              配置二次确认                                      ")
     print("--------------------------------------------------------------------------------")
     print(f"  源 扫 描 目录:  {src_path.resolve()}")
-    print(f"  短剧目标目录:  {dest_path.resolve()}")
+    print(f"  普通短剧目录:  {dest_path.resolve()}")
+    print(f"  动画短剧目录:  {anime_dest_path.resolve() if anime_dest_path else '未开启 (合并存入普通短剧目录)'}")
     print(f"  单集片长阈值:  {episode_duration} 分钟")
     print("================================================================================")
 
@@ -487,6 +548,7 @@ def prompt_user():
     scanner = ShortDramaScanner(
         source_dir=str(src_path),
         target_dir=str(dest_path),
+        anime_target_dir=str(anime_dest_path) if anime_dest_path else None,
         episode_duration=episode_duration,
     )
     results = scanner.scan()

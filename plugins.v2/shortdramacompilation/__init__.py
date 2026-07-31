@@ -42,7 +42,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.1.3"
+    plugin_version = "0.2.0"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -65,8 +65,9 @@ class shortdramacompilation(_PluginBase):
     _enable_tmdb_runtime = True
     _enable_douban_runtime = True
     _enable_ffprobe = True
-    _enable_cache = True
-
+    _enable_anime_category = False
+    _anime_category_name = "动画短剧"
+    _anime_category_dir = ""
     _cache_data = {}
 
     def init_plugin(self, config: dict = None):
@@ -83,6 +84,9 @@ class shortdramacompilation(_PluginBase):
             self._enable_douban_runtime = config.get("enable_douban_runtime") if config.get("enable_douban_runtime") is not None else True
             self._enable_ffprobe = config.get("enable_ffprobe") if config.get("enable_ffprobe") is not None else True
             self._enable_cache = config.get("enable_cache") if config.get("enable_cache") is not None else True
+            self._enable_anime_category = config.get("enable_anime_category") if config.get("enable_anime_category") is not None else False
+            self._anime_category_name = config.get("anime_category_name") or "动画短剧"
+            self._anime_category_dir = config.get("anime_category_dir") or ""
 
         self._load_cache()
 
@@ -297,6 +301,41 @@ class shortdramacompilation(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
+                                'props': {'cols': 12, 'md': 3},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {'model': 'enable_anime_category', 'label': '开启动画短剧分类'}
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 3},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {'model': 'anime_category_name', 'label': '动画短剧分类名', 'placeholder': '动画短剧'}
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {'model': 'anime_category_dir', 'label': '动画短剧目录绝对路径', 'placeholder': '/media/动漫/短剧'}
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
                                 'props': {'cols': 12},
                                 'content': [
                                     {
@@ -304,7 +343,7 @@ class shortdramacompilation(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '【多策略管道分类】1.TMDB播出平台ID -> 2.TMDB标注片长 -> 3.豆瓣标注片长 -> 4.FFprobe探测。判定结果自动存入 cache.json，下次整理直接 0ms 响应，支持手动在 cache.json 文件中修改判定结果。'
+                                            'text': '【多策略管道分类】1.TMDB播出平台ID -> 2.TMDB标注片长 -> 3.豆瓣标注片长 -> 4.FFprobe探测。判定结果自动存入 cache.json（包含 24 小时自动刷新动画类型评估），支持将动画短剧路由至独立目录。'
                                         }
                                     }
                                 ]
@@ -324,11 +363,88 @@ class shortdramacompilation(_PluginBase):
             "short_drama_networks": '8020',
             "enable_tmdb_runtime": True,
             "enable_douban_runtime": True,
+            "enable_ffprobe": True,
             "enable_cache": True,
+            "enable_anime_category": False,
+            "anime_category_name": '动画短剧',
+            "anime_category_dir": '',
         }
 
     def get_page(self) -> List[dict]:
         pass
+
+    def check_is_anime(self, mediainfo: Optional[MediaInfo], tmdb_id: Optional[Union[int, str]] = None) -> bool:
+        """
+        检查剧集是否属于动画类型（包含 24 小时 TTL 缓存刷新机制）
+        """
+        now = datetime.now()
+
+        # Step A: 检查缓存中的 is_anime 与 anime_checked_at
+        if tmdb_id and str(tmdb_id) in self._cache_data:
+            cache_item = self._cache_data[str(tmdb_id)]
+            if isinstance(cache_item, dict) and "is_anime" in cache_item:
+                checked_at_str = cache_item.get("anime_checked_at")
+                if checked_at_str:
+                    try:
+                        checked_at = datetime.strptime(checked_at_str, "%Y-%m-%d %H:%M:%S")
+                        # 如果在 24 小时 (86400 秒) 内，直接返回缓存值
+                        if (now - checked_at).total_seconds() < 86400:
+                            return bool(cache_item["is_anime"])
+                    except Exception:
+                        pass
+
+        # Step B: 24 小时超时或首次获取，从 mediainfo 或 TMDB 刷新判断
+        is_anime = False
+        if mediainfo and mediainfo.genre:
+            genres = [str(g).lower() for g in mediainfo.genre]
+            if any(g in ["动画", "animation", "anime", "短片"] for g in genres):
+                is_anime = True
+
+        if not is_anime and tmdb_id:
+            try:
+                from app.modules.themoviedb import TheMovieDbModule
+                tmdb_info = (
+                    mediainfo.tmdb_info
+                    if (mediainfo and mediainfo.tmdb_info)
+                    else TheMovieDbModule().tmdb_info(int(tmdb_id), MediaType.TV)
+                )
+                if tmdb_info and tmdb_info.get("genres"):
+                    for g in tmdb_info["genres"]:
+                        g_id = g.get("id")
+                        g_name = str(g.get("name", "")).lower()
+                        if g_id == 16 or "动画" in g_name or "animation" in g_name:
+                            is_anime = True
+                            break
+            except Exception as e:
+                logger.debug(f"【短剧自动分类】检测动画类型失败: {e}")
+
+        # Step C: 更新 cache 中的 is_anime 和 anime_checked_at
+        if tmdb_id and str(tmdb_id) in self._cache_data:
+            with lock:
+                if str(tmdb_id) in self._cache_data:
+                    self._cache_data[str(tmdb_id)]["is_anime"] = is_anime
+                    self._cache_data[str(tmdb_id)]["anime_checked_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+                    try:
+                        self._cache_file_path.write_text(
+                            json.dumps(self._cache_data, ensure_ascii=False, indent=2),
+                            encoding="utf-8"
+                        )
+                    except Exception:
+                        pass
+
+        return is_anime
+
+    def get_target_category(self, mediainfo: Optional[MediaInfo]) -> Tuple[str, str]:
+        """
+        根据动画类型与配置，返回目标 (category_name, category_dir)
+        """
+        tmdb_id = mediainfo.tmdb_id if mediainfo else None
+
+        if self._enable_anime_category and self._anime_category_dir:
+            if self.check_is_anime(mediainfo=mediainfo, tmdb_id=tmdb_id):
+                return self._anime_category_name, self._anime_category_dir
+
+        return self._category_name, self._category_dir
 
     def check_is_short_drama(self, mediainfo: Optional[MediaInfo], video_path: Optional[str] = None) -> bool:
         """
@@ -496,7 +612,7 @@ class shortdramacompilation(_PluginBase):
     def on_transfer_rename_build(self, event: Event):
         """
         1. 重命名构建事件 Hook：在整理预览及实际整理渲染模板前，识别短剧。
-        若属于短剧，注入 rename_dict["category"] = "短剧"。
+        若属于短剧，注入 rename_dict["category"] = 对应短剧/动画短剧类别名。
         """
         if not self.get_state():
             return
@@ -517,15 +633,16 @@ class shortdramacompilation(_PluginBase):
         if mediainfo and mediainfo.type and mediainfo.type != MediaType.TV:
             return
         if self.check_is_short_drama(mediainfo=mediainfo, video_path=str(source_path)):
-            rename_dict["category"] = self._category_name
+            cat_name, _ = self.get_target_category(mediainfo)
+            rename_dict["category"] = cat_name
             if rename_dict.get("__mediainfo__"):
-                rename_dict["__mediainfo__"].category = self._category_name
+                rename_dict["__mediainfo__"].category = cat_name
 
     @eventmanager.register(ChainEventType.TransferRename)
     def on_transfer_rename(self, event: Event):
         """
         1.2 重命名渲染改写 Hook：在整理预览及实际整理计算渲染路径后，改写为短剧绝对路径，
-        确保【整理预览】界面直接展示短剧分类目录绝对路径。
+        确保【整理预览】界面直接展示短剧/动画短剧分类目录绝对路径。
         """
         if not self.get_state() or not self._category_dir:
             return
@@ -545,17 +662,18 @@ class shortdramacompilation(_PluginBase):
         if mediainfo and mediainfo.type and mediainfo.type != MediaType.TV:
             return
         if self.check_is_short_drama(mediainfo=mediainfo, video_path=str(source_path)):
+            cat_name, cat_dir = self.get_target_category(mediainfo)
             if data.rename_dict and data.rename_dict.get("__mediainfo__"):
-                data.rename_dict["__mediainfo__"].category = self._category_name
+                data.rename_dict["__mediainfo__"].category = cat_name
 
-            category_dir_path = Path(self._category_dir)
+            category_dir_path = Path(cat_dir)
             current_base_path = Path(data.path)
 
             if not str(current_base_path).startswith(str(category_dir_path)):
                 try:
                     clean_abs_target = (category_dir_path / data.render_str).as_posix()
                     logger.info(
-                        f"【短剧自动分类】整理预览/重命名改写：源文件 {source_path} 识别为短剧，直显短剧绝对路径 -> {clean_abs_target}"
+                        f"【短剧自动分类】整理预览/重命名改写：源文件 {source_path} 识别为短剧，直显目标绝对路径 -> {clean_abs_target}"
                     )
                     data.updated = True
                     data.updated_str = clean_abs_target
@@ -565,7 +683,7 @@ class shortdramacompilation(_PluginBase):
     @eventmanager.register(ChainEventType.TransferIntercept)
     def on_transfer_intercept(self, event: Event):
         """
-        2. 整理拦截 Hook：在实际整理及目录确定时，将目标路径直接重定向改写为短剧分类目录
+        2. 整理拦截 Hook：在实际整理及目录确定时，将目标路径直接重定向改写为短剧/动画短剧分类目录
         """
         if not self.get_state() or not self._category_dir:
             return
@@ -579,10 +697,11 @@ class shortdramacompilation(_PluginBase):
 
         source_path = data.fileitem.path
         if self.check_is_short_drama(mediainfo=data.mediainfo, video_path=str(source_path)):
+            cat_name, cat_dir = self.get_target_category(data.mediainfo)
             if data.mediainfo:
-                data.mediainfo.category = self._category_name
+                data.mediainfo.category = cat_name
 
-            category_dir_path = Path(self._category_dir)
+            category_dir_path = Path(cat_dir)
             target_path = data.target_path
 
             if not str(target_path).startswith(str(category_dir_path)):
@@ -606,7 +725,7 @@ class shortdramacompilation(_PluginBase):
     @eventmanager.register(EventType.TransferComplete)
     def category_handler(self, event: Event):
         """
-        3. 整理完成事件兜底：若前两重未覆盖到（如事后扫描），兜底将非短剧目录文件移动至短剧目录
+        3. 整理完成事件兜底：若前两重未覆盖到（如事后扫描），兜底将非短剧目录文件移动至对应短剧目录
         """
         if not event:
             return
@@ -627,14 +746,15 @@ class shortdramacompilation(_PluginBase):
 
         sample_file = Path(file_list[0])
         target_path = sample_file.parent
-        category_dir_path = Path(self._category_dir)
+        cat_name, cat_dir = self.get_target_category(mediainfo)
+        category_dir_path = Path(cat_dir)
 
         if str(target_path).startswith(str(category_dir_path)):
             if self._notify:
                 self.post_message(
                     mtype=NotificationType.Organize,
                     title="【短剧自动分类】",
-                    text=f"已将短剧《{target_path.parent.name}》直接分类入库至 {self._category_dir} 目录",
+                    text=f"已将短剧《{target_path.parent.name}》直接分类入库至 {cat_dir} 目录",
                 )
             return
 
@@ -655,7 +775,7 @@ class shortdramacompilation(_PluginBase):
                     time.sleep(float(self._delay))
 
                 logger.info(f"【短剧自动分类】确认属于短剧，兜底机制触发：{target_path} 开始二次移动...")
-                self.__move_files(target_path=target_path)
+                self.__move_files(target_path=target_path, dest_dir=cat_dir)
 
     @classmethod
     def _resolve_probe_target(cls, video_path: str) -> Optional[str]:
@@ -715,7 +835,7 @@ class shortdramacompilation(_PluginBase):
 
         return 0.0
 
-    def __move_files(self, target_path: Path):
+    def __move_files(self, target_path: Path, dest_dir: str = None):
         """
         移动文件到分类目录
         """
@@ -724,7 +844,8 @@ class shortdramacompilation(_PluginBase):
         if target_path.is_file():
             target_path = target_path.parent
         tv_path = target_path.parent
-        new_path = Path(self._category_dir) / tv_path.name
+        category_dir = dest_dir or self._category_dir
+        new_path = Path(category_dir) / tv_path.name
 
         if not new_path.exists():
             try:
@@ -753,7 +874,7 @@ class shortdramacompilation(_PluginBase):
             self.post_message(
                 mtype=NotificationType.Organize,
                 title="【短剧自动分类】",
-                text=f"已将短剧《{tv_path.name}》移动分类至 {self._category_dir} 目录",
+                text=f"已将短剧《{tv_path.name}》移动分类至 {category_dir} 目录",
             )
 
     def stop_service(self):
