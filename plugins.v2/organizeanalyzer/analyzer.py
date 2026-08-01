@@ -281,13 +281,21 @@ class OrganizeAnalyzerCore:
                     except Exception:
                         pass
 
-        # 7. 检测离群/格式异常集数 (detect_invalid_episode)
+        # 7. 检测离群/格式异常集数 (detect_invalid_episode，仅对电视剧/非电影生效)
         if detect_invalid_ep:
             invalid_ep_threshold = int(config.get("invalid_episode_threshold", 500))
             
-            # 第一步：按媒体分组收集本次扫描到的所有集数
+            def is_movie_record(rec: dict) -> bool:
+                mtype = str(rec.get("type") or "").lower()
+                dest = str(rec.get("dest") or "").lower()
+                src = str(rec.get("src") or "").lower()
+                return "movie" in mtype or "电影" in mtype or "/电影/" in dest or "/电影/" in src
+
+            # 第一步：按媒体分组收集本次扫描到的所有集数（排除电影）
             media_episodes: Dict[str, Set[int]] = {}
             for r in records:
+                if is_movie_record(r):
+                    continue
                 media_key = r["tmdbid"] if r["tmdbid"] else r["title"]
                 if media_key:
                     ep_nums = [int(n) for n in re.findall(r"\d+", r["episodes"] or "")]
@@ -295,8 +303,10 @@ class OrganizeAnalyzerCore:
                         media_episodes[media_key] = set()
                     media_episodes[media_key].update(ep_nums)
 
-            # 第二步：二次遍历，检测离群集数
+            # 第二步：二次遍历，检测离群集数（排除电影）
             for r in records:
+                if is_movie_record(r):
+                    continue
                 media_key = r["tmdbid"] if r["tmdbid"] else r["title"]
                 ep_nums = [int(n) for n in re.findall(r"\d+", r["episodes"] or "")]
                 
