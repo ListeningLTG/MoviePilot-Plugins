@@ -295,11 +295,12 @@
   "advancedcategory": {
     "name": "高级二级分类",
     "description": "扩展 MoviePilot 二级分类识别能力，支持根据关键词库、系列名称、演职员名单及自定义 YAML 规则分类，并在整理转移时自动重组二级目录。",
-    "version": "1.0.1",
-    "icon": "mdi-tag-multiple-outline",
+    "version": "1.0.2",
+    "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/category.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.2": "优化界面显示",
       "v1.0.1": "优化",
       "v1.0.0": "高级二级分类插件，首次提交"
     }
