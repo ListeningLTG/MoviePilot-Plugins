@@ -32,6 +32,16 @@ from app.schemas.types import (
 from app.utils.system import SystemUtils
 
 lock = threading.Lock()
+_id_locks: Dict[str, threading.Lock] = {}
+_id_locks_guard = threading.Lock()
+
+
+def _get_id_lock(tmdb_id: Union[int, str]) -> threading.Lock:
+    key = str(tmdb_id)
+    with _id_locks_guard:
+        if key not in _id_locks:
+            _id_locks[key] = threading.Lock()
+        return _id_locks[key]
 
 
 class shortdramacompilation(_PluginBase):
@@ -42,7 +52,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.2.5"
+    plugin_version = "0.2.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -129,12 +139,24 @@ class shortdramacompilation(_PluginBase):
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             key = str(tmdb_id)
             existing = self._cache_data.get(key, {})
+            existing_type = existing.get("strategy_type")
+
+            # 策略保护规则：
+            # 1. 高优先级策略 (manual / network) 锁定，不被任何普通探测覆盖
+            if existing_type in ["manual", "network"] and strategy_type not in ["manual", "network"]:
+                return
+
+            # 2. 锁定首次探测结果：如果已有有效的探测判定 (ffprobe / tmdb_runtime / douban_runtime)，
+            # 且后续更新为 ffprobe 或 default (未满足条件)，优先保留首次有效探测结果，不予覆盖
+            if existing_type in ["ffprobe", "tmdb_runtime", "douban_runtime"] and strategy_type in ["ffprobe", "default"]:
+                return
+
             self._cache_data[key] = {
                 "title": title or existing.get("title", ""),
                 "is_short_drama": bool(is_short),
                 "strategy": strategy or existing.get("strategy", ""),
                 "strategy_type": strategy_type or existing.get("strategy_type", "runtime"),
-                "runtime": round(float(runtime), 1) if runtime else 0.0,
+                "runtime": round(float(runtime), 1) if runtime else existing.get("runtime", 0.0),
                 "network_id": network_id or existing.get("network_id"),
                 "is_anime": bool(is_anime),
                 "anime_checked_at": existing.get("anime_checked_at") or now_str,
@@ -498,9 +520,47 @@ class shortdramacompilation(_PluginBase):
 
         return self._category_name, self._category_dir
 
+    def _check_cache(self, tmdb_id: Union[int, str], title: str = "") -> Tuple[bool, bool]:
+        """
+        查询缓存，返回 (is_short, found)
+        """
+        if not self._enable_cache or not tmdb_id:
+            return False, False
+
+        key = str(tmdb_id)
+        if key in self._cache_data:
+            cache_item = self._cache_data[key]
+            if isinstance(cache_item, dict) and "is_short_drama" in cache_item:
+                st_type = cache_item.get("strategy_type", "runtime")
+                cached_runtime = float(cache_item.get("runtime", 0.0))
+                threshold = float(self._episode_duration)
+
+                if st_type in ["network", "manual"]:
+                    res = bool(cache_item["is_short_drama"])
+                    logger.info(
+                        f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 平台/手动缓存判定结果 -> {'[短剧]' if res else '[普通长剧]'}"
+                    )
+                    return res, True
+
+                if cached_runtime > 0:
+                    dynamic_res = (cached_runtime <= threshold)
+                    logger.info(
+                        f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 片长缓存，动态比对(记录片长: {cached_runtime}m, 当前阈值: {threshold}m) -> {'[短剧]' if dynamic_res else '[普通长剧]'}"
+                    )
+                    return dynamic_res, True
+
+                res = bool(cache_item["is_short_drama"])
+                logger.info(
+                    f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 本地缓存判定结果 -> {'[短剧]' if res else '[普通长剧]'}"
+                )
+                return res, True
+
+        return False, False
+
     def check_is_short_drama(self, mediainfo: Optional[MediaInfo], video_path: Optional[str] = None) -> bool:
         """
         多策略判定入口（按优先级：缓存 -> 平台ID -> TMDB片长 -> 豆瓣片长 -> FFprobe探测）
+        包含并发 Double-Checked Locking 锁定防护。
         """
         if not self.get_state():
             return False
@@ -511,36 +571,33 @@ class shortdramacompilation(_PluginBase):
         tmdb_id = mediainfo.tmdb_id if mediainfo else None
         title = mediainfo.title if mediainfo else ""
 
-        # Step 0: 查询本地 JSON 缓存 (包含动态片长阈值评估)
-        if self._enable_cache and tmdb_id:
-            key = str(tmdb_id)
-            if key in self._cache_data:
-                cache_item = self._cache_data[key]
-                if isinstance(cache_item, dict) and "is_short_drama" in cache_item:
-                    st_type = cache_item.get("strategy_type", "runtime")
-                    cached_runtime = float(cache_item.get("runtime", 0.0))
-                    threshold = float(self._episode_duration)
+        # Step 0: 快速查询本地 JSON 缓存
+        res, found = self._check_cache(tmdb_id, title)
+        if found:
+            return res
 
-                    if st_type in ["network", "manual"]:
-                        res = bool(cache_item["is_short_drama"])
-                        logger.info(
-                            f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 平台/手动缓存判定结果 -> {'[短剧]' if res else '[普通长剧]'}"
-                        )
-                        return res
-
-                    if cached_runtime > 0:
-                        dynamic_res = (cached_runtime <= threshold)
-                        logger.info(
-                            f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 片长缓存，动态比对(记录片长: {cached_runtime}m, 当前阈值: {threshold}m) -> {'[短剧]' if dynamic_res else '[普通长剧]'}"
-                        )
-                        return dynamic_res
-
-                    res = bool(cache_item["is_short_drama"])
-                    logger.info(
-                        f"【短剧自动分类】命中 TMDB ID {tmdb_id} ({title}) 本地缓存判定结果 -> {'[短剧]' if res else '[普通长剧]'}"
-                    )
+        # 并发防护：若 tmdb_id 存在，加锁确保同一 tmdb_id 只有最先到达的线程去执行 API/FFprobe 探测
+        if tmdb_id:
+            id_lock = _get_id_lock(tmdb_id)
+            with id_lock:
+                # Double-Check 锁内再次检查缓存（可能前一个线程刚刚完成探测并存入缓存）
+                res, found = self._check_cache(tmdb_id, title)
+                if found:
                     return res
+                return self._evaluate_short_drama(mediainfo=mediainfo, video_path=video_path, tmdb_id=tmdb_id, title=title)
 
+        return self._evaluate_short_drama(mediainfo=mediainfo, video_path=video_path, tmdb_id=tmdb_id, title=title)
+
+    def _evaluate_short_drama(
+        self,
+        mediainfo: Optional[MediaInfo],
+        video_path: Optional[str],
+        tmdb_id: Optional[Union[int, str]],
+        title: str
+    ) -> bool:
+        """
+        执行具体的多策略评估逻辑（Step 1 ~ Step 4）
+        """
         # 获取 tmdb_info
         tmdb_info = None
         if mediainfo and mediainfo.tmdb_info:
