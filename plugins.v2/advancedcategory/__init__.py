@@ -37,7 +37,7 @@ class advancedcategory(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/category.png"
     # 插件版本
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -159,6 +159,7 @@ class advancedcategory(_PluginBase):
         if not mediainfo or not self._rules:
             return None
 
+        title = getattr(mediainfo, "title", "") or ""
         mtype_str = "movie" if getattr(mediainfo, "type", None) == MediaType.MOVIE else "tv"
         category_rules_dict = self._rules.get(mtype_str) or {}
         if not category_rules_dict:
@@ -168,10 +169,15 @@ class advancedcategory(_PluginBase):
         tmdb_id = getattr(mediainfo, "tmdb_id", None) or tmdb_info.get("id")
 
         # 检查缓存
-        cache_key = f"{mtype_str}_{tmdb_id}" if tmdb_id else f"{mtype_str}_{getattr(mediainfo, 'title', '')}"
+        cache_key = f"{mtype_str}_{tmdb_id}" if tmdb_id else f"{mtype_str}_{title}"
         cached_cat = self._cache_mgr.get(cache_key)
         if cached_cat is not None:
-            return cached_cat if cached_cat != "" else None
+            if cached_cat != "":
+                logger.info(f"【高级二级分类】命中缓存 [{cache_key}] -> 分类 [{cached_cat}]")
+                return cached_cat
+            return None
+
+        logger.info(f"【高级二级分类】开始规则比对: 作品 [{title}] (TMDB: {tmdb_id}, 类型: {mtype_str})")
 
         # 收集扩展信息 (演职员、关键词、别名池)
         extra_data = self._tmdb_extra.build_extra_data(tmdb_info)
@@ -183,8 +189,12 @@ class advancedcategory(_PluginBase):
 
             if RuleEngine.match_rule(rule_dict, tmdb_info, extra_data):
                 matched_cat_name = cat_name
-                logger.info(f"【高级二级分类】作品 [{getattr(mediainfo, 'title', '')}] (TMDB: {tmdb_id}) 命中高级规则 -> 分类 [{cat_name}]")
+                logger.info(f"【高级二级分类】匹配成功: 作品 [{title}] (TMDB: {tmdb_id}) 命中分类规则 -> [{cat_name}]")
                 break
+
+
+        if not matched_cat_name:
+            logger.info(f"【高级二级分类】作品 [{title}] 未命中任何高级分类规则")
 
         # 写入缓存
         self._cache_mgr.set(cache_key, matched_cat_name or "")
@@ -193,21 +203,25 @@ class advancedcategory(_PluginBase):
     @eventmanager.register(ChainEventType.TransferRenameBuild)
     def on_transfer_rename_build(self, event: Event):
         """
-        重命名构建事件 Hook：匹配高级分类并改载入 rename_dict
+        重命名构建事件 Hook：匹配高级分类并载入 rename_dict
         """
         if not self.get_state():
             return
-        data = event.event_data
-        if not isinstance(data, TransferRenameBuildEventData):
+
+        data = getattr(event, "event_data", None)
+        if not data or not hasattr(data, "rename_dict"):
             return
 
-        rename_dict = data.rename_dict
+        rename_dict = getattr(data, "rename_dict", None)
         if not isinstance(rename_dict, dict):
             return
 
         mediainfo = rename_dict.get("__mediainfo__")
         if not mediainfo:
             return
+
+        source_path = getattr(data, "source_path", None)
+        logger.info(f"【高级二级分类】收到 TransferRenameBuild 事件: 文件 [{source_path}]")
 
         matched_cat = self.get_matched_category(mediainfo)
         if matched_cat:
@@ -222,45 +236,48 @@ class advancedcategory(_PluginBase):
         """
         if not self.get_state():
             return
-        data = event.event_data
-        if not isinstance(data, TransferRenameEventData):
+
+        data = getattr(event, "event_data", None)
+        if not data or not hasattr(data, "render_str") or not hasattr(data, "path"):
             return
+
         if not data.path or not data.render_str:
             return
 
-        source_path = data.source_path or (data.source_item.path if data.source_item else None)
-        if not source_path:
-            return
+        source_path = getattr(data, "source_path", None) or (data.source_item.path if getattr(data, "source_item", None) else None)
+        rename_dict = getattr(data, "rename_dict", {}) or {}
+        mediainfo = rename_dict.get("__mediainfo__")
 
-        mediainfo = data.rename_dict.get("__mediainfo__") if data.rename_dict else None
         if not mediainfo:
             return
+
+        logger.info(f"【高级二级分类】收到 TransferRename 事件: 预渲染目标 [{data.render_str}], 基础路径 [{data.path}]")
 
         matched_cat = self.get_matched_category(mediainfo)
         if not matched_cat:
             return
 
-        if data.rename_dict and data.rename_dict.get("__mediainfo__"):
+        # 更新 mediainfo 属性
+        if rename_dict and rename_dict.get("__mediainfo__"):
             data.rename_dict["__mediainfo__"].category = matched_cat
 
-        # 重新拼接/替换目标二级目录路径
         try:
             old_render_path = Path(data.render_str)
             base_dir = Path(data.path)
-
             old_cat = getattr(mediainfo, "category", None) or ""
 
-            parts = list(old_render_path.parts)
-            if parts and old_cat and parts[0] == old_cat:
-                parts[0] = matched_cat
-                new_relative_path = Path(*parts)
+            # 判断基础路径（如 /mnt/data/strm/shareStrm/电影/港台电影），取其父级目录重新拼接高级分类 R级电影
+            if base_dir.parent and base_dir.name:
+                new_base_dir = base_dir.parent / matched_cat
             else:
-                new_relative_path = Path(matched_cat) / old_render_path
+                new_base_dir = base_dir / matched_cat
 
-            clean_abs_target = (base_dir / new_relative_path).as_posix()
+            # 拼接最终改写目标路径
+            clean_abs_target = (new_base_dir / old_render_path).as_posix()
+
 
             logger.info(
-                f"【高级二级分类】整理路径改写: 源文件 {source_path} 判定分类为 [{matched_cat}]，目标改写路径 -> {clean_abs_target}"
+                f"【高级二级分类】整理路径重构成功: 源文件 [{source_path}] -> 目标路径改写为 [{clean_abs_target}]"
             )
             data.updated = True
             data.updated_str = clean_abs_target
@@ -274,6 +291,7 @@ class advancedcategory(_PluginBase):
                 )
         except Exception as e:
             logger.error(f"【高级二级分类】改写整理路径失败: {e}")
+
 
     def get_api(self) -> List[Dict[str, Any]]:
         """获取插件API列表"""
