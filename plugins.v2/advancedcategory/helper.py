@@ -400,3 +400,8 @@ class CacheManager:
         if key and category_name:
             self._cache_data[key] = category_name
             self.save()
+
+    def clear(self):
+        self._cache_data = {}
+        self.save()
+

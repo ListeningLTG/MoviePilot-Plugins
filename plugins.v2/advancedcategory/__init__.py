@@ -37,7 +37,7 @@ class advancedcategory(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/category.png"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -65,8 +65,39 @@ class advancedcategory(_PluginBase):
             self._enabled = config.get("enabled", False)
             self._notify = config.get("notify", False)
 
-        # 初始化路径与规则
+            # 保存并更新提交的 YAML 规则文本
+            rules_yaml = config.get("rules_yaml")
+            if rules_yaml and isinstance(rules_yaml, str):
+                self._save_rules_yaml(rules_yaml)
+
+        # 初始化路径与规则加载
         self._init_rules_and_cache()
+
+    def _save_rules_yaml(self, rules_yaml: str):
+        """校验并将用户在表单编辑的 YAML 文本保存回磁盘配置文件"""
+        try:
+            # 校验 YAML 语法合法性
+            if hasattr(ruamel_yaml, "YAML"):
+                yaml_loader = ruamel_yaml.YAML()
+                parsed = yaml_loader.load(rules_yaml)
+            else:
+                parsed = ruamel_yaml.safe_load(rules_yaml)
+
+            if not isinstance(parsed, dict):
+                logger.error("【高级二级分类】表单提交的 YAML 规则格式不符合 Dict 结构，放弃写盘更新")
+                return
+
+            # 写入磁盘文件
+            with open(self._rules_file_path, mode="w", encoding="utf-8") as f:
+                f.write(rules_yaml)
+            logger.info(f"【高级二级分类】通过插件配置界面成功保存更新规则文件: {self._rules_file_path}")
+
+            # 清理已有缓存以使新规则立刻在后续整理中生效
+            if self._cache_mgr:
+                self._cache_mgr.clear()
+        except Exception as e:
+            logger.error(f"【高级二级分类】保存提交的 YAML 规则文本失败（语法错误或写盘失败）: {e}")
+
 
     @property
     def _plugin_data_dir(self) -> Path:
@@ -244,11 +275,31 @@ class advancedcategory(_PluginBase):
         """获取插件API列表"""
         return []
 
+    def _get_current_rules_yaml_text(self) -> str:
+        """读取当前分类规则 YAML 文件文本，供表单编辑器展示"""
+        if self._rules_file_path.exists():
+            try:
+                with open(self._rules_file_path, mode="r", encoding="utf-8", errors="replace") as f:
+                    return f.read()
+            except Exception as e:
+                logger.error(f"【高级二级分类】读取规则文件失败: {e}")
+
+        example_file = Path(__file__).parent / "category_rules.yaml.example"
+        if example_file.exists():
+            try:
+                with open(example_file, mode="r", encoding="utf-8", errors="replace") as f:
+                    return f.read()
+            except Exception as e:
+                logger.error(f"【高级二级分类】读取规则模版文件失败: {e}")
+        return ""
+
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
         拼装插件配置页面
         """
         rules_path_str = str(self._rules_file_path.as_posix() if hasattr(self._rules_file_path, "as_posix") else self._rules_file_path)
+        current_yaml_text = self._get_current_rules_yaml_text()
+
         return [
             {
                 "component": "VForm",
@@ -296,7 +347,29 @@ class advancedcategory(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": f"规则配置文件路径：{rules_path_str}。编辑该 YAML 文件可修改高级分类规则（支持 keywords、series_keywords、series_actors 等）。",
+                                            "text": f"规则配置文件路径：{rules_path_str}。直接在下方文本框中编辑 YAML 规则，保存后将自动校验语法并更新生效。",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "rules_yaml",
+                                            "label": "高级二级分类 YAML 规则配置",
+                                            "hint": "可以在此处直接修改/添加分类规则（支持 keywords、series_keywords、series_actors 等）。点击【保存】后自动校验并生效。",
+                                            "persistent-hint": True,
+                                            "rows": 16,
+                                            "auto-grow": True,
                                         },
                                     }
                                 ],
@@ -308,7 +381,9 @@ class advancedcategory(_PluginBase):
         ], {
             "enabled": False,
             "notify": False,
+            "rules_yaml": current_yaml_text,
         }
+
 
     def get_page(self) -> List[dict]:
         """
