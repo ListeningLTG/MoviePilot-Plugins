@@ -438,7 +438,7 @@ def _schedule_subtitle_receive_retry(
             "callback_data": f"[PLUGIN]p115sharestrm|retry_sub:{share_code}:{receive_code}",
         }]]
         try:
-            downloaded, fail_count, downloaded_items = _download_subtitles_from_share(
+            downloaded, fail_count, downloaded_items, refreshed_media = _download_subtitles_from_share(
                 client,
                 share_code,
                 receive_code,
@@ -707,7 +707,7 @@ def _finalize_subtitles_async(
         subtitle_source = str((subtitle_files[0].get("_scan_source") if subtitle_files else "unknown") or "unknown")
         subtitle_cache_age = subtitle_files[0].get("_scan_cache_age_sec") if subtitle_files else None
         try:
-            downloaded_subtitle_paths, subtitle_fail_count, downloaded_subtitle_items = _download_subtitles_from_share(
+            downloaded_subtitle_paths, subtitle_fail_count, downloaded_subtitle_items, refreshed_media_files = _download_subtitles_from_share(
                 client,
                 share_code,
                 receive_code,
@@ -718,6 +718,12 @@ def _finalize_subtitles_async(
                     "subtitle_cache_age_sec": subtitle_cache_age,
                 },
             )
+            if refreshed_media_files is not None:
+                logger.info(
+                    f"【P115ShareStrm】990002 重扫后同步更新媒体文件列表: "
+                    f"{len(media_files)} -> {len(refreshed_media_files)} 个"
+                )
+                media_files = refreshed_media_files
         except ShareReceiveLimitedError as e:
             try:
                 retry_hours = max(1, int(configer.share_receive_retry_hours or 3))
@@ -1149,6 +1155,36 @@ def _collect_live_subtitle_items(
     return result
 
 
+def _collect_live_media_and_subtitle_items(
+    client: "ShareP115Client",
+    share_code: str,
+    receive_code: str,
+) -> Tuple[List[dict], List[dict]]:
+    """同时重扫媒体与字幕，确保 _full_path 一致（用于 990002 兜底）。"""
+    media_exts = {
+        f".{ext.strip().lower()}"
+        for ext in (configer.user_rmt_mediaext or "").split(",")
+        if ext.strip()
+    }
+    subtitle_exts = {
+        f".{ext.strip().lower()}"
+        for ext in (configer.user_subtitle_ext or "").split(",")
+        if ext.strip()
+    }
+    media_result: List[dict] = []
+    subtitle_result: List[dict] = []
+    for item in iter_share_files(client, share_code, receive_code):
+        filename = item.get("name", "")
+        file_ext = Path(filename).suffix.lower()
+        if file_ext in media_exts:
+            item["_scan_source"] = "live_scan"
+            media_result.append(item)
+        elif subtitle_exts and file_ext in subtitle_exts:
+            item["_scan_source"] = "live_scan"
+            subtitle_result.append(item)
+    return media_result, subtitle_result
+
+
 def _match_subtitle_batch_by_identity(
     live_items: List[dict],
     wanted_items: List[dict],
@@ -1453,7 +1489,7 @@ def _download_subtitles_from_share(
     subtitle_items: List[dict],
     save_path_obj: Path,
     context: Optional[Dict[str, Any]] = None,
-) -> Tuple[List[Path], int, List[dict]]:
+) -> Tuple[List[Path], int, List[dict], Optional[List[dict]]]:
     """
     通过转存方式下载分享中的字幕文件：
     1. 在网盘中创建临时文件夹
@@ -1464,7 +1500,7 @@ def _download_subtitles_from_share(
 
     参考 p115strmhelper 插件的 batch_share_subtitle_downloader。
 
-    :return: (成功下载的本地路径列表, 失败数量, 成功下载对应的字幕项)
+    :return: (成功下载的本地路径列表, 失败数量, 成功下载对应的字幕项, 重扫后的媒体文件列表或None)
     """
     import httpx
 
@@ -1494,6 +1530,7 @@ def _download_subtitles_from_share(
     single_retry_max = max(1, int(configer.subtitle_single_retry_max or 20))
     shared_source = (context or {}).get("subtitle_source") or "unknown"
     shared_cache_age = (context or {}).get("subtitle_cache_age_sec")
+    refreshed_media_files: Optional[List[dict]] = None
 
     for batch_start in range(0, len(subtitle_items), batch_size):
         batch_items = subtitle_items[batch_start:batch_start + batch_size]
@@ -1549,8 +1586,11 @@ def _download_subtitles_from_share(
                 recovered_batch_submitted = False
                 if strategy == "auto_rescan_once":
                     try:
-                        live_items = _collect_live_subtitle_items(client, share_code, receive_code)
-                        matched_items = _match_subtitle_batch_by_identity(live_items, batch_items)
+                        live_media_items, live_sub_items = _collect_live_media_and_subtitle_items(
+                            client, share_code, receive_code
+                        )
+                        refreshed_media_files = live_media_items
+                        matched_items = _match_subtitle_batch_by_identity(live_sub_items, batch_items)
                         if matched_items:
                             recovered_items = matched_items
                             logger.info(
@@ -1756,7 +1796,7 @@ def _download_subtitles_from_share(
                 except Exception as e:
                     logger.warning(f"【P115ShareStrm】清理字幕临时目录失败: {e}", exc_info=True)
 
-    return downloaded_paths, fail_count, downloaded_items
+    return downloaded_paths, fail_count, downloaded_items, refreshed_media_files
 
 
 def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
