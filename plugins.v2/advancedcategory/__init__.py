@@ -37,7 +37,7 @@ class advancedcategory(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/category.png"
     # 插件版本
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -65,13 +65,17 @@ class advancedcategory(_PluginBase):
             self._enabled = config.get("enabled", False)
             self._notify = config.get("notify", False)
 
-            # 保存并更新提交的 YAML 规则文本
+        # 先初始化路径、规则与缓存管理器
+        self._init_rules_and_cache()
+
+        # 如果保存配置提交了新的 YAML 规则文本，写入磁盘并同步刷新缓存与规则
+        if config:
             rules_yaml = config.get("rules_yaml")
             if rules_yaml and isinstance(rules_yaml, str):
                 self._save_rules_yaml(rules_yaml)
+                # 重新载入写盘后的规则
+                self._init_rules_and_cache()
 
-        # 初始化路径与规则加载
-        self._init_rules_and_cache()
 
     def _save_rules_yaml(self, rules_yaml: str):
         """校验并将用户在表单编辑的 YAML 文本保存回磁盘配置文件"""

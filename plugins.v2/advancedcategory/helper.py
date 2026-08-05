@@ -87,16 +87,37 @@ class RuleEngine:
         if not rule:
             return True
 
-        # 整理要比对的规则条目
-        normalized_rule = {}
+        # 整理要比对的规则条目，将同类型逻辑字段（如 keywords 与 include_keywords）自动合并
+        normalized_rule: Dict[str, Any] = {}
+        kw_list = []
+        actor_list = []
+        country_list = []
+
         for k, v in rule.items():
+            if v is None or v == "":
+                continue
             norm_k = cls.normalize_rule_key(k)
-            normalized_rule[norm_k] = v
+            if norm_k in ("keywords", "include_keywords"):
+                kw_list.append(str(v))
+            elif norm_k in ("actors", "series_actors"):
+                actor_list.append(str(v))
+            elif norm_k in ("origin_country", "production_countries"):
+                country_list.append(str(v))
+            else:
+                normalized_rule[norm_k] = v
+
+        if kw_list:
+            normalized_rule["keywords"] = ",".join(kw_list)
+        if actor_list:
+            normalized_rule["actors"] = ",".join(actor_list)
+        if country_list:
+            normalized_rule["origin_country"] = ",".join(country_list)
 
         # 遍历规则中的各项要求
         for attr, rule_val in normalized_rule.items():
             if rule_val is None or rule_val == "":
                 continue
+
 
             values, invert_values = cls.parse_values(rule_val)
             if not values and not invert_values:
