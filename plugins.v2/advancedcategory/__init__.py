@@ -9,6 +9,7 @@ try:
     import ruamel.yaml as ruamel_yaml
 except ImportError:
     import yaml as ruamel_yaml
+
 from app.core.config import settings
 from app.core.event import eventmanager, Event
 from app.log import logger
@@ -20,6 +21,7 @@ from app.schemas import (
 from app.schemas.types import (
     ChainEventType,
     MediaType,
+    NotificationType,
 )
 
 from .helper import RuleEngine, TmdbExtraHelper, CacheManager
@@ -35,7 +37,7 @@ class advancedcategory(_PluginBase):
     # 插件图标
     plugin_icon = "mdi-tag-multiple-outline"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -53,6 +55,7 @@ class advancedcategory(_PluginBase):
         return self.plugin_name
 
     _enabled: bool = False
+    _notify: bool = False
     _rules: Dict[str, Any] = {}
     _cache_mgr: Optional[CacheManager] = None
     _tmdb_extra: Optional[TmdbExtraHelper] = None
@@ -60,6 +63,7 @@ class advancedcategory(_PluginBase):
     def init_plugin(self, config: dict = None):
         if config:
             self._enabled = config.get("enabled", False)
+            self._notify = config.get("notify", False)
 
         # 初始化路径与规则
         self._init_rules_and_cache()
@@ -120,7 +124,7 @@ class advancedcategory(_PluginBase):
         if not mediainfo or not self._rules:
             return None
 
-        mtype_str = "movie" if mediainfo.type == MediaType.MOVIE else "tv"
+        mtype_str = "movie" if getattr(mediainfo, "type", None) == MediaType.MOVIE else "tv"
         category_rules_dict = self._rules.get(mtype_str) or {}
         if not category_rules_dict:
             return None
@@ -140,7 +144,6 @@ class advancedcategory(_PluginBase):
         matched_cat_name = None
         for cat_name, rule_dict in category_rules_dict.items():
             if not rule_dict:
-                # 空规则直接跳过或作为兜底
                 continue
 
             if RuleEngine.match_rule(rule_dict, tmdb_info, extra_data):
@@ -155,7 +158,7 @@ class advancedcategory(_PluginBase):
     @eventmanager.register(ChainEventType.TransferRenameBuild)
     def on_transfer_rename_build(self, event: Event):
         """
-        重命名构建事件 Hook：匹配高级分类并改写 rename_dict
+        重命名构建事件 Hook：匹配高级分类并改载入 rename_dict
         """
         if not self.get_state():
             return
@@ -210,16 +213,13 @@ class advancedcategory(_PluginBase):
             old_render_path = Path(data.render_str)
             base_dir = Path(data.path)
 
-            # 获取原始的分类名（如果有）
             old_cat = getattr(mediainfo, "category", None) or ""
 
-            # 拆分路径，将原二级分类替换为新的 matched_cat
             parts = list(old_render_path.parts)
             if parts and old_cat and parts[0] == old_cat:
                 parts[0] = matched_cat
                 new_relative_path = Path(*parts)
             else:
-                # 若渲染相对路径开头不是原分类，则直接将 matched_cat 插入在 base_dir 之后
                 new_relative_path = Path(matched_cat) / old_render_path
 
             clean_abs_target = (base_dir / new_relative_path).as_posix()
@@ -230,6 +230,13 @@ class advancedcategory(_PluginBase):
             data.updated = True
             data.updated_str = clean_abs_target
             data.source = self.plugin_name
+
+            if self._notify:
+                self.post_message(
+                    mtype=NotificationType.Plugin,
+                    title="高级二级分类路径改写",
+                    text=f"作品：{getattr(mediainfo, 'title', '')}\n匹配分类：{matched_cat}\n目标路径：{clean_abs_target}"
+                )
         except Exception as e:
             logger.error(f"【高级二级分类】改写整理路径失败: {e}")
 
@@ -239,8 +246,9 @@ class advancedcategory(_PluginBase):
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
-        获取插件表单
+        拼装插件配置页面
         """
+        rules_path_str = str(self._rules_file_path.as_posix() if hasattr(self._rules_file_path, "as_posix") else self._rules_file_path)
         return [
             {
                 "component": "VForm",
@@ -250,7 +258,7 @@ class advancedcategory(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -260,7 +268,20 @@ class advancedcategory(_PluginBase):
                                         },
                                     }
                                 ],
-                            }
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "notify",
+                                            "label": "匹配成功发送通知",
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                     {
@@ -275,7 +296,7 @@ class advancedcategory(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": f"插件已启用。规则配置文件路径：{self._rules_file_path}。编辑该 YAML 文件可修改高级分类规则。",
+                                            "text": f"规则配置文件路径：{rules_path_str}。编辑该 YAML 文件可修改高级分类规则（支持 keywords、series_keywords、series_actors 等）。",
                                         },
                                     }
                                 ],
@@ -286,8 +307,126 @@ class advancedcategory(_PluginBase):
             }
         ], {
             "enabled": False,
+            "notify": False,
         }
 
     def get_page(self) -> List[dict]:
-        """获取插件页面"""
-        return []
+        """
+        拼装插件详情页面
+        """
+        rules_path_str = str(self._rules_file_path.as_posix() if hasattr(self._rules_file_path, "as_posix") else self._rules_file_path)
+
+        rule_rows = []
+        if self._rules:
+            for mtype, cat_dict in self._rules.items():
+                mtype_label = "电影" if mtype == "movie" else "电视剧/动漫"
+                if isinstance(cat_dict, dict):
+                    for cat_name, rdict in cat_dict.items():
+                        if not isinstance(rdict, dict):
+                            continue
+                        genre_ids = str(rdict.get("genre_ids") or "-")
+                        languages = str(rdict.get("original_language") or "-")
+                        countries = str(rdict.get("production_countries") or rdict.get("origin_country") or "-")
+                        kw = str(rdict.get("keywords") or rdict.get("include_keywords") or "-")
+                        actors = str(rdict.get("series_actors") or rdict.get("actors") or "-")
+
+                        if len(kw) > 35:
+                            kw = kw[:35] + "..."
+                        if len(actors) > 35:
+                            actors = actors[:35] + "..."
+
+                        rule_rows.append({
+                            "component": "tr",
+                            "content": [
+                                {"component": "td", "content": [{"component": "VChip", "props": {"color": "primary", "size": "small"}, "text": mtype_label}]},
+                                {"component": "td", "content": [{"component": "strong", "text": str(cat_name)}]},
+                                {"component": "td", "text": genre_ids},
+                                {"component": "td", "text": languages},
+                                {"component": "td", "text": countries},
+                                {"component": "td", "text": kw},
+                                {"component": "td", "text": actors},
+                            ]
+                        })
+
+        cache_data = getattr(self._cache_mgr, "_cache_data", {}) if self._cache_mgr else {}
+        cache_rows = []
+        if isinstance(cache_data, dict):
+            for cache_key, cat_val in list(cache_data.items())[-20:]:
+                if not cat_val:
+                    continue
+                cache_rows.append({
+                    "component": "tr",
+                    "content": [
+                        {"component": "td", "text": str(cache_key)},
+                        {"component": "td", "content": [{"component": "VChip", "props": {"color": "success", "size": "small"}, "text": str(cat_val)}]},
+                    ]
+                })
+
+        page_content = []
+
+        page_content.append({
+            "component": "VAlert",
+            "props": {
+                "type": "info",
+                "variant": "tonal",
+                "class": "mb-4",
+                "text": f"【高级二级分类】使用配置文件：{rules_path_str}，当前已解析 {len(rule_rows)} 条自定义分类规则。"
+            }
+        })
+
+        if rule_rows:
+            page_content.append({
+                "component": "VCard",
+                "props": {"class": "mb-4"},
+                "content": [
+                    {"component": "VCardTitle", "text": "🏷️ 已生效的高级分类规则概览"},
+                    {"component": "VCardText", "content": [
+                        {
+                            "component": "VTable",
+                            "props": {"density": "compact"},
+                            "content": [
+                                {"component": "thead", "content": [{"component": "tr", "content": [
+                                    {"component": "th", "text": "媒体类型"},
+                                    {"component": "th", "text": "二级分类名"},
+                                    {"component": "th", "text": "Genre IDs"},
+                                    {"component": "th", "text": "语种"},
+                                    {"component": "th", "text": "国家/地区"},
+                                    {"component": "th", "text": "关键词示例"},
+                                    {"component": "th", "text": "演职员示例"},
+                                ]}]},
+                                {"component": "tbody", "content": rule_rows}
+                            ]
+                        }
+                    ]}
+                ]
+            })
+
+        if cache_rows:
+            page_content.append({
+                "component": "VCard",
+                "props": {"class": "mb-4"},
+                "content": [
+                    {"component": "VCardTitle", "text": "⚡ 识别分类命中缓存"},
+                    {"component": "VCardText", "content": [
+                        {
+                            "component": "VTable",
+                            "props": {"density": "compact"},
+                            "content": [
+                                {"component": "thead", "content": [{"component": "tr", "content": [
+                                    {"component": "th", "text": "识别键名 (Media / TMDB)"},
+                                    {"component": "th", "text": "判定二级分类"},
+                                ]}]},
+                                {"component": "tbody", "content": cache_rows}
+                            ]
+                        }
+                    ]}
+                ]
+            })
+
+        if not rule_rows and not cache_rows:
+            page_content.append({
+                "component": "VAlert",
+                "props": {"type": "warning", "text": f"未在 {rules_path_str} 中读取到有效规则，请确保配置文件正确存在。"}
+            })
+
+        return page_content
