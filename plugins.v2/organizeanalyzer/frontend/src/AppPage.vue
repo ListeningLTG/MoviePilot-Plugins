@@ -144,7 +144,7 @@
             <th class="text-left">源路径 src</th>
             <th class="text-left">目标路径 dest</th>
             <th class="text-left">异常原因明细</th>
-            <th class="text-center" style="width: 110px;">操作</th>
+            <th class="text-center" style="width: 150px;">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -187,14 +187,46 @@
             </td>
             <td class="text-body-2 text-warning">{{ item.detail || '-' }}</td>
             <td class="text-center">
-              <v-btn
-                size="x-small"
-                variant="text"
-                :color="item.status === 'ignored' ? 'primary' : 'grey'"
-                @click="ignoreItem(item.key)"
-              >
-                {{ item.status === 'ignored' ? '取消忽略' : '忽略' }}
-              </v-btn>
+              <div class="d-flex align-center justify-center ga-1">
+                <!-- 复制 TMDB ID -->
+                <v-tooltip text="复制 TMDB ID" location="top" v-if="getTmdbInfo(item).tmdbid">
+                  <template v-slot:activator="{ props }">
+                    <v-btn
+                      v-bind="props"
+                      icon="mdi-identifier"
+                      size="x-small"
+                      variant="text"
+                      color="primary"
+                      @click="copyText(getTmdbInfo(item).tmdbid, 'TMDB ID')"
+                    ></v-btn>
+                  </template>
+                </v-tooltip>
+
+                <!-- 打开 TMDB 网页 -->
+                <v-tooltip text="在 TMDB 中打开网页" location="top" v-if="getTmdbInfo(item).url">
+                  <template v-slot:activator="{ props }">
+                    <v-btn
+                      v-bind="props"
+                      icon="mdi-open-in-new"
+                      size="x-small"
+                      variant="text"
+                      color="info"
+                      :href="getTmdbInfo(item).url"
+                      target="_blank"
+                    ></v-btn>
+                  </template>
+                </v-tooltip>
+
+                <!-- 忽略 / 取消忽略 -->
+                <v-btn
+                  size="x-small"
+                  variant="text"
+                  :color="item.status === 'ignored' ? 'primary' : 'grey'"
+                  @click="ignoreItem(item.key)"
+                >
+                  {{ item.status === 'ignored' ? '取消忽略' : '忽略' }}
+                </v-btn>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -459,29 +491,56 @@ const getTypeColor = (type) => {
   }
 };
 
+const getTmdbInfo = (item) => {
+  let tmdbid = item.tmdbid || '';
+  if (!tmdbid) {
+    const text = (item.dest || '') + ' ' + (item.detail || '');
+    const m = text.match(/tmdbid[=:\s]*(\d+)/i) || text.match(/tmdb_id[=:\s]*(\d+)/i) || text.match(/TMDB\s*ID[:\s]*(\d+)/i);
+    if (m) {
+      tmdbid = m[1];
+    }
+  }
+
+  if (!tmdbid || tmdbid === '0') {
+    return { tmdbid: '', url: '' };
+  }
+
+  const dest = (item.dest || '').toLowerCase();
+  const src = (item.src || '').toLowerCase();
+  const mtype = (item.type || '').toLowerCase();
+  const isTv = mtype.includes('tv') || mtype.includes('剧') || dest.includes('/电视剧/') || dest.includes('/动漫/') || src.includes('/电视剧/');
+
+  const mediaType = isTv ? 'tv' : 'movie';
+  return {
+    tmdbid: String(tmdbid),
+    mediaType: mediaType,
+    url: `https://www.themoviedb.org/${mediaType}/${tmdbid}`
+  };
+};
+
 const snackbar = ref({ show: false, text: '', color: 'success' });
 
-const copyText = (text) => {
+const copyText = (text, label = '路径') => {
   if (!text || text === '-') return;
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(() => {
-      snackbar.value = { show: true, text: '已成功复制路径到剪贴板！', color: 'success' };
+      snackbar.value = { show: true, text: `已成功复制${label}到剪贴板！`, color: 'success' };
     }).catch(() => {
-      fallbackCopy(text);
+      fallbackCopy(text, label);
     });
   } else {
-    fallbackCopy(text);
+    fallbackCopy(text, label);
   }
 };
 
-const fallbackCopy = (text) => {
+const fallbackCopy = (text, label = '路径') => {
   const textArea = document.createElement('textarea');
   textArea.value = text;
   document.body.appendChild(textArea);
   textArea.select();
   try {
     document.execCommand('copy');
-    snackbar.value = { show: true, text: '已成功复制路径到剪贴板！', color: 'success' };
+    snackbar.value = { show: true, text: `已成功复制${label}到剪贴板！`, color: 'success' };
   } catch (err) {
     snackbar.value = { show: true, text: '复制失败，请手动复制', color: 'error' };
   }

@@ -1,6 +1,6 @@
 import { importShared } from './__federation_fn_import-054b33c3.js';
 
-const AppPage_vue_vue_type_style_index_0_scoped_cd456497_lang = '';
+const AppPage_vue_vue_type_style_index_0_scoped_1c4b3b55_lang = '';
 
 const _export_sfc = (sfc, props) => {
   const target = sfc.__vccOpts || sfc;
@@ -10,7 +10,7 @@ const _export_sfc = (sfc, props) => {
   return target;
 };
 
-const {resolveComponent:_resolveComponent,createVNode:_createVNode,createTextVNode:_createTextVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,withKeys:_withKeys,createElementBlock:_createElementBlock,renderList:_renderList,Fragment:_Fragment} = await importShared('vue');
+const {resolveComponent:_resolveComponent,createVNode:_createVNode,createTextVNode:_createTextVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,withKeys:_withKeys,createElementBlock:_createElementBlock,renderList:_renderList,Fragment:_Fragment,mergeProps:_mergeProps} = await importShared('vue');
 
 
 const _hoisted_1 = { class: "pa-4 organize-analyzer-page" };
@@ -37,12 +37,13 @@ const _hoisted_18 = ["title", "onClick"];
 const _hoisted_19 = ["title", "onClick"];
 const _hoisted_20 = { class: "text-body-2 text-warning" };
 const _hoisted_21 = { class: "text-center" };
-const _hoisted_22 = {
+const _hoisted_22 = { class: "d-flex align-center justify-center ga-1" };
+const _hoisted_23 = {
   key: 0,
   class: "d-flex align-center justify-space-between px-4 py-3"
 };
-const _hoisted_23 = { class: "text-caption text-medium-emphasis" };
-const _hoisted_24 = { class: "d-flex align-center ga-2" };
+const _hoisted_24 = { class: "text-caption text-medium-emphasis" };
+const _hoisted_25 = { class: "d-flex align-center ga-2" };
 
 const {ref,computed,onMounted} = await importShared('vue');
 
@@ -237,29 +238,56 @@ const getTypeColor = (type) => {
   }
 };
 
+const getTmdbInfo = (item) => {
+  let tmdbid = item.tmdbid || '';
+  if (!tmdbid) {
+    const text = (item.dest || '') + ' ' + (item.detail || '');
+    const m = text.match(/tmdbid[=:\s]*(\d+)/i) || text.match(/tmdb_id[=:\s]*(\d+)/i) || text.match(/TMDB\s*ID[:\s]*(\d+)/i);
+    if (m) {
+      tmdbid = m[1];
+    }
+  }
+
+  if (!tmdbid || tmdbid === '0') {
+    return { tmdbid: '', url: '' };
+  }
+
+  const dest = (item.dest || '').toLowerCase();
+  const src = (item.src || '').toLowerCase();
+  const mtype = (item.type || '').toLowerCase();
+  const isTv = mtype.includes('tv') || mtype.includes('剧') || dest.includes('/电视剧/') || dest.includes('/动漫/') || src.includes('/电视剧/');
+
+  const mediaType = isTv ? 'tv' : 'movie';
+  return {
+    tmdbid: String(tmdbid),
+    mediaType: mediaType,
+    url: `https://www.themoviedb.org/${mediaType}/${tmdbid}`
+  };
+};
+
 const snackbar = ref({ show: false, text: '', color: 'success' });
 
-const copyText = (text) => {
+const copyText = (text, label = '路径') => {
   if (!text || text === '-') return;
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(() => {
-      snackbar.value = { show: true, text: '已成功复制路径到剪贴板！', color: 'success' };
+      snackbar.value = { show: true, text: `已成功复制${label}到剪贴板！`, color: 'success' };
     }).catch(() => {
-      fallbackCopy(text);
+      fallbackCopy(text, label);
     });
   } else {
-    fallbackCopy(text);
+    fallbackCopy(text, label);
   }
 };
 
-const fallbackCopy = (text) => {
+const fallbackCopy = (text, label = '路径') => {
   const textArea = document.createElement('textarea');
   textArea.value = text;
   document.body.appendChild(textArea);
   textArea.select();
   try {
     document.execCommand('copy');
-    snackbar.value = { show: true, text: '已成功复制路径到剪贴板！', color: 'success' };
+    snackbar.value = { show: true, text: `已成功复制${label}到剪贴板！`, color: 'success' };
   } catch (err) {
     snackbar.value = { show: true, text: '复制失败，请手动复制', color: 'error' };
   }
@@ -282,6 +310,7 @@ return (_ctx, _cache) => {
   const _component_v_btn_toggle = _resolveComponent("v-btn-toggle");
   const _component_v_select = _resolveComponent("v-select");
   const _component_v_text_field = _resolveComponent("v-text-field");
+  const _component_v_tooltip = _resolveComponent("v-tooltip");
   const _component_v_table = _resolveComponent("v-table");
   const _component_v_pagination = _resolveComponent("v-pagination");
   const _component_v_card_title = _resolveComponent("v-card-title");
@@ -681,7 +710,7 @@ return (_ctx, _cache) => {
                 _createElementVNode("th", { class: "text-left" }, "异常原因明细"),
                 _createElementVNode("th", {
                   class: "text-center",
-                  style: {"width":"110px"}
+                  style: {"width":"150px"}
                 }, "操作")
               ])
             ], -1)),
@@ -740,17 +769,56 @@ return (_ctx, _cache) => {
                   }, _toDisplayString(item.dest || '-'), 9, _hoisted_19),
                   _createElementVNode("td", _hoisted_20, _toDisplayString(item.detail || '-'), 1),
                   _createElementVNode("td", _hoisted_21, [
-                    _createVNode(_component_v_btn, {
-                      size: "x-small",
-                      variant: "text",
-                      color: item.status === 'ignored' ? 'primary' : 'grey',
-                      onClick: $event => (ignoreItem(item.key))
-                    }, {
-                      default: _withCtx(() => [
-                        _createTextVNode(_toDisplayString(item.status === 'ignored' ? '取消忽略' : '忽略'), 1)
-                      ]),
-                      _: 2
-                    }, 1032, ["color", "onClick"])
+                    _createElementVNode("div", _hoisted_22, [
+                      (getTmdbInfo(item).tmdbid)
+                        ? (_openBlock(), _createBlock(_component_v_tooltip, {
+                            key: 0,
+                            text: "复制 TMDB ID",
+                            location: "top"
+                          }, {
+                            activator: _withCtx(({ props }) => [
+                              _createVNode(_component_v_btn, _mergeProps({ ref_for: true }, props, {
+                                icon: "mdi-identifier",
+                                size: "x-small",
+                                variant: "text",
+                                color: "primary",
+                                onClick: $event => (copyText(getTmdbInfo(item).tmdbid, 'TMDB ID'))
+                              }), null, 16, ["onClick"])
+                            ]),
+                            _: 2
+                          }, 1024))
+                        : _createCommentVNode("", true),
+                      (getTmdbInfo(item).url)
+                        ? (_openBlock(), _createBlock(_component_v_tooltip, {
+                            key: 1,
+                            text: "在 TMDB 中打开网页",
+                            location: "top"
+                          }, {
+                            activator: _withCtx(({ props }) => [
+                              _createVNode(_component_v_btn, _mergeProps({ ref_for: true }, props, {
+                                icon: "mdi-open-in-new",
+                                size: "x-small",
+                                variant: "text",
+                                color: "info",
+                                href: getTmdbInfo(item).url,
+                                target: "_blank"
+                              }), null, 16, ["href"])
+                            ]),
+                            _: 2
+                          }, 1024))
+                        : _createCommentVNode("", true),
+                      _createVNode(_component_v_btn, {
+                        size: "x-small",
+                        variant: "text",
+                        color: item.status === 'ignored' ? 'primary' : 'grey',
+                        onClick: $event => (ignoreItem(item.key))
+                      }, {
+                        default: _withCtx(() => [
+                          _createTextVNode(_toDisplayString(item.status === 'ignored' ? '取消忽略' : '忽略'), 1)
+                        ]),
+                        _: 2
+                      }, 1032, ["color", "onClick"])
+                    ])
                   ])
                 ]))
               }), 128))
@@ -759,13 +827,13 @@ return (_ctx, _cache) => {
           _: 1
         }),
         (pagination.value.total > 0)
-          ? (_openBlock(), _createElementBlock("div", _hoisted_22, [
-              _createElementVNode("div", _hoisted_23, [
+          ? (_openBlock(), _createElementBlock("div", _hoisted_23, [
+              _createElementVNode("div", _hoisted_24, [
                 _cache[41] || (_cache[41] = _createTextVNode(" 共 ", -1)),
                 _createElementVNode("strong", null, _toDisplayString(pagination.value.total), 1),
                 _createTextVNode(" 条，当前第 " + _toDisplayString(pagination.value.page) + " / " + _toDisplayString(pagination.value.total_pages) + " 页 ", 1)
               ]),
-              _createElementVNode("div", _hoisted_24, [
+              _createElementVNode("div", _hoisted_25, [
                 _createVNode(_component_v_select, {
                   modelValue: pagination.value.page_size,
                   "onUpdate:modelValue": [
@@ -890,6 +958,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-cd456497"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-1c4b3b55"]]);
 
 export { AppPage as default };
