@@ -42,7 +42,7 @@ class shortdramacompilation(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg"
     # 插件版本
-    plugin_version = "0.2.4"
+    plugin_version = "0.2.5"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -220,7 +220,7 @@ class shortdramacompilation(_PluginBase):
                                 'content': [
                                     {
                                         'component': 'VTextField',
-                                        'props': {'model': 'category_dir', 'label': '分类目录绝对路径', 'placeholder': '/media/短剧'}
+                                        'props': {'model': 'category_dir', 'label': '分类目录路径', 'placeholder': '支持绝对路径(如 /media/短剧)或相对路径(如 短剧)'}
                                     }
                                 ]
                             },
@@ -335,7 +335,7 @@ class shortdramacompilation(_PluginBase):
                                 'content': [
                                     {
                                         'component': 'VTextField',
-                                        'props': {'model': 'anime_category_dir', 'label': '动画短剧目录绝对路径', 'placeholder': '/media/动画短剧'}
+                                        'props': {'model': 'anime_category_dir', 'label': '动画短剧目录路径', 'placeholder': '支持绝对路径(如 /media/动画短剧)或相对路径(如 动画短剧)'}
                                     }
                                 ]
                             }
@@ -353,7 +353,7 @@ class shortdramacompilation(_PluginBase):
                                         'props': {
                                             'type': 'info',
                                             'variant': 'tonal',
-                                            'text': '【多策略管道分类】1.TMDB播出平台ID -> 2.TMDB标注片长 -> 3.豆瓣标注片长 -> 4.FFprobe探测。判定结果自动存入 cache.json（包含 24 小时自动刷新动画类型评估），支持将动画短剧路由至独立目录。'
+                                            'text': '【多策略管道分类】1.TMDB播出平台ID -> 2.TMDB标注片长 -> 3.豆瓣标注片长 -> 4.FFprobe探测。目录支持绝对路径或相对路径（如 短剧 或 ../短剧），留空自动在整理同级创建短剧分类。判定结果自动存入 cache.json。'
                                         }
                                     }
                                 ]
@@ -457,6 +457,35 @@ class shortdramacompilation(_PluginBase):
                         pass
 
         return is_anime
+
+    @classmethod
+    def _resolve_category_dir(cls, cat_dir: Optional[str], cat_name: str, base_path: Path) -> Path:
+        """
+        动态解析短剧分类目标目录：
+        1. 绝对路径（如 /mnt/media/短剧 或 D:\\media\\短剧）：直接使用该绝对路径；
+        2. 留空 ("")：动态在 base_path 下（若包含原二级分类名，替换原二级分类名；否则直接追加 cat_name）构建分类目录；
+        3. 相对路径（如 短剧, ./短剧, ../短剧, 电视剧/短剧）：
+           - 简易相对目录（如 短剧 或 ./短剧）：若 base_path 包含二级分类目录，自动替换二级分类目录为 cat_dir；
+           - 包含跨级相对路径（如 ../短剧 或 电视剧/短剧）：以 base_path 为基准调用 (base_path / cat_dir).resolve() 解析。
+        """
+        if not cat_dir:
+            if base_path.name != cat_name:
+                return base_path.parent / cat_name
+            return base_path
+
+        cat_dir_str = str(cat_dir).strip()
+        p = Path(cat_dir_str)
+        if p.is_absolute() or cat_dir_str.startswith("/") or cat_dir_str.startswith("\\"):
+            return p
+
+        cat_dir_clean = cat_dir_str.rstrip("/\\")
+        if ".." in cat_dir_clean or "/" in cat_dir_clean or "\\" in cat_dir_clean:
+            return Path(os.path.normpath((base_path / p).as_posix()))
+
+        if base_path.name != cat_dir_clean and base_path.parent != base_path:
+            return base_path.parent / cat_dir_clean
+
+        return base_path / cat_dir_clean
 
     def get_target_category(self, mediainfo: Optional[MediaInfo]) -> Tuple[str, str]:
         """
@@ -676,8 +705,8 @@ class shortdramacompilation(_PluginBase):
     @eventmanager.register(ChainEventType.TransferRename)
     def on_transfer_rename(self, event: Event):
         """
-        1.2 重命名渲染改写 Hook：在整理预览及实际整理计算渲染路径后，改写为短剧绝对路径，
-        确保【整理预览】界面直接展示短剧/动画短剧分类目录绝对路径。
+        1.2 重命名渲染改写 Hook：在整理预览及实际整理计算渲染路径后，改写为短剧/动画短剧分类目录路径，
+        确保【整理预览】界面直接展示短剧/动画短剧分类目录目标路径。
         """
         if not self.get_state():
             return
@@ -702,34 +731,19 @@ class shortdramacompilation(_PluginBase):
                 data.rename_dict["__mediainfo__"].category = cat_name
 
             current_base_path = Path(data.path)
+            category_dir_path = self._resolve_category_dir(cat_dir, cat_name, current_base_path)
 
-            if cat_dir:
-                category_dir_path = Path(cat_dir)
-                if not str(current_base_path).startswith(str(category_dir_path)):
-                    try:
-                        clean_abs_target = (category_dir_path / data.render_str).as_posix()
-                        logger.info(
-                            f"【短剧自动分类】整理预览/重命名改写：源文件 {source_path} 识别为短剧，直显目标绝对路径 -> {clean_abs_target}"
-                        )
-                        data.updated = True
-                        data.updated_str = clean_abs_target
-                        data.source = self.plugin_name
-                    except Exception as e:
-                        logger.error(f"【短剧自动分类】改写重命名路径失败: {e}")
-            else:
-                # 动态改写：未配置分类目录绝对路径，但 base path 包含原二级分类（如 国产剧），动态修正为短剧分类
-                if current_base_path.name != cat_name:
-                    try:
-                        new_base_path = current_base_path.parent / cat_name
-                        clean_abs_target = (new_base_path / data.render_str).as_posix()
-                        logger.info(
-                            f"【短剧自动分类】整理预览/重命名改写：源文件 {source_path} 识别为短剧，动态修正二级分类路径 -> {clean_abs_target}"
-                        )
-                        data.updated = True
-                        data.updated_str = clean_abs_target
-                        data.source = self.plugin_name
-                    except Exception as e:
-                        logger.error(f"【短剧自动分类】动态修正二级分类路径失败: {e}")
+            if not str(current_base_path).startswith(str(category_dir_path)):
+                try:
+                    clean_abs_target = (category_dir_path / data.render_str).as_posix()
+                    logger.info(
+                        f"【短剧自动分类】整理预览/重命名改写：源文件 {source_path} 识别为短剧，目标分类路径 -> {clean_abs_target}"
+                    )
+                    data.updated = True
+                    data.updated_str = clean_abs_target
+                    data.source = self.plugin_name
+                except Exception as e:
+                    logger.error(f"【短剧自动分类】改写重命名路径失败: {e}")
 
     @eventmanager.register(ChainEventType.TransferIntercept)
     def on_transfer_intercept(self, event: Event):
@@ -752,23 +766,25 @@ class shortdramacompilation(_PluginBase):
             if data.mediainfo:
                 data.mediainfo.category = cat_name
 
-            category_dir_path = Path(cat_dir)
             target_path = data.target_path
+            tv_name = data.mediainfo.title if (data.mediainfo and data.mediainfo.title) else None
+            parts = target_path.parts
+            idx = -1
+            if tv_name:
+                for i, part in enumerate(parts):
+                    if part == tv_name:
+                        idx = i
+                        break
+            if idx != -1:
+                rel_subpath = Path(*parts[idx:])
+                base_path = Path(*parts[:idx])
+            else:
+                rel_subpath = Path(target_path.name)
+                base_path = target_path.parent
+
+            category_dir_path = self._resolve_category_dir(cat_dir, cat_name, base_path)
 
             if not str(target_path).startswith(str(category_dir_path)):
-                tv_name = data.mediainfo.title if (data.mediainfo and data.mediainfo.title) else None
-                parts = target_path.parts
-                idx = -1
-                if tv_name:
-                    for i, part in enumerate(parts):
-                        if part == tv_name:
-                            idx = i
-                            break
-                if idx != -1:
-                    rel_subpath = Path(*parts[idx:])
-                else:
-                    rel_subpath = Path(target_path.name)
-
                 new_target = category_dir_path / rel_subpath
                 logger.info(f"【短剧自动分类】整理拦截重定向：目标路径由 {target_path} 修正为 {new_target}")
                 data.target_path = new_target
@@ -779,9 +795,7 @@ class shortdramacompilation(_PluginBase):
         """
         3. 整理完成事件兜底：若前两重未覆盖到（如事后扫描），兜底将非短剧目录文件移动至对应短剧目录
         """
-        if not event:
-            return
-        if not self.get_state() or not self._category_dir:
+        if not event or not self.get_state():
             return
         event_data = event.event_data
         mediainfo: MediaInfo = event_data.get("mediainfo")
@@ -799,14 +813,18 @@ class shortdramacompilation(_PluginBase):
         sample_file = Path(file_list[0])
         target_path = sample_file.parent
         cat_name, cat_dir = self.get_target_category(mediainfo)
-        category_dir_path = Path(cat_dir)
+
+        tv_path = target_path.parent if (target_path.name.startswith("Season") or target_path.name.startswith("季")) else target_path
+        base_path = tv_path.parent
+
+        category_dir_path = self._resolve_category_dir(cat_dir, cat_name, base_path)
 
         if str(target_path).startswith(str(category_dir_path)):
             if self._notify:
                 self.post_message(
                     mtype=NotificationType.Organize,
                     title="【短剧自动分类】",
-                    text=f"已将短剧《{target_path.parent.name}》直接分类入库至 {cat_dir} 目录",
+                    text=f"已将短剧《{tv_path.name}》直接分类入库至 {category_dir_path} 目录",
                 )
             return
 
@@ -827,7 +845,7 @@ class shortdramacompilation(_PluginBase):
                     time.sleep(float(self._delay))
 
                 logger.info(f"【短剧自动分类】确认属于短剧，兜底机制触发：{target_path} 开始二次移动...")
-                self.__move_files(target_path=target_path, dest_dir=cat_dir)
+                self.__move_files(target_path=target_path, dest_dir=str(category_dir_path))
 
     @classmethod
     def _resolve_probe_target(cls, video_path: str) -> Optional[str]:
@@ -895,9 +913,16 @@ class shortdramacompilation(_PluginBase):
             return
         if target_path.is_file():
             target_path = target_path.parent
-        tv_path = target_path.parent
-        category_dir = dest_dir or self._category_dir
-        new_path = Path(category_dir) / tv_path.name
+        tv_path = target_path.parent if (target_path.name.startswith("Season") or target_path.name.startswith("季")) else target_path
+
+        cat_dir = dest_dir or self._category_dir
+        if cat_dir and Path(cat_dir).is_absolute():
+            category_dir_path = Path(cat_dir)
+        else:
+            cat_name, _ = self.get_target_category(None)
+            category_dir_path = self._resolve_category_dir(cat_dir, cat_name, tv_path.parent)
+
+        new_path = category_dir_path / tv_path.name
 
         if not new_path.exists():
             try:
@@ -926,7 +951,7 @@ class shortdramacompilation(_PluginBase):
             self.post_message(
                 mtype=NotificationType.Organize,
                 title="【短剧自动分类】",
-                text=f"已将短剧《{tv_path.name}》移动分类至 {category_dir} 目录",
+                text=f"已将短剧《{tv_path.name}》移动分类至 {category_dir_path} 目录",
             )
 
     def stop_service(self):

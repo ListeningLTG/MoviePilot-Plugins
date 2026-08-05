@@ -248,11 +248,12 @@
   "shortdramacompilation": {
     "name": "短剧自动分类",
     "description": "网络短剧自动分类到独立目录，支持STRM格式、整理预览直显及一次性直存。",
-    "version": "0.2.4",
+    "version": "0.2.5",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/hg.jpeg",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v0.2.5": "路径支持相对路径",
       "v0.2.4": "重大漏洞修复：彻底修正 FFprobe 探测时长被二次除以60计算错误的 Bug（原42分钟普通剧集被误算为0.7分钟误判为短剧）；恢复 JSON 缓存中 title 与 strategy 详细策略说明字段的记录",
       "v0.2.3": "紧急修复：修复 MoviePilot 新版 MediaInfo 对象中无 genre 属性导致的 AttributeError，安全使用 genres 与 genre_ids",
       "v0.2.2": "修复预览改写：解除未配置 category_dir 时对预览/拦截 Hook 的限制，实现未设绝对路径时自动将默认二级分类(如国产剧)动态替换为短剧分类",
