@@ -33,7 +33,7 @@ class advancedcategory(_PluginBase):
     # 插件描述
     plugin_desc = "扩展 MoviePilot 二级分类识别能力，支持根据关键词库、系列名称、演职员名单及自定义 YAML 规则分类，并在整理转移时自动重组二级目录。"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/category.png"
+    plugin_icon = "mdi-tag-multiple-outline"
     # 插件版本
     plugin_version = "1.0.0"
     # 插件作者
