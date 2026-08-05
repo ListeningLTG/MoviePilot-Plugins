@@ -99,6 +99,19 @@ class ConfigManager(BaseModel):
         ge=1,
         description="share_receive 限制接收(4200041)后首次自动重试等待（小时）",
     )
+    subtitle_receive_990002_strategy: str = Field(
+        default="auto_rescan_once",
+        description="字幕转存遇到 990002 的策略: auto_rescan_once/single_only/fail_fast",
+    )
+    subtitle_force_live_scan_on_sub_only: bool = Field(
+        default=False,
+        description="仅重试字幕模式是否强制在线扫描（绕过扫描缓存）",
+    )
+    subtitle_single_retry_max: int = Field(
+        default=20,
+        ge=1,
+        description="990002 单文件降级最多尝试的字幕数",
+    )
 
     @property
     def moviepilot_address(self) -> str:

@@ -51,6 +51,14 @@ def _is_snapshot_pending_error(exc: BaseException) -> bool:
     return "4100021" in msg or "正在生成文件快照" in msg
 
 
+def _is_param_invalid_990002(exc: BaseException) -> bool:
+    """检测 115 参数错误（errno 990002）。"""
+    text = str(exc)
+    for arg in getattr(exc, "args", ()) or ():
+        text += str(arg)
+    return "990002" in text and "参数错误" in text
+
+
 _SHARE_SNAP_PROGRESS_INTERVAL = 10
 
 
@@ -430,8 +438,13 @@ def _schedule_subtitle_receive_retry(
             "callback_data": f"[PLUGIN]p115sharestrm|retry_sub:{share_code}:{receive_code}",
         }]]
         try:
-            downloaded, fail_count = _download_subtitles_from_share(
-                client, share_code, receive_code, subtitle_files, save_path_obj
+            downloaded, fail_count, downloaded_items = _download_subtitles_from_share(
+                client,
+                share_code,
+                receive_code,
+                subtitle_files,
+                save_path_obj,
+                context={"subtitle_source": "receive_limited_retry"},
             )
         except ShareReceiveLimitedError as e:
             task_queue.subtitle_job_update_stage(job_id, "receive_limited")
@@ -456,14 +469,14 @@ def _schedule_subtitle_receive_retry(
         place_ok, place_miss, place_fallback = 0, 0, 0
         if downloaded and configer.moviepilot_transfer:
             place_ok, place_miss, place_fallback = _place_subtitles_to_targets(
-                subtitle_files, downloaded, media_files,
+                downloaded_items, downloaded, media_files,
                 media_stem_to_strm_path, media_stem_to_target,
             )
         elif downloaded:
             for stem, sp in media_stem_to_strm_path.items():
                 media_stem_to_target.setdefault(stem, sp)
             place_ok, place_miss, place_fallback = _place_subtitles_to_targets(
-                subtitle_files, downloaded, media_files,
+                downloaded_items, downloaded, media_files,
                 media_stem_to_strm_path, media_stem_to_target,
             )
         task_queue.metrics_add_place(place_ok, place_miss)
@@ -691,9 +704,19 @@ def _finalize_subtitles_async(
         )
         task_queue.subtitle_job_update_stage(job_id, "placing")
         logger.info(f"【P115ShareStrm】开始后台下载字幕，共 {len(subtitle_files)} 个: {share_code}")
+        subtitle_source = str((subtitle_files[0].get("_scan_source") if subtitle_files else "unknown") or "unknown")
+        subtitle_cache_age = subtitle_files[0].get("_scan_cache_age_sec") if subtitle_files else None
         try:
-            downloaded_subtitle_paths, subtitle_fail_count = _download_subtitles_from_share(
-                client, share_code, receive_code, subtitle_files, save_path_obj
+            downloaded_subtitle_paths, subtitle_fail_count, downloaded_subtitle_items = _download_subtitles_from_share(
+                client,
+                share_code,
+                receive_code,
+                subtitle_files,
+                save_path_obj,
+                context={
+                    "subtitle_source": subtitle_source,
+                    "subtitle_cache_age_sec": subtitle_cache_age,
+                },
             )
         except ShareReceiveLimitedError as e:
             try:
@@ -717,7 +740,7 @@ def _finalize_subtitles_async(
         place_ok, place_miss, place_fallback = 0, 0, 0
         if downloaded_subtitle_paths and configer.moviepilot_transfer:
             place_ok, place_miss, place_fallback = _place_subtitles_to_targets(
-                subtitle_files,
+                downloaded_subtitle_items,
                 downloaded_subtitle_paths,
                 media_files,
                 media_stem_to_strm_path,
@@ -728,7 +751,7 @@ def _finalize_subtitles_async(
             for stem, strm_path in media_stem_to_strm_path.items():
                 media_stem_to_target.setdefault(stem, strm_path)
             place_ok, place_miss, place_fallback = _place_subtitles_to_targets(
-                subtitle_files,
+                downloaded_subtitle_items,
                 downloaded_subtitle_paths,
                 media_files,
                 media_stem_to_strm_path,
@@ -995,12 +1018,24 @@ def _save_share_scan_cache(
     _save_scan_cache_file(data)
 
 
+def _tag_scan_source(items: List[dict], source: str, cache_age_sec: Optional[int] = None) -> None:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item["_scan_source"] = source
+        if cache_age_sec is not None:
+            item["_scan_cache_age_sec"] = int(cache_age_sec)
+
+
 def _load_share_scan_cache(
     share_code: str,
     receive_code: str,
     *,
     sub_only: bool,
+    force_live_scan: bool = False,
 ) -> Optional[Tuple[List[dict], List[dict]]]:
+    if force_live_scan:
+        return None
     if not sub_only and not configer.reuse_scan_cache_for_sharestrm:
         return None
     key = _scan_cache_key(share_code, receive_code)
@@ -1018,6 +1053,8 @@ def _load_share_scan_cache(
     subtitle_files = list(entry.get("subtitle_files") or [])
     if not media_files and not subtitle_files:
         return None
+    _tag_scan_source(media_files, "scan_cache", int(age))
+    _tag_scan_source(subtitle_files, "scan_cache", int(age))
     api_metrics.record_cache_hit()
     logger.info(
         f"【P115ShareStrm】使用扫描缓存，跳过 115 列举 "
@@ -1036,6 +1073,8 @@ def _load_scan_from_subtitle_job(share_code: str) -> Optional[Tuple[List[dict], 
     subtitle_files = list(job.get("subtitle_files") or [])
     if not media_files and not subtitle_files:
         return None
+    _tag_scan_source(media_files, "subtitle_job")
+    _tag_scan_source(subtitle_files, "subtitle_job")
     logger.info(
         f"【P115ShareStrm】sub_only 使用 subtitle_jobs 缓存 "
         f"(媒体={len(media_files)}, 字幕={len(subtitle_files)})"
@@ -1050,18 +1089,27 @@ def _resolve_share_file_lists(
     media_exts: set,
     subtitle_exts: set,
     sub_only: bool,
+    force_live_scan: bool = False,
 ) -> Tuple[List[dict], List[dict]]:
-    cached = _load_share_scan_cache(share_code, receive_code, sub_only=sub_only)
+    cached = _load_share_scan_cache(
+        share_code,
+        receive_code,
+        sub_only=sub_only,
+        force_live_scan=force_live_scan,
+    )
     if cached:
         media_files, subtitle_files = cached
         if subtitle_exts and not subtitle_files and sub_only:
             pass  # 仍可用 media；字幕列表可能为空
         return media_files, subtitle_files
 
-    if sub_only:
+    if sub_only and not force_live_scan:
         job_cached = _load_scan_from_subtitle_job(share_code)
         if job_cached:
             return job_cached
+
+    if force_live_scan:
+        logger.info(f"【P115ShareStrm】强制在线扫描分享内容（绕过缓存）: {share_code}")
 
     logger.info(f"【P115ShareStrm】正在扫描分享内容: {share_code} ...")
     api_metrics.reset_task_counters()
@@ -1075,8 +1123,76 @@ def _resolve_share_file_lists(
         elif subtitle_exts and file_ext in subtitle_exts:
             subtitle_files.append(item)
 
+    _tag_scan_source(media_files, "live_scan")
+    _tag_scan_source(subtitle_files, "live_scan")
     _save_share_scan_cache(share_code, receive_code, media_files, subtitle_files)
     return media_files, subtitle_files
+
+
+def _collect_live_subtitle_items(
+    client: "ShareP115Client",
+    share_code: str,
+    receive_code: str,
+) -> List[dict]:
+    subtitle_exts = {
+        f".{ext.strip().lower()}"
+        for ext in (configer.user_subtitle_ext or "").split(",")
+        if ext.strip()
+    }
+    result: List[dict] = []
+    for item in iter_share_files(client, share_code, receive_code):
+        filename = item.get("name", "")
+        file_ext = Path(filename).suffix.lower()
+        if subtitle_exts and file_ext in subtitle_exts:
+            item["_scan_source"] = "live_scan"
+            result.append(item)
+    return result
+
+
+def _match_subtitle_batch_by_identity(
+    live_items: List[dict],
+    wanted_items: List[dict],
+) -> List[dict]:
+    """按 sha1/_full_path/name 匹配原批次字幕，尽量保序。"""
+    if not live_items or not wanted_items:
+        return []
+
+    by_sha1: Dict[str, dict] = {}
+    by_full_path: Dict[str, dict] = {}
+    by_name: Dict[str, dict] = {}
+    for item in live_items:
+        sha1 = str(item.get("sha1") or "").lower()
+        full_path = str(item.get("_full_path") or "")
+        name = str(item.get("name") or "")
+        if sha1 and sha1 not in by_sha1:
+            by_sha1[sha1] = item
+        if full_path and full_path not in by_full_path:
+            by_full_path[full_path] = item
+        if name and name not in by_name:
+            by_name[name] = item
+
+    matched: List[dict] = []
+    used_ids: Set[str] = set()
+    for w in wanted_items:
+        sha1 = str(w.get("sha1") or "").lower()
+        full_path = str(w.get("_full_path") or "")
+        name = str(w.get("name") or "")
+        candidate = None
+        if sha1:
+            candidate = by_sha1.get(sha1)
+        if candidate is None and full_path:
+            candidate = by_full_path.get(full_path)
+        if candidate is None and name:
+            candidate = by_name.get(name)
+        if candidate is None:
+            continue
+        cid = str(candidate.get("id") or "")
+        if cid and cid in used_ids:
+            continue
+        if cid:
+            used_ids.add(cid)
+        matched.append(candidate)
+    return matched
 
 
 def iter_share_files(
@@ -1336,7 +1452,8 @@ def _download_subtitles_from_share(
     receive_code: str,
     subtitle_items: List[dict],
     save_path_obj: Path,
-) -> Tuple[List[Path], int]:
+    context: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Path], int, List[dict]]:
     """
     通过转存方式下载分享中的字幕文件：
     1. 在网盘中创建临时文件夹
@@ -1347,7 +1464,7 @@ def _download_subtitles_from_share(
 
     参考 p115strmhelper 插件的 batch_share_subtitle_downloader。
 
-    :return: (成功下载的本地路径列表, 失败数量)
+    :return: (成功下载的本地路径列表, 失败数量, 成功下载对应的字幕项)
     """
     import httpx
 
@@ -1368,12 +1485,21 @@ def _download_subtitles_from_share(
     }
 
     downloaded_paths: List[Path] = []
+    downloaded_items: List[dict] = []
     fail_count = 0
     batch_size = 50
+    strategy = (configer.subtitle_receive_990002_strategy or "auto_rescan_once").strip().lower()
+    if strategy not in {"auto_rescan_once", "single_only", "fail_fast"}:
+        strategy = "auto_rescan_once"
+    single_retry_max = max(1, int(configer.subtitle_single_retry_max or 20))
+    shared_source = (context or {}).get("subtitle_source") or "unknown"
+    shared_cache_age = (context or {}).get("subtitle_cache_age_sec")
 
     for batch_start in range(0, len(subtitle_items), batch_size):
         batch_items = subtitle_items[batch_start:batch_start + batch_size]
+        original_batch_count = len(batch_items)
         scid = None
+        batch_success_downloads = 0
         try:
             # 1. 在网盘中创建临时文件夹
             logger.info(f"【P115ShareStrm】开始转存并下载分享字幕，准备创建临时文件夹...")
@@ -1387,19 +1513,99 @@ def _download_subtitles_from_share(
             logger.info(f"【P115ShareStrm】网盘临时文件夹创建成功，scid: {scid}")
 
             # 2. 将分享中的字幕文件转存到临时文件夹
-            file_ids_str = ",".join(str(item["id"]) for item in batch_items)
-            logger.info(f"【P115ShareStrm】向 115 提交字幕转存，共 {len(batch_items)} 个文件，ID列表: {file_ids_str}")
-            payload = {
-                "share_code": share_code,
-                "receive_code": receive_code,
-                "file_id": file_ids_str,
-                "cid": scid,
-                "is_check": 0,
-            }
-            resp = call_protected_api(client.share_receive, payload, headers=custom_headers)
-            logger.debug(f"【P115ShareStrm】share_receive 接口返回: {resp}")
-            check_response(resp)
-            logger.info(f"【P115ShareStrm】字幕转存任务提交完成")
+            def _submit_receive(items_for_submit: List[dict], label: str) -> None:
+                file_ids = [str(item.get("id") or "") for item in items_for_submit if item.get("id")]
+                file_ids_str_inner = ",".join(file_ids)
+                logger.info(
+                    f"【P115ShareStrm】向 115 提交字幕转存[{label}]，共 {len(file_ids)} 个文件，"
+                    f"source={shared_source}, cache_age={shared_cache_age}, "
+                    f"首ID={file_ids[0] if file_ids else '-'}, 末ID={file_ids[-1] if file_ids else '-'}"
+                )
+                payload_inner = {
+                    "share_code": share_code,
+                    "receive_code": receive_code,
+                    "file_id": file_ids_str_inner,
+                    "cid": scid,
+                    "is_check": 0,
+                }
+                resp_inner = call_protected_api(client.share_receive, payload_inner, headers=custom_headers)
+                logger.debug(f"【P115ShareStrm】share_receive[{label}] 接口返回: {resp_inner}")
+                check_response(resp_inner)
+
+            try:
+                _submit_receive(batch_items, "batch")
+                logger.info(f"【P115ShareStrm】字幕转存任务提交完成")
+            except Exception as receive_err:
+                if is_receive_limited(receive_err):
+                    raise ShareReceiveLimitedError(str(receive_err)) from receive_err
+                if not _is_param_invalid_990002(receive_err) or strategy == "fail_fast":
+                    raise
+
+                logger.warning(
+                    f"【P115ShareStrm】share_receive 触发 990002，准备兜底处理: "
+                    f"share={share_code}, batch={len(batch_items)}, source={shared_source}, strategy={strategy}"
+                )
+                recovered_items: List[dict] = list(batch_items)
+                recovered_batch_submitted = False
+                if strategy == "auto_rescan_once":
+                    try:
+                        live_items = _collect_live_subtitle_items(client, share_code, receive_code)
+                        matched_items = _match_subtitle_batch_by_identity(live_items, batch_items)
+                        if matched_items:
+                            recovered_items = matched_items
+                            logger.info(
+                                f"【P115ShareStrm】990002 兜底在线重扫完成，匹配 {len(matched_items)}/{len(batch_items)} 个字幕"
+                            )
+                            _submit_receive(recovered_items, "rescan-batch")
+                            batch_items = recovered_items
+                            recovered_batch_submitted = True
+                            logger.info("【P115ShareStrm】重扫后批量提交成功")
+                        else:
+                            logger.warning("【P115ShareStrm】在线重扫后未匹配到可重试字幕，转入单文件降级")
+                    except ShareReceiveLimitedError:
+                        raise
+                    except Exception as rescan_err:
+                        if is_receive_limited(rescan_err):
+                            raise ShareReceiveLimitedError(str(rescan_err)) from rescan_err
+                        logger.warning(f"【P115ShareStrm】重扫批量重试失败，转入单文件降级: {rescan_err}")
+
+                if not recovered_batch_submitted:
+                    # 单文件降级，避免整批失败
+                    single_candidates = recovered_items[:single_retry_max]
+                    unattempted_count = max(0, len(recovered_items) - len(single_candidates))
+                    if unattempted_count:
+                        logger.warning(
+                            f"【P115ShareStrm】单文件降级触发上限 {single_retry_max}，"
+                            f"其中 {unattempted_count} 个文件未尝试提交"
+                        )
+
+                    single_success_items: List[dict] = []
+                    single_failed_ids: List[str] = []
+                    for item in single_candidates:
+                        try:
+                            _submit_receive([item], "single")
+                            single_success_items.append(item)
+                        except Exception as single_err:
+                            if is_receive_limited(single_err):
+                                raise ShareReceiveLimitedError(str(single_err)) from single_err
+                            single_failed_ids.append(str(item.get("id") or ""))
+
+                    if single_failed_ids:
+                        logger.warning(
+                            f"【P115ShareStrm】单文件降级后仍失败 {len(single_failed_ids)} 个，"
+                            f"失败ID列表: {','.join(single_failed_ids)}"
+                        )
+
+                    if not single_success_items:
+                        fail_count += original_batch_count
+                        logger.error("【P115ShareStrm】字幕批处理失败：990002 兜底后无可下载字幕")
+                        continue
+
+                    batch_items = single_success_items
+                    fail_count += max(0, original_batch_count - len(single_success_items))
+                    logger.info(
+                        f"【P115ShareStrm】单文件降级可继续下载 {len(batch_items)} 个字幕"
+                    )
 
             # 3. 轮询等待 115 异步转存完成（在第一次查询前增加 8s 的延时以给 115 充足时间落盘）
             attr = None
@@ -1516,6 +1722,8 @@ def _download_subtitles_from_share(
                         local_path.write_bytes(resp_dl.content)
                         logger.info(f"【P115ShareStrm】字幕下载成功: {filename}")
                         downloaded_paths.append(local_path)
+                        downloaded_items.append(item)
+                        batch_success_downloads += 1
                         _dl_success = True
                         break
                     except Exception as e:
@@ -1537,8 +1745,7 @@ def _download_subtitles_from_share(
                 raise ShareReceiveLimitedError(str(e)) from e
             logger.error(f"【P115ShareStrm】字幕批处理失败: {e}", exc_info=True)
             # 本批次中尚未成功下载的全部计为失败
-            batch_downloaded = len([p for p in downloaded_paths if p not in downloaded_paths[:batch_start]])
-            fail_count += len(batch_items) - batch_downloaded
+            fail_count += max(0, len(batch_items) - batch_success_downloads)
         finally:
             # 7. 清理临时文件夹
             if scid:
@@ -1549,7 +1756,7 @@ def _download_subtitles_from_share(
                 except Exception as e:
                     logger.warning(f"【P115ShareStrm】清理字幕临时目录失败: {e}", exc_info=True)
 
-    return downloaded_paths, fail_count
+    return downloaded_paths, fail_count, downloaded_items
 
 
 def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
@@ -1866,6 +2073,7 @@ def process_share_strm(
             media_exts,
             subtitle_exts,
             sub_only,
+            force_live_scan=(sub_only and bool(configer.subtitle_force_live_scan_on_sub_only)),
         )
 
         total_media = len(media_files)
