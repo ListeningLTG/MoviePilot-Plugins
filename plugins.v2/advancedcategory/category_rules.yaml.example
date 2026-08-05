@@ -1,0 +1,44 @@
+# 高级二级分类规则配置文件
+# 配置文件存储位置：CONFIG_PATH/plugins/advancedcategory/category_rules.yaml
+#
+# 配置语法说明：
+# 1. 结构分为 `movie`（电影规则）与 `tv`（电视剧/动漫规则）。分类名为最终建立的二级目录名称。
+# 2. 支持的筛选条件：
+#    - genre_ids: TMDB 内容类型 ID（如 16 动画，10402 音乐，99 纪录片），使用 ! 或 - 前缀进行排除，如 "!16"
+#    - original_language: 原始语言缩写，如 "zh,cn,yue" 或 "ja,ko"
+#    - production_countries / origin_country: 国家/地区代码，如 "JP,KR" 或 "CN,HK"
+#    - release_year: 发行年份或年份范围，如 "2020-2024"
+#    - keywords / include_keywords: 关键词库（包含或排除），匹配标题、简介及 TMDB 官方标签
+#    - series_keywords: 系列/剧集名称关键词库
+#    - series_actors / actors: 演职员白名单，匹配主演、导演姓名
+#
+movie:
+  特摄电影:
+    genre_ids: "!16"
+    include_keywords: "tokusatsu,ultraman,kaiju,kamen rider,super sentai,Power Rangers,VR Troopers,Beetleborgs,BIMA,Cicak-Man,Shaktimaan,Darna"
+    keywords: "tokusatsu,ultraman,奥特曼,超人力霸王,特摄,特攝,假面骑士,假面騎士,铠甲勇士,金甲战士,超级战队,超級戰隊,超神战队,巨神战击队,金光布袋戏,布袋戏,霹雳布袋戏,苦海女神龙,霹雳神州,霹雳英雄,霹雳震寰宇,霹雳天命,云州大儒侠史艳文,Power Rangers,超凡战队,恐龙战队,VR Troopers,Beetleborgs,BIMA,神鹰勇士,Cicak-Man,Shaktimaan,Darna"
+    series_keywords: "奥特曼,超人力霸王,假面骑士,铠甲勇士,超级战队,金光布袋戏,霹雳布袋戏"
+
+  R级电影:
+    keywords: "聊斋艳谭,肉蒲团,蜜桃成熟时,金瓶梅,大内密探之零零性性,聊斋之艳蛇,超淫特攻队,Big波诱惑,玉蒲团,足本玉蒲团,慈禧秘密生活,飞虎出征,现代应召女郎,夜生活女王之霞姐传奇,囡囡,赤裸羔羊,黑帮大佬和我的365日,色戒,戏梦巴黎,苦月亮,西西里的美丽传说,你妈妈也一样,巴黎最后的探戈"
+    include_keywords: "eroticism,softcore,sexual fantasy,erotic,erotic movie,unusual sexual practices,lesbian sex,gay sex,erotic thriller,erotic drama,erotic horror,erotic animation,blow job,unsimulated sex,sexual torture,pink film,eroticism,erotic,sexuality,sex"
+    series_keywords: "美丽小蜜桃,深喉,艾曼纽,聊斋艳谭,蜜桃成熟时,五十度灰,禁忌,美式禁忌,小姐姐,妻子的情人,本能,女性瘾者"
+
+  演唱会:
+    genre_ids: "10402,!16"
+    original_language: "zh,cn,bo,za,yue"
+    keywords: "演唱会,巡演,巡迴,巡回,演出,音乐会,音樂會,音乐剧,音樂劇,交响乐,交響樂,歌剧,歌劇,歌会,歌會,音乐节,音樂節,现场,現場,Live,Concert,Tour,Performance,Show,Stage,MV精选集,特别节目,湾区升明月,日本武道馆,初音未来,魔法未来,Hatsune Miku,少女时代,米津玄师,酒井法子,音乐盛宴,bilibili,维也纳新年音乐会,跨年晚会,元宵晚会,抖音,演唱會,蔡琴"
+    series_actors: "周杰伦,林俊杰,王力宏,张韶涵,陈奕迅,张学友,孙燕姿,李宗盛,刘若英,郭富城,谭咏麟,林忆莲,初音未来,米津玄师,少女时代,酒井法子,蔡琴"
+    series_keywords: "湾区升明月,中央广播电视总台,央视春节联欢晚会"
+
+tv:
+  特摄剧:
+    genre_ids: "!16"
+    include_keywords: "tokusatsu,ultraman,kaiju,kamen rider,super sentai,Power Rangers,VR Troopers,Beetleborgs,BIMA,Cicak-Man,Shaktimaan,Darna"
+    keywords: "tokusatsu,ultraman,奥特曼,超人力霸王,特摄,特攝,假面骑士,假面騎士,铠甲勇士,金甲战士,超级战队,超級戰隊,超神战队,巨神战击队,金光布袋戏,布袋戏,霹雳布袋戏,苦海女神龙,霹雳神州,霹雳英雄,霹雳震寰宇,霹雳天命,云州大儒侠史艳文,Power Rangers,超凡战队,恐龙战队,VR Troopers,Beetleborgs,BIMA,神鹰勇士,Cicak-Man,Shaktimaan,Darna"
+    series_keywords: "奥特曼,超人力霸王,假面骑士,铠甲勇士,超级战队,金光布袋戏,霹雳布袋戏"
+
+  港台剧:
+    keywords: "TVB,香港,港剧,港劇,HK,HongKong"
+    origin_country: "HK,TW"
+    original_language: "yue,zh"
