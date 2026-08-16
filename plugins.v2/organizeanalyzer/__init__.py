@@ -18,7 +18,7 @@ class OrganizeAnalyzer(_PluginBase):
     plugin_name = "媒体整理异常分析"
     plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、整理失败及重集等异常。"
     plugin_icon = "mdi-file-find-outline"
-    plugin_version = "1.1.7"
+    plugin_version = "1.1.8"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "organizeanalyzer_"
     plugin_order = 15
@@ -269,6 +269,8 @@ class OrganizeAnalyzer(_PluginBase):
                 "cron": self._cron,
                 "cron_mode": self._cron_mode,
                 "notify": self._notify,
+                "enabled": self._enabled,
+                "config": self._config or {},
             }
         }
 

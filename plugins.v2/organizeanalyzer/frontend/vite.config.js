@@ -26,7 +26,8 @@ export default defineConfig({
     target: 'esnext',
     minify: false,
     cssCodeSplit: true,
-    outDir: 'dist',
+    outDir: '../dist',
+    emptyOutDir: true,
     rollupOptions: {
       output: {
         format: 'esm'

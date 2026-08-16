@@ -1,14 +1,7 @@
 import { importShared } from './__federation_fn_import-054b33c3.js';
+import { _ as _export_sfc } from './_plugin-vue_export-helper-c4c0bc37.js';
 
 const AppPage_vue_vue_type_style_index_0_scoped_1c4b3b55_lang = '';
-
-const _export_sfc = (sfc, props) => {
-  const target = sfc.__vccOpts || sfc;
-  for (const [key, val] of props) {
-    target[key] = val;
-  }
-  return target;
-};
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createTextVNode:_createTextVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,withKeys:_withKeys,createElementBlock:_createElementBlock,renderList:_renderList,Fragment:_Fragment,mergeProps:_mergeProps} = await importShared('vue');
 
