@@ -153,21 +153,19 @@ class OrganizeAnalyzerCore:
             for r in records:
                 title = r["title"].strip()
                 if title and not re.search(r"[\u4e00-\u9fff]", title):
-                    # 忽略纯数字或短符号
-                    if not title.replace(".", "").replace("-", "").isdigit():
-                        key = cls._generate_key("english_title", str(r["id"]))
-                        exceptions.append({
-                            "key": key,
-                            "type": "english_title",
-                            "type_name": "英文未中文化标题",
-                            "title": title,
-                            "history_id": r["id"],
-                            "src": r["src"],
-                            "dest": r["dest"],
-                            "date": r["date"],
-                            "detail": f"标题 [{title}] 未包含中文，可能识别降级或缺少中文别名",
-                            "status": "active"
-                        })
+                    key = cls._generate_key("english_title", str(r["id"]))
+                    exceptions.append({
+                        "key": key,
+                        "type": "english_title",
+                        "type_name": "英文未中文化标题",
+                        "title": title,
+                        "history_id": r["id"],
+                        "src": r["src"],
+                        "dest": r["dest"],
+                        "date": r["date"],
+                        "detail": f"标题 [{title}] 未包含中文，可能识别降级或缺少中文别名",
+                        "status": "active"
+                    })
 
         # 4. 检测多文件合并归并到同一个目标文件 (detect_merged_files)
         if detect_merged:
