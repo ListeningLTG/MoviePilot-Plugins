@@ -91,6 +91,7 @@ class RuleEngine:
         normalized_rule: Dict[str, Any] = {}
         kw_list = []
         actor_list = []
+        series_kw_list = []
         country_list = []
 
         for k, v in rule.items():
@@ -101,6 +102,8 @@ class RuleEngine:
                 kw_list.append(str(v))
             elif norm_k in ("actors", "series_actors"):
                 actor_list.append(str(v))
+            elif norm_k in ("series_keywords",):
+                series_kw_list.append(str(v))
             elif norm_k in ("origin_country", "production_countries"):
                 country_list.append(str(v))
             else:
@@ -108,22 +111,27 @@ class RuleEngine:
 
         if kw_list:
             normalized_rule["keywords"] = ",".join(kw_list)
+        if series_kw_list:
+            normalized_rule["series_keywords"] = ",".join(series_kw_list)
         if actor_list:
             normalized_rule["actors"] = ",".join(actor_list)
         if country_list:
             normalized_rule["origin_country"] = ",".join(country_list)
+
+        # 区分硬约束属性与正向内容特征
+        has_any_positive_feature = False
+        feature_matched = False
 
         # 遍历规则中的各项要求
         for attr, rule_val in normalized_rule.items():
             if rule_val is None or rule_val == "":
                 continue
 
-
             values, invert_values = cls.parse_values(rule_val)
             if not values and not invert_values:
                 continue
 
-            # 1. 基础属性: release_year
+            # 1. 基础属性硬约束: release_year
             if attr == "release_year":
                 date_val = tmdb_info.get("release_date") or tmdb_info.get("first_air_date")
                 year_str = str(date_val)[:4].upper() if date_val else ""
@@ -135,32 +143,32 @@ class RuleEngine:
                     return False
                 continue
 
-            # 2. 基础属性: production_countries / origin_country
+            # 2. 基础属性硬约束: production_countries / origin_country
             if attr in ("production_countries", "origin_country"):
-                country_list = []
+                c_list = []
                 prod_countries = tmdb_info.get("production_countries")
                 if isinstance(prod_countries, list):
                     for c in prod_countries:
                         if isinstance(c, dict) and c.get("iso_3166_1"):
-                            country_list.append(str(c.get("iso_3166_1")).upper())
+                            c_list.append(str(c.get("iso_3166_1")).upper())
                         elif isinstance(c, str):
-                            country_list.append(c.upper())
+                            c_list.append(c.upper())
                 origin_c = tmdb_info.get("origin_country")
                 if isinstance(origin_c, list):
                     for c in origin_c:
-                        country_list.append(str(c).upper())
+                        c_list.append(str(c).upper())
                 elif isinstance(origin_c, str):
-                    country_list.append(origin_c.upper())
+                    c_list.append(origin_c.upper())
 
-                if not country_list:
+                if not c_list:
                     return False
-                if values and not (set(values) & set(country_list)):
+                if values and not (set(values) & set(c_list)):
                     return False
-                if invert_values and (set(invert_values) & set(country_list)):
+                if invert_values and (set(invert_values) & set(c_list)):
                     return False
                 continue
 
-            # 3. 基础属性: genre_ids
+            # 3. 基础属性硬约束: genre_ids
             if attr == "genre_ids":
                 genre_ids = tmdb_info.get("genre_ids") or []
                 info_genres = [str(g).upper() for g in genre_ids]
@@ -170,7 +178,7 @@ class RuleEngine:
                     return False
                 continue
 
-            # 4. 基础属性: original_language
+            # 4. 基础属性硬约束: original_language
             if attr == "original_language":
                 lang = str(tmdb_info.get("original_language") or "").upper()
                 if not lang:
@@ -181,8 +189,8 @@ class RuleEngine:
                     return False
                 continue
 
-            # 5. 高级文本/关键词匹配: keywords, include_keywords
-            if attr in ("keywords", "include_keywords"):
+            # 5. 高级文本/关键词特征匹配: keywords, include_keywords
+            if attr == "keywords":
                 search_text_pool: Set[str] = set()
                 # 放入扩展的 TMDB 关键词文本与基础标题简介
                 for kw in extra_data.get("keywords", []):
@@ -191,23 +199,22 @@ class RuleEngine:
                     search_text_pool.add(str(t).upper())
 
                 full_pool_str = " ".join(search_text_pool)
-                matched_any = False
 
-                if values:
-                    for target_val in values:
-                        if target_val in full_pool_str:
-                            matched_any = True
-                            break
-                    if not matched_any:
-                        return False
-
+                # 排除词一票否决
                 if invert_values:
                     for inv_val in invert_values:
                         if inv_val in full_pool_str:
                             return False
+
+                if values:
+                    has_any_positive_feature = True
+                    for target_val in values:
+                        if target_val in full_pool_str:
+                            feature_matched = True
+                            break
                 continue
 
-            # 6. 系列关键词匹配: series_keywords
+            # 6. 系列关键词特征匹配: series_keywords
             if attr == "series_keywords":
                 series_pool: Set[str] = set()
                 for collection_name in extra_data.get("series_names", []):
@@ -216,40 +223,38 @@ class RuleEngine:
                     series_pool.add(str(t).upper())
 
                 full_series_str = " ".join(series_pool)
-                matched_any = False
 
-                if values:
-                    for target_val in values:
-                        if target_val in full_series_str:
-                            matched_any = True
-                            break
-                    if not matched_any:
-                        return False
-
+                # 排除词一票否决
                 if invert_values:
                     for inv_val in invert_values:
                         if inv_val in full_series_str:
                             return False
-                continue
-
-            # 7. 演职员匹配: series_actors, actors
-            if attr in ("series_actors", "actors"):
-                actor_list = [str(a).upper() for a in extra_data.get("actors", [])]
-                full_actor_str = " ".join(actor_list)
-                matched_any = False
 
                 if values:
+                    has_any_positive_feature = True
                     for target_val in values:
-                        if target_val in full_actor_str or any(target_val in a for a in actor_list):
-                            matched_any = True
+                        if target_val in full_series_str:
+                            feature_matched = True
                             break
-                    if not matched_any:
-                        return False
+                continue
 
+            # 7. 演职员特征匹配: series_actors, actors
+            if attr == "actors":
+                actor_list = [str(a).upper() for a in extra_data.get("actors", [])]
+                full_actor_str = " ".join(actor_list)
+
+                # 排除词一票否决
                 if invert_values:
                     for inv_val in invert_values:
                         if inv_val in full_actor_str:
                             return False
+
+                if values:
+                    has_any_positive_feature = True
+                    for target_val in values:
+                        if target_val in full_actor_str or any(target_val in a for a in actor_list):
+                            feature_matched = True
+                            break
                 continue
 
             # 8. 通用字段动态匹配 (如 tmdb_id, id, status 等)
@@ -262,6 +267,10 @@ class RuleEngine:
                     return False
             else:
                 return False
+
+        # 如果规则中定义了正向特征（关键词、系列、演职员等），必须至少命中一个特征
+        if has_any_positive_feature and not feature_matched:
+            return False
 
         return True
 
