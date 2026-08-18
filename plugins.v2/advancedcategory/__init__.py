@@ -37,7 +37,7 @@ class advancedcategory(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/category.png"
     # 插件版本
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -67,6 +67,12 @@ class advancedcategory(_PluginBase):
 
         # 先初始化路径、规则与缓存管理器
         self._init_rules_and_cache()
+
+        # 如果勾选了清空缓存开关，执行清空操作
+        if config and config.get("clear_cache"):
+            if self._cache_mgr:
+                self._cache_mgr.clear()
+                logger.info("【高级二级分类】检测到开启【清空分类缓存】开关，分类历史缓存已全部重置清空")
 
         # 如果保存配置提交了新的 YAML 规则文本，写入磁盘并同步刷新缓存与规则
         if config:
@@ -187,9 +193,10 @@ class advancedcategory(_PluginBase):
             if not rule_dict:
                 continue
 
-            if RuleEngine.match_rule(rule_dict, tmdb_info, extra_data):
+            matched, hit_reason = RuleEngine.match_rule(rule_dict, tmdb_info, extra_data)
+            if matched:
                 matched_cat_name = cat_name
-                logger.info(f"【高级二级分类】匹配成功: 作品 [{title}] (TMDB: {tmdb_id}) 命中分类规则 -> [{cat_name}]")
+                logger.info(f"【高级二级分类】匹配成功: 作品 [{title}] (TMDB: {tmdb_id}) 命中分类规则 -> [{cat_name}] (原因: {hit_reason})")
                 break
 
 
@@ -331,7 +338,7 @@ class advancedcategory(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -344,13 +351,26 @@ class advancedcategory(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VSwitch",
                                         "props": {
                                             "model": "notify",
                                             "label": "匹配成功发送通知",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "clear_cache",
+                                            "label": "立即清空分类缓存",
                                         },
                                     }
                                 ],
@@ -369,7 +389,7 @@ class advancedcategory(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": f"规则配置文件路径：{rules_path_str}。直接在下方文本框中编辑 YAML 规则，保存后将自动校验语法并更新生效。",
+                                            "text": f"规则配置文件路径：{rules_path_str}。在下方编辑 YAML 规则或勾选【立即清空分类缓存】，点击【保存】即可生效。",
                                         },
                                     }
                                 ],
@@ -403,6 +423,7 @@ class advancedcategory(_PluginBase):
         ], {
             "enabled": False,
             "notify": False,
+            "clear_cache": False,
             "rules_yaml": current_yaml_text,
         }
 
