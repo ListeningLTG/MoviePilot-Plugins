@@ -61,26 +61,44 @@ class advancedcategory(_PluginBase):
     _tmdb_extra: Optional[TmdbExtraHelper] = None
 
     def init_plugin(self, config: dict = None):
+        rules_yaml = None
+        need_reset_switch = False
+
         if config:
             self._enabled = config.get("enabled", False)
             self._notify = config.get("notify", False)
+            rules_yaml = config.get("rules_yaml")
 
         # 先初始化路径、规则与缓存管理器
         self._init_rules_and_cache()
 
-        # 如果勾选了清空缓存开关，执行清空操作
+        # 如果勾选了清空缓存开关，执行清空操作并打印详细日志
         if config and config.get("clear_cache"):
+            count = len(self._cache_mgr._cache_data) if self._cache_mgr and hasattr(self._cache_mgr, "_cache_data") else 0
             if self._cache_mgr:
                 self._cache_mgr.clear()
-                logger.info("【高级二级分类】检测到开启【清空分类缓存】开关，分类历史缓存已全部重置清空")
+            logger.info(f"【高级二级分类】检测到开启【立即清空分类缓存】开关，已成功清空全部识别分类历史缓存（共清空 {count} 条记录）")
+            need_reset_switch = True
 
         # 如果保存配置提交了新的 YAML 规则文本，写入磁盘并同步刷新缓存与规则
-        if config:
-            rules_yaml = config.get("rules_yaml")
-            if rules_yaml and isinstance(rules_yaml, str):
-                self._save_rules_yaml(rules_yaml)
-                # 重新载入写盘后的规则
-                self._init_rules_and_cache()
+        if rules_yaml and isinstance(rules_yaml, str):
+            self._save_rules_yaml(rules_yaml)
+            # 重新载入写盘后的规则
+            self._init_rules_and_cache()
+
+        # 将 clear_cache 开关回写重置为 False，确保下次打开设置界面时恢复关闭状态
+        if need_reset_switch:
+            try:
+                if hasattr(self, "update_config"):
+                    self.update_config({
+                        "enabled": self._enabled,
+                        "notify": self._notify,
+                        "clear_cache": False,
+                        "rules_yaml": rules_yaml if rules_yaml else self._get_current_rules_yaml_text(),
+                    })
+                    logger.info("【高级二级分类】已自动将【立即清空分类缓存】开关恢复为关闭状态")
+            except Exception as e:
+                logger.error(f"【高级二级分类】重置清空缓存开关状态失败: {e}")
 
 
     def _save_rules_yaml(self, rules_yaml: str):
