@@ -422,7 +422,7 @@ class TmdbExtraHelper:
                 logger.error(f"【高级二级分类】加载 TheMovieDbModule 失败: {e}")
         return self._tmdb_module
 
-    def build_extra_data(self, tmdb_info: Dict[str, Any]) -> Dict[str, Any]:
+    def build_extra_data(self, tmdb_info: Dict[str, Any], mtype: Optional[Any] = None) -> Dict[str, Any]:
         """
         提取/补充片名池、标签池、演职员列表和系列信息
         物理隔离 text_pool，彻底杜绝剧情简介污染片名匹配
@@ -439,7 +439,12 @@ class TmdbExtraHelper:
         if not tmdb_info:
             return extra_data
 
-        mtype = tmdb_info.get("media_type") or tmdb_info.get("type")
+        if not mtype:
+            mtype = tmdb_info.get("media_type") or tmdb_info.get("type") or "movie"
+        if hasattr(mtype, "value"):
+            mtype = mtype.value
+        mtype = str(mtype).lower()
+
         tmdbid = tmdb_info.get("id")
 
         # 1. 片名池提取 (主标题、原标题、别名/译名)
