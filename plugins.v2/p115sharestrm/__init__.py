@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.0.69"
+    plugin_version = "1.0.70"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -178,6 +178,21 @@ class p115sharestrm(_PluginBase):
                                                         "props": {
                                                             "model": "moviepilot_transfer",
                                                             "label": "STRM 交由 MoviePilot 整理",
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 4},
+                                                "content": [
+                                                    {
+                                                        "component": "VSwitch",
+                                                        "props": {
+                                                            "model": "strm_include_sha1",
+                                                            "label": "默认 STRM 包含 SHA1",
+                                                            "hint": "开启后，默认生成的 STRM URL 会在 receive_code 与 id 之间添加 sha1 参数；不影响自定义模板",
+                                                            "persistent-hint": True,
                                                         },
                                                     }
                                                 ],
@@ -678,6 +693,7 @@ class p115sharestrm(_PluginBase):
             "moviepilot_address_custom": "",
             "strm_save_path": "",
             "moviepilot_transfer": True,
+            "strm_include_sha1": False,
             "strm_url_template_enabled": False,
             "tmdb_extract": False,
             "imdb_extract": False,

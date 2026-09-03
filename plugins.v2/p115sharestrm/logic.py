@@ -2249,10 +2249,13 @@ def process_share_strm(
                     file_size=item.get("size") or 0,
                 )
             else:
+                sha1_val = item.get("sha1") or item.get("sha") or ""
+                sha1_part = f"&sha1={sha1_val}" if (configer.strm_include_sha1 and sha1_val) else ""
                 strm_url = (
                     f"{redirect_base}"
                     f"?share_code={share_code}"
                     f"&receive_code={receive_code}"
+                    f"{sha1_part}"
                     f"&id={item['id']}"
                     f"&file_name={quote(filename)}"
                 )

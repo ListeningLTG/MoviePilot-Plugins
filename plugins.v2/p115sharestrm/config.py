@@ -28,6 +28,7 @@ class ConfigManager(BaseModel):
     cookies: Optional[str] = Field(default=None, description="115 Cookie")
     strm_save_path: str = Field(default="", description="STRM 保存路径")
     moviepilot_transfer: bool = Field(default=True, description="STRM 交由 MoviePilot 整理")
+    strm_include_sha1: bool = Field(default=False, description="默认 STRM 内容包含 SHA1 参数")
     tmdb_extract: bool = Field(default=False, description="从文本中自动提取 TMDB ID")
     imdb_extract: bool = Field(default=False, description="从文本中自动提取 IMDB ID")
     extract_blacklist: Optional[str] = Field(default=None, description="提取识别黑名单")
