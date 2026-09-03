@@ -562,7 +562,7 @@ def _finalize_subtitles_async(
     media_stem_to_target: Dict[str, Path],
 ):
     """
-    后台收尾：轮询整理映射 +（如需）等审核通过，再下载并放置字幕，不堵塞主队列。
+    后台收尾：轮询整理映射后，直接通过直链下载并放置字幕，不堵塞主队列。
     仅等待字幕真正需要的媒体 stem；整理记录缺失时 grace 后回退到本地 STRM 目录。
     """
     task_queue.metrics_subtitle_bg_inc()
@@ -578,124 +578,51 @@ def _finalize_subtitles_async(
             finalize_hours = int(configer.subtitle_finalize_timeout_hours or 6)
         except (TypeError, ValueError):
             finalize_hours = 6
-        try:
-            audit_hours = int(configer.subtitle_audit_poll_timeout_hours or 6)
-        except (TypeError, ValueError):
-            audit_hours = 6
         finalize_hours = max(1, finalize_hours)
-        audit_hours = max(1, audit_hours)
         deadline = time() + finalize_hours * 3600
-        audit_deadline = time() + audit_hours * 3600
 
         required_stems = _required_stems_for_subtitles(subtitle_files, media_files)
         logger.info(
             f"【P115ShareStrm】已启动字幕后台收尾: {share_code} "
             f"(job={job_id}, 字幕={len(subtitle_files)}, 所需映射={len(required_stems)}, "
-            f"整理超时 {finalize_hours}h, 审核超时 {audit_hours}h, "
-            f"映射 grace {_SUBTITLE_MAP_GRACE_SEC}s)"
+            f"整理超时 {finalize_hours}h, 映射 grace {_SUBTITLE_MAP_GRACE_SEC}s)"
         )
         task_queue.subtitle_job_update_stage(job_id, "waiting_transfer")
 
         client = ShareP115Client(configer.cookies)
-        try:
-            audit_min = max(10, int(configer.audit_poll_min_sec or 60))
-        except (TypeError, ValueError):
-            audit_min = 60
-        try:
-            audit_max = max(audit_min, int(configer.audit_poll_max_sec or 300))
-        except (TypeError, ValueError):
-            audit_max = 300
-        interval = audit_min
-        audit_ok = False
+        interval = 10
         attempt = 0
-        last_state_check = 0.0
-        # 分享状态查询间隔与审核轮询下限对齐，避免每次映射刷新都打 115
-        state_check_interval = float(audit_min)
 
-        while time() < deadline and not task_queue._cancel_event.is_set():
-            attempt += 1
-            mapped, total = _refresh_media_stem_targets(
-                media_stem_to_strm_path,
-                media_stem_to_target,
-                stems_filter=required_stems,
-            )
-            if attempt == 1 or attempt % 6 == 0:
-                logger.info(
-                    f"【P115ShareStrm】字幕收尾映射进度 {mapped}/{total}（仅字幕所需）: {share_code}"
+        # 如果开启了 MP 整理，等待整理映射记录（至多 grace 秒或全部映射完成）
+        if configer.moviepilot_transfer and required_stems:
+            while time() < deadline and not task_queue._cancel_event.is_set():
+                attempt += 1
+                mapped, total = _refresh_media_stem_targets(
+                    media_stem_to_strm_path,
+                    media_stem_to_target,
+                    stems_filter=required_stems,
                 )
-
-            now = time()
-            should_check_state = (not audit_ok) and (
-                attempt == 1 or now - last_state_check >= state_check_interval
-            )
-            if should_check_state:
-                last_state_check = now
-                state = _get_share_state(client, share_code, receive_code)
-                if state == 7:
-                    logger.warning(f"【P115ShareStrm】字幕后台收尾发现链接已过期: {share_code}")
-                    task_queue.subtitle_job_update_stage(job_id, "failed")
-                    task_queue._notify(
-                        user_id,
-                        "【115分享STRM】字幕下载失败",
-                        f"❌ {share_code}\n原因: 链接已失效或在审核期间过期",
-                        buttons=retry_btn,
+                if attempt == 1 or attempt % 6 == 0:
+                    logger.info(
+                        f"【P115ShareStrm】字幕收尾映射进度 {mapped}/{total}（仅字幕所需）: {share_code}"
                     )
-                    task_queue.subtitle_job_remove(job_id)
-                    return
-                if state is not None and state != 0:
-                    audit_ok = True
-                    task_queue.subtitle_job_update_stage(job_id, "placing")
-                    logger.info(f"【P115ShareStrm】字幕收尾审核已通过，开始等待所需映射: {share_code}")
-                else:
-                    task_queue.subtitle_job_update_stage(job_id, "waiting_audit")
 
-            if audit_ok:
                 if total == 0 or mapped >= total:
                     break
-                if now >= started + _SUBTITLE_MAP_GRACE_SEC:
+                if time() >= started + _SUBTITLE_MAP_GRACE_SEC:
                     logger.warning(
                         f"【P115ShareStrm】字幕所需映射 grace 到期仍缺 {total - mapped}/{total}，"
                         f"进入放置（缺整理记录将回退 STRM 目录）: {share_code}"
                     )
                     break
-            else:
-                if now >= audit_deadline:
-                    break
 
-            if _interruptible_sleep(interval, task_queue._cancel_event):
-                logger.info(f"【P115ShareStrm】字幕后台收尾已取消: {share_code}")
-                return
-            interval = min(audit_max, interval + max(5, audit_min // 6))
+                if _interruptible_sleep(interval, task_queue._cancel_event):
+                    logger.info(f"【P115ShareStrm】字幕后台收尾已取消: {share_code}")
+                    return
+                interval = min(30, interval + 5)
 
         if task_queue._cancel_event.is_set():
             return
-
-        if not audit_ok:
-            # 最后再查一次状态
-            state = _get_share_state(client, share_code, receive_code)
-            if state is not None and state != 0 and state != 7:
-                audit_ok = True
-            elif state == 0 or state is None:
-                logger.warning(f"【P115ShareStrm】字幕后台收尾审核轮询超时: {share_code}")
-                task_queue.subtitle_job_update_stage(job_id, "failed")
-                task_queue._notify(
-                    user_id,
-                    "【115分享STRM】字幕下载失败",
-                    f"❌ {share_code}\n原因: 链接审核轮询超时 ({audit_hours}小时)",
-                    buttons=retry_btn,
-                )
-                task_queue.subtitle_job_remove(job_id)
-                return
-            elif state == 7:
-                task_queue.subtitle_job_update_stage(job_id, "failed")
-                task_queue._notify(
-                    user_id,
-                    "【115分享STRM】字幕下载失败",
-                    f"❌ {share_code}\n原因: 链接已失效",
-                    buttons=retry_btn,
-                )
-                task_queue.subtitle_job_remove(job_id)
-                return
 
         _refresh_media_stem_targets(
             media_stem_to_strm_path,
@@ -703,45 +630,21 @@ def _finalize_subtitles_async(
             stems_filter=required_stems,
         )
         task_queue.subtitle_job_update_stage(job_id, "placing")
-        logger.info(f"【P115ShareStrm】开始后台下载字幕，共 {len(subtitle_files)} 个: {share_code}")
+        logger.info(f"【P115ShareStrm】开始直链下载字幕，共 {len(subtitle_files)} 个: {share_code}")
         subtitle_source = str((subtitle_files[0].get("_scan_source") if subtitle_files else "unknown") or "unknown")
         subtitle_cache_age = subtitle_files[0].get("_scan_cache_age_sec") if subtitle_files else None
-        try:
-            downloaded_subtitle_paths, subtitle_fail_count, downloaded_subtitle_items, refreshed_media_files = _download_subtitles_from_share(
-                client,
-                share_code,
-                receive_code,
-                subtitle_files,
-                save_path_obj,
-                context={
-                    "subtitle_source": subtitle_source,
-                    "subtitle_cache_age_sec": subtitle_cache_age,
-                },
-            )
-            if refreshed_media_files is not None:
-                logger.info(
-                    f"【P115ShareStrm】990002 重扫后同步更新媒体文件列表: "
-                    f"{len(media_files)} -> {len(refreshed_media_files)} 个"
-                )
-                media_files = refreshed_media_files
-        except ShareReceiveLimitedError as e:
-            try:
-                retry_hours = max(1, int(configer.share_receive_retry_hours or 3))
-            except (TypeError, ValueError):
-                retry_hours = 3
-            task_queue.subtitle_job_update_stage(job_id, "receive_limited")
-            task_queue._notify(
-                user_id,
-                "【115分享STRM】字幕下载失败",
-                f"❌ {share_code}\n原因: {e}\n将在 {retry_hours} 小时后自动重试转存",
-                buttons=retry_btn,
-            )
-            _schedule_subtitle_receive_retry(
-                job_id, share_code, receive_code, subtitle_files, save_path_obj,
-                user_id, media_files, media_stem_to_strm_path, media_stem_to_target,
-                retry_hours,
-            )
-            return
+
+        downloaded_subtitle_paths, subtitle_fail_count, downloaded_subtitle_items, _ = _download_subtitles_from_share(
+            client,
+            share_code,
+            receive_code,
+            subtitle_files,
+            save_path_obj,
+            context={
+                "subtitle_source": subtitle_source,
+                "subtitle_cache_age_sec": subtitle_cache_age,
+            },
+        )
         subtitle_count = len(downloaded_subtitle_paths)
         place_ok, place_miss, place_fallback = 0, 0, 0
         if downloaded_subtitle_paths and configer.moviepilot_transfer:
@@ -779,7 +682,7 @@ def _finalize_subtitles_async(
         if place_miss:
             msg += "\n未找到整理目标，字幕跳过"
         buttons = retry_btn if (subtitle_fail_count or place_miss) else None
-        task_queue._notify(user_id, "【115分享STRM】字幕自动下载成功", msg, buttons=buttons)
+        task_queue._notify(user_id, "【115分享STRM】字幕自动下载完成", msg, buttons=buttons)
         task_queue.subtitle_job_update_stage(job_id, "done")
         task_queue.subtitle_job_remove(job_id)
     except Exception as e:
@@ -1491,26 +1394,14 @@ def _download_subtitles_from_share(
     context: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Path], int, List[dict], Optional[List[dict]]]:
     """
-    通过转存方式下载分享中的字幕文件：
-    1. 在网盘中创建临时文件夹
-    2. 用 share_receive 将字幕文件转存到临时文件夹
-    3. 通过 fs_video_subtitle 获取转存后文件的下载 URL
-    4. 通过 httpx 下载到本地
-    5. 清理临时文件夹
-
-    参考 p115strmhelper 插件的 batch_share_subtitle_downloader。
+    通过 115 官方直链接口 (os_windows/2.0/share/downurl) 直接下载分享中的字幕文件：
+    1. 遍历字幕文件列表，调用 client.share_download_url 获取 CDN 直链
+    2. 通过 httpx 直接下载到本地
+    3. 无需在网盘中创建临时文件夹、无需 share_receive 转存、无需等待落盘及审核
 
     :return: (成功下载的本地路径列表, 失败数量, 成功下载对应的字幕项, 重扫后的媒体文件列表或None)
     """
     import httpx
-
-    custom_headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/21E219 "
-            "115wangpan_ios/36.2.20"
-        ),
-    }
 
     _download_headers = {
         "User-Agent": (
@@ -1523,280 +1414,76 @@ def _download_subtitles_from_share(
     downloaded_paths: List[Path] = []
     downloaded_items: List[dict] = []
     fail_count = 0
-    batch_size = 50
-    strategy = (configer.subtitle_receive_990002_strategy or "auto_rescan_once").strip().lower()
-    if strategy not in {"auto_rescan_once", "single_only", "fail_fast"}:
-        strategy = "auto_rescan_once"
-    single_retry_max = max(1, int(configer.subtitle_single_retry_max or 20))
-    shared_source = (context or {}).get("subtitle_source") or "unknown"
-    shared_cache_age = (context or {}).get("subtitle_cache_age_sec")
-    refreshed_media_files: Optional[List[dict]] = None
 
-    for batch_start in range(0, len(subtitle_items), batch_size):
-        batch_items = subtitle_items[batch_start:batch_start + batch_size]
-        original_batch_count = len(batch_items)
-        scid = None
-        batch_success_downloads = 0
+    logger.info(
+        f"【P115ShareStrm】开始通过直链接口下载分享字幕: share={share_code}, 共 {len(subtitle_items)} 个字幕"
+    )
+
+    for item in subtitle_items:
+        file_id = item.get("id") or item.get("file_id")
+        filename = item.get("name", "")
+        full_path = item.get("_full_path", f"/{filename}")
+        local_path = save_path_obj / _safe_path(Path(full_path.lstrip("/")))
+
+        if not file_id:
+            logger.warning(f"【P115ShareStrm】字幕项缺少 file_id，跳过: {item}")
+            fail_count += 1
+            continue
+
+        down_url = None
         try:
-            # 1. 在网盘中创建临时文件夹
-            logger.info(f"【P115ShareStrm】开始转存并下载分享字幕，准备创建临时文件夹...")
-            resp = call_protected_api(client.fs_mkdir, f"subtitle-{uuid4()}", headers=custom_headers)
-            check_response(resp)
-            if "cid" in resp:
-                scid = resp["cid"]
-            else:
-                data = resp.get("data", {})
-                scid = data.get("category_id") or data.get("file_id")
-            logger.info(f"【P115ShareStrm】网盘临时文件夹创建成功，scid: {scid}")
-
-            # 2. 将分享中的字幕文件转存到临时文件夹
-            def _submit_receive(items_for_submit: List[dict], label: str) -> None:
-                file_ids = [str(item.get("id") or "") for item in items_for_submit if item.get("id")]
-                file_ids_str_inner = ",".join(file_ids)
-                logger.info(
-                    f"【P115ShareStrm】向 115 提交字幕转存[{label}]，共 {len(file_ids)} 个文件，"
-                    f"source={shared_source}, cache_age={shared_cache_age}, "
-                    f"首ID={file_ids[0] if file_ids else '-'}, 末ID={file_ids[-1] if file_ids else '-'}"
-                )
-                payload_inner = {
+            logger.info(f"【P115ShareStrm】获取字幕直链: {filename} (file_id: {file_id})...")
+            # 通过 115 客户端获取分享文件直链 (app="android" 映射到 os_windows/2.0/share/downurl)
+            down_url = call_protected_api(
+                client.share_download_url,
+                {
                     "share_code": share_code,
                     "receive_code": receive_code,
-                    "file_id": file_ids_str_inner,
-                    "cid": scid,
-                    "is_check": 0,
-                }
-                resp_inner = call_protected_api(client.share_receive, payload_inner, headers=custom_headers)
-                logger.debug(f"【P115ShareStrm】share_receive[{label}] 接口返回: {resp_inner}")
-                check_response(resp_inner)
-
-            try:
-                _submit_receive(batch_items, "batch")
-                logger.info(f"【P115ShareStrm】字幕转存任务提交完成")
-            except Exception as receive_err:
-                if is_receive_limited(receive_err):
-                    raise ShareReceiveLimitedError(str(receive_err)) from receive_err
-                if not _is_param_invalid_990002(receive_err) or strategy == "fail_fast":
-                    raise
-
-                logger.warning(
-                    f"【P115ShareStrm】share_receive 触发 990002，准备兜底处理: "
-                    f"share={share_code}, batch={len(batch_items)}, source={shared_source}, strategy={strategy}"
-                )
-                recovered_items: List[dict] = list(batch_items)
-                recovered_batch_submitted = False
-                if strategy == "auto_rescan_once":
-                    try:
-                        live_media_items, live_sub_items = _collect_live_media_and_subtitle_items(
-                            client, share_code, receive_code
-                        )
-                        refreshed_media_files = live_media_items
-                        matched_items = _match_subtitle_batch_by_identity(live_sub_items, batch_items)
-                        if matched_items:
-                            recovered_items = matched_items
-                            logger.info(
-                                f"【P115ShareStrm】990002 兜底在线重扫完成，匹配 {len(matched_items)}/{len(batch_items)} 个字幕"
-                            )
-                            _submit_receive(recovered_items, "rescan-batch")
-                            batch_items = recovered_items
-                            recovered_batch_submitted = True
-                            logger.info("【P115ShareStrm】重扫后批量提交成功")
-                        else:
-                            logger.warning("【P115ShareStrm】在线重扫后未匹配到可重试字幕，转入单文件降级")
-                    except ShareReceiveLimitedError:
-                        raise
-                    except Exception as rescan_err:
-                        if is_receive_limited(rescan_err):
-                            raise ShareReceiveLimitedError(str(rescan_err)) from rescan_err
-                        logger.warning(f"【P115ShareStrm】重扫批量重试失败，转入单文件降级: {rescan_err}")
-
-                if not recovered_batch_submitted:
-                    # 单文件降级，避免整批失败
-                    single_candidates = recovered_items[:single_retry_max]
-                    unattempted_count = max(0, len(recovered_items) - len(single_candidates))
-                    if unattempted_count:
-                        logger.warning(
-                            f"【P115ShareStrm】单文件降级触发上限 {single_retry_max}，"
-                            f"其中 {unattempted_count} 个文件未尝试提交"
-                        )
-
-                    single_success_items: List[dict] = []
-                    single_failed_ids: List[str] = []
-                    for item in single_candidates:
-                        try:
-                            _submit_receive([item], "single")
-                            single_success_items.append(item)
-                        except Exception as single_err:
-                            if is_receive_limited(single_err):
-                                raise ShareReceiveLimitedError(str(single_err)) from single_err
-                            single_failed_ids.append(str(item.get("id") or ""))
-
-                    if single_failed_ids:
-                        logger.warning(
-                            f"【P115ShareStrm】单文件降级后仍失败 {len(single_failed_ids)} 个，"
-                            f"失败ID列表: {','.join(single_failed_ids)}"
-                        )
-
-                    if not single_success_items:
-                        fail_count += original_batch_count
-                        logger.error("【P115ShareStrm】字幕批处理失败：990002 兜底后无可下载字幕")
-                        continue
-
-                    batch_items = single_success_items
-                    fail_count += max(0, original_batch_count - len(single_success_items))
-                    logger.info(
-                        f"【P115ShareStrm】单文件降级可继续下载 {len(batch_items)} 个字幕"
-                    )
-
-            # 3. 轮询等待 115 异步转存完成（在第一次查询前增加 8s 的延时以给 115 充足时间落盘）
-            attr = None
-            logger.info(f"【P115ShareStrm】开始等待字幕文件转存落盘...")
-            sleep(8)
-            for attempt in range(10):
-                if attempt > 0:
-                    sleep(3)
-                try:
-                    logger.debug(f"【P115ShareStrm】正在进行第 {attempt + 1}/10 次转存检测...")
-                    attr = call_protected_api(
-                        lambda c, s: next(iterdir(c, cid=s, page_size=1, app="web")),
-                        client,
-                        scid,
-                    )
-                    if attr:
-                        logger.info(f"【P115ShareStrm】检测到转存文件成功，首个文件 pickcode: {attr.get('pickcode')}")
-                        break
-                except StopIteration:
-                    pass
-                except Exception as poll_err:
-                    logger.warning(f"【P115ShareStrm】轮询转存状态时出错: {poll_err}")
-
-            if not attr:
-                try:
-                    logger.warning(f"【P115ShareStrm】轮询超时，尝试列出临时目录 {scid} 下的所有内容...")
-                    tmp_files = call_protected_api(
-                        lambda c, s: list(iterdir(c, cid=s, page_size=10, app="web")),
-                        client,
-                        scid,
-                    )
-                    logger.warning(f"【P115ShareStrm】临时目录下实际存在的文件列表: {tmp_files}")
-                except Exception as list_err:
-                    logger.warning(f"【P115ShareStrm】尝试列出临时目录内容失败: {list_err}")
-                raise RuntimeError("115 转存文件超时，临时文件夹中未发现字幕文件")
-
-            # 4. 调用 fs_video_subtitle 获取下载链接
-            logger.info(f"【P115ShareStrm】通过 fs_video_subtitle 批量获取字幕下载链接，使用 pickcode: {attr['pickcode']}")
-            resp = call_protected_api(client.fs_video_subtitle, attr["pickcode"], headers=custom_headers)
-            check_response(resp)
-            logger.debug(f"【P115ShareStrm】fs_video_subtitle 接口返回数据: {resp}")
-
-            # 列出转存到临时文件夹下的所有文件的 sha1 -> pickcode 映射（用于兜底下载）
-            tmp_files_map = {}
-            try:
-                tmp_files = call_protected_api(
-                    lambda c, s: list(iterdir(c, cid=s, page_size=100, app="web")),
-                    client,
-                    scid,
-                )
-                logger.info(f"【P115ShareStrm】临时文件夹 {scid} 中当前实际存在的文件数量: {len(tmp_files)}")
-                for tf in tmp_files:
-                    if tf.get("sha1") and tf.get("pickcode"):
-                        tmp_files_map[tf["sha1"].lower()] = tf["pickcode"]
-                logger.debug(f"【P115ShareStrm】已构建临时文件 sha1 -> pickcode 映射: {tmp_files_map}")
-            except Exception as list_err:
-                logger.warning(f"【P115ShareStrm】构建临时文件映射失败: {list_err}")
-
-            # 5. 构建 sha1 -> url 映射
-            subtitles_url_map = {
-                info["sha1"].lower(): info["url"]
-                for info in resp.get("data", {}).get("list", [])
-                if info.get("file_id")
-            }
-            logger.info(f"【P115ShareStrm】成功从 fs_video_subtitle 获取字幕直链，数量: {len(subtitles_url_map)}")
-
-            # 6. 逐个下载字幕文件到本地
-            for item in batch_items:
-                filename = item.get("name", "")
-                full_path = item.get("_full_path", f"/{filename}")
-                local_path = save_path_obj / _safe_path(Path(full_path.lstrip("/")))
-                sha1 = item.get("sha1", "").lower()
-
-                url = subtitles_url_map.get(sha1)
-                if not url:
-                    # 尝试进行兜底获取下载直链（支持 .sup 或其它非常规后缀字幕）
-                    logger.info(f"【P115ShareStrm】字幕文件 {filename} (sha1: {sha1}) 未能匹配到 fs_video_subtitle 链接，尝试使用 client.download_url 兜底获取直链...")
-                    tmp_pickcode = tmp_files_map.get(sha1)
-                    if tmp_pickcode:
-                        try:
-                            logger.info(f"【P115ShareStrm】正在为 {filename} (pickcode: {tmp_pickcode}) 获取下载直链...")
-                            url = str(call_protected_api(
-                                client.download_url,
-                                tmp_pickcode,
-                                user_agent=custom_headers.get("User-Agent"),
-                            ))
-                            logger.info(f"【P115ShareStrm】获取直链成功: {url}")
-                        except Exception as dl_url_err:
-                            logger.error(f"【P115ShareStrm】调用 client.download_url 获取 {filename} 直链失败: {dl_url_err}", exc_info=True)
-                    else:
-                        logger.warning(f"【P115ShareStrm】未能在临时网盘目录映射中匹配到 sha1={sha1} 的文件，可能该文件转存落盘未成功")
-
-                if not url:
-                    logger.warning(
-                        f"【P115ShareStrm】字幕文件 {filename} (sha1: {sha1}) 最终未能匹配到有效下载链接，跳过。"
-                        f" 可用 fs_video_subtitle sha1 列表: {list(subtitles_url_map.keys())}，"
-                        f" 临时目录可用 sha1 列表: {list(tmp_files_map.keys())}"
-                    )
-                    fail_count += 1
-                    continue
-
-                _dl_success = False
-                logger.info(f"【P115ShareStrm】开始从 115 CDN 下载字幕 {filename}，保存路径: {local_path}")
-                for _attempt in range(3):
-                    try:
-                        resp_dl = httpx.get(
-                            url,
-                            headers=_download_headers,
-                            timeout=30,
-                            follow_redirects=True,
-                        )
-                        resp_dl.raise_for_status()
-                        local_path.parent.mkdir(parents=True, exist_ok=True)
-                        local_path.write_bytes(resp_dl.content)
-                        logger.info(f"【P115ShareStrm】字幕下载成功: {filename}")
-                        downloaded_paths.append(local_path)
-                        downloaded_items.append(item)
-                        batch_success_downloads += 1
-                        _dl_success = True
-                        break
-                    except Exception as e:
-                        logger.error(
-                            f"【P115ShareStrm】字幕下载失败 ({_attempt + 1}/3): "
-                            f"{filename}: {e}",
-                            exc_info=True
-                        )
-                        if _attempt < 2:
-                            sleep(2)
-
-                if not _dl_success:
-                    fail_count += 1
-
-        except ShareReceiveLimitedError:
-            raise
+                    "file_id": file_id,
+                },
+                app="android",
+            )
+            down_url = str(down_url)
+            logger.debug(f"【P115ShareStrm】字幕直链获取成功: {filename} -> {down_url}")
         except Exception as e:
-            if is_receive_limited(e):
-                raise ShareReceiveLimitedError(str(e)) from e
-            logger.error(f"【P115ShareStrm】字幕批处理失败: {e}", exc_info=True)
-            # 本批次中尚未成功下载的全部计为失败
-            fail_count += max(0, len(batch_items) - batch_success_downloads)
-        finally:
-            # 7. 清理临时文件夹
-            if scid:
-                try:
-                    logger.info(f"【P115ShareStrm】正在清理网盘临时目录 {scid}...")
-                    resp_del = call_protected_api(client.fs_delete, scid, headers=custom_headers)
-                    logger.debug(f"【P115ShareStrm】清理返回结果: {resp_del}")
-                except Exception as e:
-                    logger.warning(f"【P115ShareStrm】清理字幕临时目录失败: {e}", exc_info=True)
+            logger.error(f"【P115ShareStrm】获取字幕直链失败: {filename} (id={file_id}): {e}")
+            fail_count += 1
+            continue
 
-    return downloaded_paths, fail_count, downloaded_items, refreshed_media_files
+        if not down_url:
+            logger.warning(f"【P115ShareStrm】未获取到有效直链: {filename}")
+            fail_count += 1
+            continue
+
+        _dl_success = False
+        logger.info(f"【P115ShareStrm】开始从 115 CDN 下载字幕 {filename}，保存路径: {local_path}")
+        for _attempt in range(3):
+            try:
+                resp_dl = httpx.get(
+                    down_url,
+                    headers=_download_headers,
+                    timeout=30,
+                    follow_redirects=True,
+                )
+                resp_dl.raise_for_status()
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_bytes(resp_dl.content)
+                logger.info(f"【P115ShareStrm】字幕下载成功: {filename}")
+                downloaded_paths.append(local_path)
+                downloaded_items.append(item)
+                _dl_success = True
+                break
+            except Exception as e:
+                logger.error(
+                    f"【P115ShareStrm】字幕下载失败 ({_attempt + 1}/3): {filename}: {e}"
+                )
+                if _attempt < 2:
+                    sleep(2)
+
+        if not _dl_success:
+            fail_count += 1
+
+    return downloaded_paths, fail_count, downloaded_items, None
 
 
 def _resolve_mtype_by_tmdb_names(tmdbid: int, arg_str: str,
