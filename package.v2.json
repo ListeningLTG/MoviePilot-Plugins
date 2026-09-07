@@ -302,11 +302,12 @@
   "advancedcategory": {
     "name": "高级二级分类",
     "description": "扩展 MoviePilot 二级分类识别能力，支持根据关键词库、系列名称、演职员名单及自定义 YAML 规则分类，并在整理转移时自动重组二级目录。",
-    "version": "1.0.8",
+    "version": "1.0.9",
     "icon": "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/category.png",
     "author": "ListeningLTG",
     "level": 1,
     "history": {
+      "v1.0.9": "重构TMDB关键词标签抓取逻辑，增加多重降级与独立keywords接口调用，彻底解决include_keywords无法命中TMDB标签的问题",
       "v1.0.8": "支持清空缓存保存后自动复位关闭，优化清空日志与成人动画识别",
       "v1.0.7": "添加清空缓存",
       "v1.0.6": "优化",
