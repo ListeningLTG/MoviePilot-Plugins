@@ -501,106 +501,130 @@ class TmdbExtraHelper:
 
         # 如果已有演员和标签，直接返回
         if extra_data["actors"] and extra_data["tags"]:
+            logger.info(f"【高级二级分类】媒体信息已自带完整标签与演员: 标签(共{len(extra_data['tags'])}个)={extra_data['tags']}, 演员(共{len(extra_data['actors'])}人)={extra_data['actors'][:5]}")
             return extra_data
 
         # 若缺乏 API 数据且有 TMDB ID，尝试通过 TMDB 详情 API 补充抓取
         if tmdbid:
+            media_type_enum = MediaType.MOVIE if mtype in (MediaType.MOVIE, "movie") else MediaType.TV
+            detail = None
+
+            # 方式 1：优先尝试 TheMovieDbModule().tmdb_info(tmdbid, media_type)
             try:
-                media_type_enum = MediaType.MOVIE if mtype in (MediaType.MOVIE, "movie") else MediaType.TV
-                detail = None
-
-                # 方式 1：优先尝试 TheMovieDbModule().tmdb_info(tmdbid, media_type)
                 tmdb_mod = self._get_tmdb_module()
-                if tmdb_mod:
-                    try:
-                        if hasattr(tmdb_mod, "tmdb_info"):
-                            detail = tmdb_mod.tmdb_info(int(tmdbid), media_type_enum)
-                    except Exception as e1:
-                        logger.debug(f"【高级二级分类】TheMovieDbModule.tmdb_info 失败: {e1}")
+                if tmdb_mod and hasattr(tmdb_mod, "tmdb_info"):
+                    detail = tmdb_mod.tmdb_info(int(tmdbid), media_type_enum)
+                    if detail:
+                        logger.info(f"【高级二级分类】通道 1 (TheMovieDbModule.tmdb_info) 成功获取 TMDB:{tmdbid} 详情")
+            except Exception as e1:
+                logger.info(f"【高级二级分类】通道 1 (TheMovieDbModule.tmdb_info) 尝试异常: {e1}")
 
-                # 方式 2：尝试 TmdbApi 直接调用
-                if not detail:
-                    try:
-                        from app.modules.themoviedb.tmdbapi import TmdbApi
-                        tmdb_api = TmdbApi()
-                        if hasattr(tmdb_api, "tmdb_info"):
-                            detail = tmdb_api.tmdb_info(int(tmdbid), media_type_enum)
-                        elif hasattr(tmdb_api, "get_movie_detail") and media_type_enum == MediaType.MOVIE:
-                            detail = tmdb_api.get_movie_detail(int(tmdbid), append_to_response="credits,keywords")
-                        elif hasattr(tmdb_api, "get_tv_detail") and media_type_enum == MediaType.TV:
-                            detail = tmdb_api.get_tv_detail(int(tmdbid), append_to_response="credits,keywords")
-                        elif hasattr(tmdb_api, "_get_movie_detail") and media_type_enum == MediaType.MOVIE:
-                            detail = tmdb_api._get_movie_detail(int(tmdbid), append_to_response="credits,keywords")
-                        elif hasattr(tmdb_api, "_get_tv_detail") and media_type_enum == MediaType.TV:
-                            detail = tmdb_api._get_tv_detail(int(tmdbid), append_to_response="credits,keywords")
-                    except Exception as e2:
-                        logger.debug(f"【高级二级分类】TmdbApi 详情抓取失败: {e2}")
+            # 方式 2：尝试 TmdbApi 直接调用
+            if not detail:
+                try:
+                    from app.modules.themoviedb.tmdbapi import TmdbApi
+                    tmdb_api = TmdbApi()
+                    if hasattr(tmdb_api, "tmdb_info"):
+                        detail = tmdb_api.tmdb_info(int(tmdbid), media_type_enum)
+                    elif hasattr(tmdb_api, "get_movie_detail") and media_type_enum == MediaType.MOVIE:
+                        detail = tmdb_api.get_movie_detail(int(tmdbid), append_to_response="credits,keywords")
+                    elif hasattr(tmdb_api, "get_tv_detail") and media_type_enum == MediaType.TV:
+                        detail = tmdb_api.get_tv_detail(int(tmdbid), append_to_response="credits,keywords")
+                    if detail:
+                        logger.info(f"【高级二级分类】通道 2 (TmdbApi) 成功获取 TMDB:{tmdbid} 详情")
+                except Exception as e2:
+                    logger.info(f"【高级二级分类】通道 2 (TmdbApi) 尝试异常: {e2}")
 
-                if detail and isinstance(detail, dict):
-                    # 补充演员
-                    c_cast = (detail.get("credits") or {}).get("cast") or detail.get("cast") or []
-                    for c in c_cast[:15]:
-                        c_name = c.get("name") or c.get("original_name") if isinstance(c, dict) else str(c)
-                        if c_name and str(c_name) not in extra_data["actors"]:
-                            extra_data["actors"].append(str(c_name))
+            if detail and isinstance(detail, dict):
+                # 补充演员
+                c_cast = (detail.get("credits") or {}).get("cast") or detail.get("cast") or []
+                for c in c_cast[:15]:
+                    c_name = c.get("name") or c.get("original_name") if isinstance(c, dict) else str(c)
+                    if c_name and str(c_name) not in extra_data["actors"]:
+                        extra_data["actors"].append(str(c_name))
 
-                    # 补充关键词标签
-                    kw_obj = detail.get("keywords")
-                    k_list = []
-                    if isinstance(kw_obj, dict):
-                        k_list = kw_obj.get("keywords") or kw_obj.get("results") or []
-                    elif isinstance(kw_obj, list):
-                        k_list = kw_obj
-                    elif detail.get("tag_names"):
-                        k_list = detail.get("tag_names") or []
+                # 补充关键词标签
+                kw_obj = detail.get("keywords")
+                k_list = []
+                if isinstance(kw_obj, dict):
+                    k_list = kw_obj.get("keywords") or kw_obj.get("results") or []
+                elif isinstance(kw_obj, list):
+                    k_list = kw_obj
+                elif detail.get("tag_names"):
+                    k_list = detail.get("tag_names") or []
 
-                    if isinstance(k_list, list):
-                        for k in k_list:
+                if isinstance(k_list, list):
+                    for k in k_list:
+                        k_name = k.get("name") if isinstance(k, dict) else str(k)
+                        if k_name and str(k_name) not in extra_data["tags"]:
+                            extra_data["tags"].append(str(k_name))
+
+                # 补充系列信息
+                coll = detail.get("belongs_to_collection")
+                if isinstance(coll, dict) and coll.get("name"):
+                    coll_name = str(coll.get("name"))
+                    if coll_name not in extra_data["series_names"]:
+                        extra_data["series_names"].append(coll_name)
+
+                # 补充 adult
+                if detail.get("adult"):
+                    extra_data["adult"] = True
+
+            # 方式 3：若依然缺少 tags，尝试单独调用 keywords 专用接口
+            if not extra_data["tags"]:
+                try:
+                    from app.modules.themoviedb.tmdbapi import TmdbApi
+                    tmdb_api = TmdbApi()
+                    kw_resp = None
+                    if media_type_enum == MediaType.MOVIE:
+                        if hasattr(tmdb_api, "movie_keywords"):
+                            kw_resp = tmdb_api.movie_keywords(int(tmdbid))
+                        elif hasattr(tmdb_api, "get_movie_keywords"):
+                            kw_resp = tmdb_api.get_movie_keywords(int(tmdbid))
+                    else:
+                        if hasattr(tmdb_api, "tv_keywords"):
+                            kw_resp = tmdb_api.tv_keywords(int(tmdbid))
+                        elif hasattr(tmdb_api, "get_tv_keywords"):
+                            kw_resp = tmdb_api.get_tv_keywords(int(tmdbid))
+
+                    if kw_resp:
+                        kw_items = kw_resp.get("keywords") or kw_resp.get("results") or (kw_resp if isinstance(kw_resp, list) else [])
+                        for k in kw_items:
                             k_name = k.get("name") if isinstance(k, dict) else str(k)
                             if k_name and str(k_name) not in extra_data["tags"]:
                                 extra_data["tags"].append(str(k_name))
+                        logger.info(f"【高级二级分类】通道 3 (TmdbApi.keywords) 成功获取到标签: {extra_data['tags']}")
+                except Exception as e3:
+                    logger.info(f"【高级二级分类】通道 3 (TmdbApi.keywords) 尝试异常: {e3}")
 
-                    # 补充系列信息
-                    coll = detail.get("belongs_to_collection")
-                    if isinstance(coll, dict) and coll.get("name"):
-                        coll_name = str(coll.get("name"))
-                        if coll_name not in extra_data["series_names"]:
-                            extra_data["series_names"].append(coll_name)
+            # 方式 4：尝试 tmdbv3api 官方包装器
+            if not extra_data["tags"]:
+                try:
+                    from app.modules.themoviedb.tmdbv3api import Movie, TV
+                    if media_type_enum == MediaType.MOVIE:
+                        m_obj = Movie()
+                        kw_resp = m_obj.keywords(int(tmdbid))
+                    else:
+                        t_obj = TV()
+                        kw_resp = t_obj.keywords(int(tmdbid))
 
-                    # 补充 adult
-                    if detail.get("adult"):
-                        extra_data["adult"] = True
-
-                # 方式 3：若依然缺少 tags，尝试单独调用 keywords 专用接口
-                if not extra_data["tags"]:
-                    try:
-                        from app.modules.themoviedb.tmdbapi import TmdbApi
-                        tmdb_api = TmdbApi()
-                        kw_resp = None
-                        if media_type_enum == MediaType.MOVIE:
-                            if hasattr(tmdb_api, "movie_keywords"):
-                                kw_resp = tmdb_api.movie_keywords(int(tmdbid))
-                            elif hasattr(tmdb_api, "get_movie_keywords"):
-                                kw_resp = tmdb_api.get_movie_keywords(int(tmdbid))
-                        else:
-                            if hasattr(tmdb_api, "tv_keywords"):
-                                kw_resp = tmdb_api.tv_keywords(int(tmdbid))
-                            elif hasattr(tmdb_api, "get_tv_keywords"):
-                                kw_resp = tmdb_api.get_tv_keywords(int(tmdbid))
-
-                        if kw_resp:
-                            kw_items = kw_resp.get("keywords") or kw_resp.get("results") or (kw_resp if isinstance(kw_resp, list) else [])
+                    if kw_resp:
+                        kw_items = getattr(kw_resp, "keywords", None) or getattr(kw_resp, "results", None) or (kw_resp.get("keywords") if isinstance(kw_resp, dict) else [])
+                        if isinstance(kw_items, list):
                             for k in kw_items:
-                                k_name = k.get("name") if isinstance(k, dict) else str(k)
+                                k_name = k.get("name") if isinstance(k, dict) else getattr(k, "name", str(k))
                                 if k_name and str(k_name) not in extra_data["tags"]:
                                     extra_data["tags"].append(str(k_name))
-                    except Exception as e3:
-                        logger.debug(f"【高级二级分类】单独查询 keywords 失败: {e3}")
+                        logger.info(f"【高级二级分类】通道 4 (tmdbv3api.keywords) 成功获取到标签: {extra_data['tags']}")
+                except Exception as e4:
+                    logger.info(f"【高级二级分类】通道 4 (tmdbv3api.keywords) 尝试异常: {e4}")
 
-                if extra_data["tags"]:
-                    logger.info(f"【高级二级分类】成功获取作品 (TMDB: {tmdbid}) 标签库 (共 {len(extra_data['tags'])} 个): {extra_data['tags']}")
-            except Exception as e:
-                logger.warning(f"【高级二级分类】通过 TMDB 补充扩展信息失败: {e}")
+            if extra_data["tags"]:
+                logger.info(f"【高级二级分类】作品 (TMDB: {tmdbid}) 最终提取到标签库 (共 {len(extra_data['tags'])} 个): {extra_data['tags']}")
+            else:
+                logger.warning(f"【高级二级分类】作品 (TMDB: {tmdbid}) 未能获取到任何 TMDB 标签库 (可能 TMDB 无标签或网络连接异常)")
+
+        return extra_data
 
         return extra_data
 

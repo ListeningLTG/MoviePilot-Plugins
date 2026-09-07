@@ -37,7 +37,7 @@ class advancedcategory(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/category.png"
     # 插件版本
-    plugin_version = "1.0.9"
+    plugin_version = "1.1.0"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -205,6 +205,7 @@ class advancedcategory(_PluginBase):
 
         # 收集扩展信息 (演职员、关键词、别名池)
         extra_data = self._tmdb_extra.build_extra_data(tmdb_info, mtype=mtype_str)
+        logger.info(f"【高级二级分类】作品 [{title}] 提取扩展数据完毕: 片名池={extra_data.get('titles')}, 标签库(共{len(extra_data.get('tags', []))}个)={extra_data.get('tags')}")
 
         matched_cat_name = None
         for cat_name, rule_dict in category_rules_dict.items():
