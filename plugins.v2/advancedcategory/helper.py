@@ -509,15 +509,16 @@ class TmdbExtraHelper:
             media_type_enum = MediaType.MOVIE if mtype in (MediaType.MOVIE, "movie") else MediaType.TV
             detail = None
 
-            # 方式 1：优先尝试 TheMovieDbModule().tmdb_info(tmdbid, media_type)
+            # 方式 1：优先尝试从 MoviePilot ModuleManager 获取已初始化的 TheMovieDbModule 单例
             try:
-                tmdb_mod = self._get_tmdb_module()
+                from app.modules import ModuleManager
+                tmdb_mod = ModuleManager().get_module("TheMovieDbModule")
                 if tmdb_mod and hasattr(tmdb_mod, "tmdb_info"):
                     detail = tmdb_mod.tmdb_info(int(tmdbid), media_type_enum)
                     if detail:
-                        logger.info(f"【高级二级分类】通道 1 (TheMovieDbModule.tmdb_info) 成功获取 TMDB:{tmdbid} 详情")
+                        logger.info(f"【高级二级分类】通道 1 (ModuleManager.TheMovieDbModule) 成功获取 TMDB:{tmdbid} 详情")
             except Exception as e1:
-                logger.info(f"【高级二级分类】通道 1 (TheMovieDbModule.tmdb_info) 尝试异常: {e1}")
+                logger.info(f"【高级二级分类】通道 1 (TheMovieDbModule) 尝试异常: {e1}")
 
             # 方式 2：尝试 TmdbApi 直接调用
             if not detail:
@@ -539,23 +540,23 @@ class TmdbExtraHelper:
                 # 补充演员
                 c_cast = (detail.get("credits") or {}).get("cast") or detail.get("cast") or []
                 for c in c_cast[:15]:
-                    c_name = c.get("name") or c.get("original_name") if isinstance(c, dict) else str(c)
+                    c_name = c.get("name") or c.get("original_name") if isinstance(c, dict) else (getattr(c, "name", None) or str(c))
                     if c_name and str(c_name) not in extra_data["actors"]:
                         extra_data["actors"].append(str(c_name))
 
                 # 补充关键词标签
                 kw_obj = detail.get("keywords")
                 k_list = []
-                if isinstance(kw_obj, dict):
-                    k_list = kw_obj.get("keywords") or kw_obj.get("results") or []
-                elif isinstance(kw_obj, list):
+                if isinstance(kw_obj, list):
                     k_list = kw_obj
+                elif isinstance(kw_obj, dict):
+                    k_list = kw_obj.get("keywords") or kw_obj.get("results") or []
                 elif detail.get("tag_names"):
                     k_list = detail.get("tag_names") or []
 
                 if isinstance(k_list, list):
                     for k in k_list:
-                        k_name = k.get("name") if isinstance(k, dict) else str(k)
+                        k_name = k.get("name") if isinstance(k, dict) else (getattr(k, "name", None) or str(k))
                         if k_name and str(k_name) not in extra_data["tags"]:
                             extra_data["tags"].append(str(k_name))
 
@@ -588,16 +589,23 @@ class TmdbExtraHelper:
                             kw_resp = tmdb_api.get_tv_keywords(int(tmdbid))
 
                     if kw_resp:
-                        kw_items = kw_resp.get("keywords") or kw_resp.get("results") or (kw_resp if isinstance(kw_resp, list) else [])
+                        kw_items = []
+                        if isinstance(kw_resp, list):
+                            kw_items = kw_resp
+                        elif isinstance(kw_resp, dict):
+                            kw_items = kw_resp.get("keywords") or kw_resp.get("results") or []
+                        elif hasattr(kw_resp, "keywords"):
+                            kw_items = kw_resp.keywords or []
+
                         for k in kw_items:
-                            k_name = k.get("name") if isinstance(k, dict) else str(k)
+                            k_name = k.get("name") if isinstance(k, dict) else (getattr(k, "name", None) or str(k))
                             if k_name and str(k_name) not in extra_data["tags"]:
                                 extra_data["tags"].append(str(k_name))
                         logger.info(f"【高级二级分类】通道 3 (TmdbApi.keywords) 成功获取到标签: {extra_data['tags']}")
                 except Exception as e3:
                     logger.info(f"【高级二级分类】通道 3 (TmdbApi.keywords) 尝试异常: {e3}")
 
-            # 方式 4：尝试 tmdbv3api 官方包装器
+            # 方式 4：尝试 tmdbv3api 官方包装器（支持 list / 对象属性）
             if not extra_data["tags"]:
                 try:
                     from app.modules.themoviedb.tmdbv3api import Movie, TV
@@ -609,12 +617,26 @@ class TmdbExtraHelper:
                         kw_resp = t_obj.keywords(int(tmdbid))
 
                     if kw_resp:
-                        kw_items = getattr(kw_resp, "keywords", None) or getattr(kw_resp, "results", None) or (kw_resp.get("keywords") if isinstance(kw_resp, dict) else [])
-                        if isinstance(kw_items, list):
-                            for k in kw_items:
-                                k_name = k.get("name") if isinstance(k, dict) else getattr(k, "name", str(k))
-                                if k_name and str(k_name) not in extra_data["tags"]:
-                                    extra_data["tags"].append(str(k_name))
+                        kw_items = []
+                        if isinstance(kw_resp, list):
+                            kw_items = kw_resp
+                        elif isinstance(kw_resp, dict):
+                            kw_items = kw_resp.get("keywords") or kw_resp.get("results") or []
+                        elif hasattr(kw_resp, "keywords"):
+                            kw_items = kw_resp.keywords or []
+                        elif hasattr(kw_resp, "results"):
+                            kw_items = kw_resp.results or []
+
+                        for k in kw_items:
+                            k_name = None
+                            if isinstance(k, dict):
+                                k_name = k.get("name")
+                            elif hasattr(k, "name"):
+                                k_name = k.name
+                            elif isinstance(k, str):
+                                k_name = k
+                            if k_name and str(k_name) not in extra_data["tags"]:
+                                extra_data["tags"].append(str(k_name))
                         logger.info(f"【高级二级分类】通道 4 (tmdbv3api.keywords) 成功获取到标签: {extra_data['tags']}")
                 except Exception as e4:
                     logger.info(f"【高级二级分类】通道 4 (tmdbv3api.keywords) 尝试异常: {e4}")
