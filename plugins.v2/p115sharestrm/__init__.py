@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -51,6 +51,16 @@ class p115sharestrm(_PluginBase):
 
         # 注入通知回调，避免 logic.py 直接依赖 app 内部模块
         task_queue.set_notify_callback(self._send_notify)
+
+        cookie_list = configer.get_cookie_list()
+        from .logic import get_account_clients
+        try:
+            clients_dict = get_account_clients() if cookie_list else {}
+            uids = [str(uid) for uid in clients_dict.keys() if uid > 0]
+            uid_str = f" (UID: {', '.join(uids)})" if uids else ""
+            logger.info(f"【P115ShareStrm】已加载 115 账号池: 共 {len(cookie_list)} 个有效账号{uid_str}")
+        except Exception as e:
+            logger.warning(f"【P115ShareStrm】解析 115 账号池失败: {e}")
 
         if configer.enabled:
             task_queue.start()
@@ -485,28 +495,35 @@ class p115sharestrm(_PluginBase):
                                             },
                                         ],
                                     },
-                                    # ── 第二行：Cookie 与 地址 ──
+                                    # ── 第二行：115 Cookie（支持多账号） ──
                                     {
                                         "component": "VRow",
                                         "content": [
                                             {
                                                 "component": "VCol",
-                                                "props": {"cols": 12, "md": 6},
+                                                "props": {"cols": 12},
                                                 "content": [
                                                     {
-                                                        "component": "VTextField",
+                                                        "component": "VTextarea",
                                                         "props": {
                                                             "model": "cookies",
-                                                            "label": "115 Cookie",
-                                                            "hint": "115网盘的 Cookie 配置",
+                                                            "label": "115 Cookie（支持多账号）",
+                                                            "rows": 3,
+                                                            "hint": "115 Cookie 配置，支持多账号（一行一个，支持 #注释）。处理分享时将自动匹配分享者本人 Cookie 提权扫描，免除 115 违规打码 (***) 与内容隐藏；未匹配时使用首个账号。",
                                                             "persistent-hint": True,
                                                         },
                                                     }
                                                 ],
                                             },
+                                        ],
+                                    },
+                                    # ── 第三行：MoviePilot 访问地址 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
                                             {
                                                 "component": "VCol",
-                                                "props": {"cols": 12, "md": 6},
+                                                "props": {"cols": 12},
                                                 "content": [
                                                     {
                                                         "component": "VTextField",
@@ -732,6 +749,16 @@ class p115sharestrm(_PluginBase):
         waf_405 = metrics.get("waf_405_count", 0)
         cache_hits = metrics.get("scan_cache_hits", 0)
 
+        cookie_list = configer.get_cookie_list()
+        cookie_count = len(cookie_list)
+        try:
+            from .logic import get_account_clients
+            clients_dict = get_account_clients() if cookie_list else {}
+            uids = [str(uid) for uid in clients_dict.keys() if uid > 0]
+            uid_preview = f" (UID: {', '.join(uids)})" if uids else ""
+        except Exception:
+            uid_preview = ""
+
         return [
             {
                 "component": "VCard",
@@ -908,6 +935,30 @@ class p115sharestrm(_PluginBase):
                                                     "prepend-icon": "mdi-database-check",
                                                 },
                                                 "text": f"扫描缓存命中: {cache_hits} 次",
+                                            }
+                                        ],
+                                    },
+                                ],
+                            },
+                            {
+                                "component": "VRow",
+                                "props": {"class": "mt-2"},
+                                "content": [
+                                    {
+                                        "component": "VCol",
+                                        "props": {"cols": 12},
+                                        "content": [
+                                            {
+                                                "component": "VChip",
+                                                "props": {
+                                                    "color": "success" if cookie_count > 1 else ("info" if cookie_count == 1 else "warning"),
+                                                    "variant": "tonal",
+                                                    "prepend-icon": "mdi-account-multiple-check" if cookie_count > 1 else ("mdi-account-check" if cookie_count == 1 else "mdi-account-alert"),
+                                                },
+                                                "text": (
+                                                    f"115 账号池: {cookie_count} 个有效账号{uid_preview} "
+                                                    + ("(已启用多账号智能提权)" if cookie_count > 1 else "(单账号运行中)")
+                                                ) if cookie_count > 0 else "115 账号池: 未配置 Cookie",
                                             }
                                         ],
                                     },

@@ -432,7 +432,7 @@ def _schedule_subtitle_receive_retry(
         if task_queue._cancel_event.is_set():
             return
         task_queue.subtitle_job_update_stage(job_id, "placing")
-        client = ShareP115Client(configer.cookies)
+        client = get_client_for_share(share_code, receive_code)
         retry_btn = [[{
             "text": "🔁 重试下载字幕",
             "callback_data": f"[PLUGIN]p115sharestrm|retry_sub:{share_code}:{receive_code}",
@@ -589,7 +589,7 @@ def _finalize_subtitles_async(
         )
         task_queue.subtitle_job_update_stage(job_id, "waiting_transfer")
 
-        client = ShareP115Client(configer.cookies)
+        client = get_client_for_share(share_code, receive_code)
         interval = 10
         attempt = 0
 
@@ -763,6 +763,80 @@ class ShareP115Client(P115Client):
         api = complete_url("/share/snap", base_url=base_url)
         payload = {"cid": 0, "limit": 32, "offset": 0, **payload}
         return self.request(url=api, params=payload, async_=async_, **request_kwargs)
+
+
+def get_account_clients() -> Dict[int, ShareP115Client]:
+    """
+    根据配置解析所有 115 账号，返回 {uid: client} 映射
+    """
+    cookie_list = configer.get_cookie_list()
+    clients: Dict[int, ShareP115Client] = {}
+    for idx, c in enumerate(cookie_list):
+        try:
+            client = ShareP115Client(c)
+            uid = getattr(client, "user_id", None)
+            if uid:
+                clients[int(uid)] = client
+            else:
+                clients[-(idx + 1)] = client
+        except Exception as e:
+            logger.warning(f"【P115ShareStrm】初始化 115 客户端失败 (Cookie #{idx+1}): {e}")
+    return clients
+
+
+def get_client_for_share(share_code: str, receive_code: str = "") -> ShareP115Client:
+    """
+    根据分享链接智能选择最合适的客户端：
+    1. 若未配置多账号或仅有单账号，直接返回主客户端
+    2. 若配置了多账号，探测根目录快照提取分享者 user_id
+    3. 若分享者 user_id 命中本地配置的账号池，则自动切换为属主客户端进行免屏蔽提权扫描
+    4. 否则返回默认（首个）客户端
+    """
+    clients_dict = get_account_clients()
+    if not clients_dict:
+        raise ValueError("未配置有效的 115 Cookie")
+
+    clients_list = list(clients_dict.values())
+    primary_client = clients_list[0]
+
+    # 若只有一个账号，无需额外探测，直接返回
+    if len(clients_list) == 1:
+        return primary_client
+
+    # 多账号情况：探测分享者 user_id
+    try:
+        payload = {
+            "share_code": share_code,
+            "receive_code": receive_code,
+            "cid": 0,
+            "limit": 1,
+            "offset": 0,
+        }
+        custom_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/21E219 "
+                "115wangpan_ios/36.2.20"
+            ),
+        }
+        resp = primary_client.share_snap_app(payload, headers=custom_headers)
+        data = resp.get("data", {}) if isinstance(resp, dict) else {}
+        userinfo = data.get("userinfo", {}) if isinstance(data, dict) else {}
+        owner_uid_str = userinfo.get("user_id")
+        if owner_uid_str is not None:
+            owner_uid = int(owner_uid_str)
+            if owner_uid in clients_dict:
+                matched_client = clients_dict[owner_uid]
+                owner_name = userinfo.get("user_name", "")
+                logger.info(
+                    f"【P115ShareStrm】检测到分享链接由本地配置账号 [{owner_name or owner_uid}] (UID: {owner_uid}) 创建，"
+                    f"已自动切换为属主 Cookie 提权扫描，免除违规打码与内容屏蔽！"
+                )
+                return matched_client
+    except Exception as e:
+        logger.warning(f"【P115ShareStrm】多账号属主探测失败，将使用默认账号: {e}")
+
+    return primary_client
 
 
 class _ShareSnapFetcher:
@@ -1747,14 +1821,14 @@ def process_share_strm(
     """
     实际执行 STRM 生成逻辑：遍历分享、生成文件、触发 MP 整理
     """
-    if not configer.cookies:
+    if not configer.get_cookie_list():
         return {"status": False, "msg": "未配置 115 Cookie"}
 
     if not configer.strm_save_path:
         return {"status": False, "msg": "未配置 STRM 保存路径"}
 
     try:
-        client = ShareP115Client(configer.cookies)
+        client = get_client_for_share(share_code, receive_code)
         save_path_obj = Path(configer.strm_save_path)
         save_path_obj.mkdir(parents=True, exist_ok=True)
 

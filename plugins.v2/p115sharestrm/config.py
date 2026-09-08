@@ -25,8 +25,21 @@ class ConfigManager(BaseModel):
     PLUGIN_NAME: str = Field(default="P115ShareStrm", description="插件名称")
 
     enabled: bool = Field(default=False, description="插件总开关")
-    cookies: Optional[str] = Field(default=None, description="115 Cookie")
+    cookies: Optional[str] = Field(default=None, description="115 Cookie (支持多行配置)")
     strm_save_path: str = Field(default="", description="STRM 保存路径")
+
+    def get_cookie_list(self) -> list[str]:
+        """
+        获取解析后的有效 Cookie 列表（支持多行配置，自动过滤空行和 # 开头的注释）
+        """
+        if not self.cookies:
+            return []
+        res: list[str] = []
+        for line in self.cookies.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                res.append(line)
+        return res
     moviepilot_transfer: bool = Field(default=True, description="STRM 交由 MoviePilot 整理")
     strm_include_sha1: bool = Field(default=False, description="默认 STRM 内容包含 SHA1 参数")
     tmdb_extract: bool = Field(default=False, description="从文本中自动提取 TMDB ID")
