@@ -98,6 +98,10 @@ class ConfigManager(BaseModel):
         default=True,
         description="全量 /sharestrm 在缓存未过期时复用扫描结果，跳过 115 列举",
     )
+    clear_scan_cache: bool = Field(
+        default=False,
+        description="保存配置时立即清空本地分享扫描缓存（保存后自动恢复关闭）",
+    )
     audit_poll_min_sec: int = Field(
         default=60,
         ge=10,

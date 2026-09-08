@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -47,6 +47,11 @@ class p115sharestrm(_PluginBase):
         """
         if config:
             configer.load_from_dict(config)
+            if getattr(configer, "clear_scan_cache", False):
+                from .logic import clear_all_scan_cache
+                cleared_count = clear_all_scan_cache()
+                logger.info(f"【P115ShareStrm】已清除所有本地分享扫描缓存 (共 {cleared_count} 条条目)")
+                configer.clear_scan_cache = False
             configer.update_plugin_config()
 
         # 注入通知回调，避免 logic.py 直接依赖 app 内部模块
@@ -458,6 +463,27 @@ class p115sharestrm(_PluginBase):
                                             },
                                         ],
                                     },
+                                    # ── 缓存维护行 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12, "md": 6},
+                                                "content": [
+                                                    {
+                                                        "component": "VSwitch",
+                                                        "props": {
+                                                            "model": "clear_scan_cache",
+                                                            "label": "清除本地扫描缓存",
+                                                            "hint": "开启并点击保存后将立即清空全部分享扫描缓存文件（share_scan_cache.json），保存后自动恢复为关闭状态",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
                                     {
                                         "component": "VRow",
                                         "content": [
@@ -727,6 +753,7 @@ class p115sharestrm(_PluginBase):
             "share_snap_speed_mode": 3,
             "scan_cache_ttl_hours": 72,
             "reuse_scan_cache_for_sharestrm": True,
+            "clear_scan_cache": False,
             "audit_poll_min_sec": 60,
             "audit_poll_max_sec": 300,
             "share_receive_retry_hours": 3,

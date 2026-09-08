@@ -965,6 +965,22 @@ def _get_scan_cache_path() -> Path:
     return task_queue._get_data_dir() / "share_scan_cache.json"
 
 
+def clear_all_scan_cache() -> int:
+    """
+    清空本地分享扫描缓存文件 (share_scan_cache.json)
+    """
+    path = _get_scan_cache_path()
+    try:
+        if path.exists():
+            data = _load_scan_cache_file()
+            count = len(data)
+            path.unlink(missing_ok=True)
+            return count
+    except Exception as e:
+        logger.warning(f"【P115ShareStrm】清理 share_scan_cache.json 失败: {e}")
+    return 0
+
+
 def _load_scan_cache_file() -> Dict[str, Any]:
     path = _get_scan_cache_path()
     try:
@@ -999,6 +1015,19 @@ def _save_share_scan_cache(
         "subtitle_files": subtitle_files,
     }
     _save_scan_cache_file(data)
+
+
+def _has_starred_pollution(items: List[dict]) -> bool:
+    """
+    检查列表项中是否包含被 115 脱敏屏蔽的打码路径 (***)
+    """
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        p = str(it.get("_full_path") or it.get("path") or it.get("name") or "")
+        if "***" in p:
+            return True
+    return False
 
 
 def _tag_scan_source(items: List[dict], source: str, cache_age_sec: Optional[int] = None) -> None:
@@ -1036,6 +1065,15 @@ def _load_share_scan_cache(
     subtitle_files = list(entry.get("subtitle_files") or [])
     if not media_files and not subtitle_files:
         return None
+
+    # 检测老缓存是否被 115 打码污染（包含 ***）
+    if _has_starred_pollution(media_files) or _has_starred_pollution(subtitle_files):
+        logger.info(
+            f"【P115ShareStrm】检测到老缓存中包含打码脱敏路径 (***)，判定老缓存已污染失效，"
+            f"自动跳过缓存并重新发起全量在线提权扫描！"
+        )
+        return None
+
     _tag_scan_source(media_files, "scan_cache", int(age))
     _tag_scan_source(subtitle_files, "scan_cache", int(age))
     api_metrics.record_cache_hit()
