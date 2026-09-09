@@ -107,7 +107,7 @@ class RuleEngine:
                 if not rest or rest.isdigit():
                     return True
             # 允许边界匹配，例如 "本能 2", "【本能】", "色戒 (2007)" 等
-            regex_pat = rf"(?:^|[^\u4e00-\u9fa5\w]){re.escape(pattern_word)}(?:$|[^\u4e00-\u9fa5\w]|\d+)"
+            regex_pat = rf"(?:^|[^\u4e00-\u9fa5A-Za-z0-9]){re.escape(pattern_word)}(?:$|[^\u4e00-\u9fa5A-Za-z0-9]|\d+)"
             if re.search(regex_pat, title, re.IGNORECASE):
                 return True
             return False
@@ -335,18 +335,19 @@ class RuleEngine:
                             break
                 continue
 
-            # 7. 系列关键词特征匹配: series_keywords
+            # 7. 系列关键词特征匹配: series_keywords (采用包含匹配，支持中文字词如 强奸、花与蛇 等系列)
             if attr == "series_keywords":
+                all_series_text = series_names + titles
                 # 排除词一票否决
                 if invert_values:
                     for inv_val in invert_values:
-                        if any(cls.match_title_keyword(inv_val, s) for s in series_names + titles):
+                        if any(inv_val in s for s in all_series_text):
                             return False, None
 
                 if values:
                     has_any_positive_feature = True
                     for target_val in values:
-                        matched_s = next((s for s in series_names + titles if cls.match_title_keyword(target_val, s)), None)
+                        matched_s = next((s for s in all_series_text if target_val in s), None)
                         if matched_s:
                             feature_matched = True
                             hit_reason = hit_reason or f"系列/合集关键词 [{target_val}] (匹配: {matched_s})"
