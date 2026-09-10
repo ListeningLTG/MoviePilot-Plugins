@@ -34,6 +34,10 @@
           立即全量分析
         </v-btn>
         <v-btn color="teal" variant="elevated" :disabled="analyzing" prepend-icon="mdi-folder-search-outline" @click="showPathDialog = true">
+          <template v-slot:prepend>
+            <v-progress-circular v-if="analyzing && analyzeScope === 'path'" indeterminate size="20" width="2"></v-progress-circular>
+            <v-icon v-else>mdi-folder-search-outline</v-icon>
+          </template>
           按路径分析
         </v-btn>
         <v-btn color="info" variant="tonal" prepend-icon="mdi-clock-outline" @click="showCronDialog = true">定时配置</v-btn>
@@ -132,9 +136,11 @@
         <v-col cols="12" sm="3" md="4">
           <v-text-field
             v-model="keyword"
-            @keyup.enter="fetchExceptions"
-            @click:append-inner="fetchExceptions"
-            label="搜索标题/路径关键字"
+            @keyup.enter="() => { pagination.page = 1; fetchExceptions(); }"
+            @click:append-inner="() => { pagination.page = 1; fetchExceptions(); }"
+            @click:clear="() => { keyword = ''; pagination.page = 1; fetchExceptions(); }"
+            clearable
+            label="搜索标题/路径关键字 (回车筛选)"
             density="compact"
             hide-details
             append-inner-icon="mdi-magnify"
@@ -365,7 +371,7 @@
     </v-dialog>
 
     <!-- 复制提示 Toast -->
-    <v-snackbar v-model="snackbar.show" :color="snackbar.color" timeout="2000" location="top">
+    <v-snackbar v-model="snackbar.show" :color="snackbar.color" timeout="3000" location="top">
       {{ snackbar.text }}
     </v-snackbar>
   </div>
@@ -517,7 +523,7 @@ const triggerAnalyze = async (mode = 'incremental') => {
   analyzing.value = true;
   analyzeScope.value = mode;
   try {
-    await props.api.post(`plugin/${props.pluginId}/analyze?mode=${mode}`);
+    await props.api.post(`plugin/${props.pluginId}/analyze?mode=${mode}`, { mode: mode });
     await fetchStats();
     await fetchExceptions();
     snackbar.value = { show: true, text: `[${mode === 'full' ? '全量' : '增量'}]分析完成！`, color: 'success' };
@@ -531,20 +537,42 @@ const triggerAnalyze = async (mode = 'incremental') => {
 };
 
 const triggerPathAnalyze = async () => {
-  if (!pathForm.value.path) return;
+  const searchPath = pathForm.value.path ? pathForm.value.path.trim() : '';
+  if (!searchPath) return;
   analyzing.value = true;
+  analyzeScope.value = 'path';
   try {
-    const pathEncoded = encodeURIComponent(pathForm.value.path.trim());
-    await props.api.post(`plugin/${props.pluginId}/analyze?mode=${pathForm.value.mode}&path=${pathEncoded}&path_type=${pathForm.value.path_type}`);
+    const payload = {
+      mode: pathForm.value.mode,
+      path: searchPath,
+      path_type: pathForm.value.path_type
+    };
+    const pathEncoded = encodeURIComponent(searchPath);
+    const res = await props.api.post(
+      `plugin/${props.pluginId}/analyze?mode=${pathForm.value.mode}&path=${pathEncoded}&path_type=${pathForm.value.path_type}`,
+      payload
+    );
     showPathDialog.value = false;
+    
+    // 自动将搜索栏填充为该指定路径，并重置分页，让表格立即展现该路径下的异常结果
+    keyword.value = searchPath;
+    pagination.value.page = 1;
+
     await fetchStats();
     await fetchExceptions();
-    snackbar.value = { show: true, text: `指定路径 [${pathForm.value.path}] 分析完成！`, color: 'success' };
+
+    const pathCnt = res?.path_summary?.total ?? res?.data?.total ?? 0;
+    snackbar.value = { 
+      show: true, 
+      text: `指定路径 [${searchPath}] 分析完成！本次发现 ${pathCnt} 条异常，已为您自动筛选展示。`, 
+      color: 'success' 
+    };
   } catch (err) {
     console.error('[OrganizeAnalyzer] Trigger path analyze failed', err);
     snackbar.value = { show: true, text: '指定路径分析请求失败', color: 'error' };
   } finally {
     analyzing.value = false;
+    analyzeScope.value = '';
   }
 };
 

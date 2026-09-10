@@ -67,12 +67,21 @@ class AnalyzerStorage:
         except Exception:
             return False
 
-    def update_analysis_results(self, new_exceptions: List[Dict[str, Any]], mode: str, max_history_id: int = 0) -> Dict[str, Any]:
+    def update_analysis_results(
+        self,
+        new_exceptions: List[Dict[str, Any]],
+        mode: str,
+        max_history_id: int = 0,
+        path: Optional[str] = None,
+        path_type: str = "all"
+    ) -> Dict[str, Any]:
         """
         更新分析结果
         :param new_exceptions: 新扫描出的异常列表
         :param mode: 'full' 或 'incremental'
         :param max_history_id: 本次扫描用到的最大 history ID
+        :param path: 指定路径（若存在，则精准刷新该路径下的异常条目）
+        :param path_type: 路径过滤类型
         """
         data = self.load_data()
         existing = data.get("exceptions", [])
@@ -80,7 +89,32 @@ class AnalyzerStorage:
 
         now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-        if mode == "full":
+        if path and path.strip():
+            # 指定路径更新模式：保留不在该路径下的旧异常，重新替换该路径下的异常
+            p_lower = path.strip().lower()
+            retained_list = []
+            for item in existing:
+                src_l = str(item.get("src") or "").lower()
+                dest_l = str(item.get("dest") or "").lower()
+                is_in_path = False
+                if path_type == "src":
+                    is_in_path = p_lower in src_l
+                elif path_type == "dest":
+                    is_in_path = p_lower in dest_l
+                else:
+                    is_in_path = p_lower in src_l or p_lower in dest_l
+
+                if not is_in_path:
+                    retained_list.append(item)
+
+            existing_map = {item["key"]: item for item in retained_list}
+            for item in new_exceptions:
+                key = item.get("key")
+                if key in ignored_keys:
+                    item["status"] = "ignored"
+                existing_map[key] = item
+            data["exceptions"] = list(existing_map.values())
+        elif mode == "full":
             # 全量分析：保留忽略标记，重置其余列表
             merged_list = []
             for item in new_exceptions:

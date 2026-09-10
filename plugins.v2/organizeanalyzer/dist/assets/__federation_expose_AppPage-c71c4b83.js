@@ -1,7 +1,7 @@
 import { importShared } from './__federation_fn_import-054b33c3.js';
 import { _ as _export_sfc } from './_plugin-vue_export-helper-c4c0bc37.js';
 
-const AppPage_vue_vue_type_style_index_0_scoped_13c3b58b_lang = '';
+const AppPage_vue_vue_type_style_index_0_scoped_0e799d92_lang = '';
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,createTextVNode:_createTextVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,withKeys:_withKeys,createElementBlock:_createElementBlock,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,mergeProps:_mergeProps} = await importShared('vue');
 
@@ -190,7 +190,7 @@ const triggerAnalyze = async (mode = 'incremental') => {
   analyzing.value = true;
   analyzeScope.value = mode;
   try {
-    await props.api.post(`plugin/${props.pluginId}/analyze?mode=${mode}`);
+    await props.api.post(`plugin/${props.pluginId}/analyze?mode=${mode}`, { mode: mode });
     await fetchStats();
     await fetchExceptions();
     snackbar.value = { show: true, text: `[${mode === 'full' ? '全量' : '增量'}]分析完成！`, color: 'success' };
@@ -204,20 +204,42 @@ const triggerAnalyze = async (mode = 'incremental') => {
 };
 
 const triggerPathAnalyze = async () => {
-  if (!pathForm.value.path) return;
+  const searchPath = pathForm.value.path ? pathForm.value.path.trim() : '';
+  if (!searchPath) return;
   analyzing.value = true;
+  analyzeScope.value = 'path';
   try {
-    const pathEncoded = encodeURIComponent(pathForm.value.path.trim());
-    await props.api.post(`plugin/${props.pluginId}/analyze?mode=${pathForm.value.mode}&path=${pathEncoded}&path_type=${pathForm.value.path_type}`);
+    const payload = {
+      mode: pathForm.value.mode,
+      path: searchPath,
+      path_type: pathForm.value.path_type
+    };
+    const pathEncoded = encodeURIComponent(searchPath);
+    const res = await props.api.post(
+      `plugin/${props.pluginId}/analyze?mode=${pathForm.value.mode}&path=${pathEncoded}&path_type=${pathForm.value.path_type}`,
+      payload
+    );
     showPathDialog.value = false;
+    
+    // 自动将搜索栏填充为该指定路径，并重置分页，让表格立即展现该路径下的异常结果
+    keyword.value = searchPath;
+    pagination.value.page = 1;
+
     await fetchStats();
     await fetchExceptions();
-    snackbar.value = { show: true, text: `指定路径 [${pathForm.value.path}] 分析完成！`, color: 'success' };
+
+    const pathCnt = res?.path_summary?.total ?? res?.data?.total ?? 0;
+    snackbar.value = { 
+      show: true, 
+      text: `指定路径 [${searchPath}] 分析完成！本次发现 ${pathCnt} 条异常，已为您自动筛选展示。`, 
+      color: 'success' 
+    };
   } catch (err) {
     console.error('[OrganizeAnalyzer] Trigger path analyze failed', err);
     snackbar.value = { show: true, text: '指定路径分析请求失败', color: 'error' };
   } finally {
     analyzing.value = false;
+    analyzeScope.value = '';
   }
 };
 
@@ -359,7 +381,7 @@ return (_ctx, _cache) => {
             class: "mr-2",
             color: "primary"
           }),
-          _cache[26] || (_cache[26] = _createTextVNode(" 媒体整理异常分析仪表盘 ", -1))
+          _cache[29] || (_cache[29] = _createTextVNode(" 媒体整理异常分析仪表盘 ", -1))
         ]),
         _createElementVNode("div", _hoisted_4, [
           _createTextVNode(" 上次运行时间: " + _toDisplayString(stats.value.last_run_time || '尚未运行') + " | 定时分析状态: ", 1),
@@ -383,7 +405,7 @@ return (_ctx, _cache) => {
                 variant: "tonal",
                 class: "ml-1"
               }, {
-                default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
+                default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
                   _createTextVNode(" 已禁用 ", -1)
                 ]))]),
                 _: 1
@@ -405,14 +427,14 @@ return (_ctx, _cache) => {
                   width: "2"
                 }))
               : (_openBlock(), _createBlock(_component_v_icon, { key: 1 }, {
-                  default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
+                  default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
                     _createTextVNode("mdi-play", -1)
                   ]))]),
                   _: 1
                 }))
           ]),
           default: _withCtx(() => [
-            _cache[29] || (_cache[29] = _createTextVNode(" 立即增量分析 ", -1))
+            _cache[32] || (_cache[32] = _createTextVNode(" 立即增量分析 ", -1))
           ]),
           _: 1
         }, 8, ["disabled"]),
@@ -430,14 +452,14 @@ return (_ctx, _cache) => {
                   width: "2"
                 }))
               : (_openBlock(), _createBlock(_component_v_icon, { key: 1 }, {
-                  default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
+                  default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
                     _createTextVNode("mdi-refresh", -1)
                   ]))]),
                   _: 1
                 }))
           ]),
           default: _withCtx(() => [
-            _cache[31] || (_cache[31] = _createTextVNode(" 立即全量分析 ", -1))
+            _cache[34] || (_cache[34] = _createTextVNode(" 立即全量分析 ", -1))
           ]),
           _: 1
         }, 8, ["disabled"]),
@@ -448,9 +470,24 @@ return (_ctx, _cache) => {
           "prepend-icon": "mdi-folder-search-outline",
           onClick: _cache[2] || (_cache[2] = $event => (showPathDialog.value = true))
         }, {
-          default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
-            _createTextVNode(" 按路径分析 ", -1)
-          ]))]),
+          prepend: _withCtx(() => [
+            (analyzing.value && analyzeScope.value === 'path')
+              ? (_openBlock(), _createBlock(_component_v_progress_circular, {
+                  key: 0,
+                  indeterminate: "",
+                  size: "20",
+                  width: "2"
+                }))
+              : (_openBlock(), _createBlock(_component_v_icon, { key: 1 }, {
+                  default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
+                    _createTextVNode("mdi-folder-search-outline", -1)
+                  ]))]),
+                  _: 1
+                }))
+          ]),
+          default: _withCtx(() => [
+            _cache[36] || (_cache[36] = _createTextVNode(" 按路径分析 ", -1))
+          ]),
           _: 1
         }, 8, ["disabled"]),
         _createVNode(_component_v_btn, {
@@ -459,7 +496,7 @@ return (_ctx, _cache) => {
           "prepend-icon": "mdi-clock-outline",
           onClick: _cache[3] || (_cache[3] = $event => (showCronDialog.value = true))
         }, {
-          default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
+          default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
             _createTextVNode("定时配置", -1)
           ]))]),
           _: 1
@@ -470,7 +507,7 @@ return (_ctx, _cache) => {
           "prepend-icon": "mdi-delete-sweep",
           onClick: clearIgnored
         }, {
-          default: _withCtx(() => [...(_cache[34] || (_cache[34] = [
+          default: _withCtx(() => [...(_cache[38] || (_cache[38] = [
             _createTextVNode("清空忽略", -1)
           ]))]),
           _: 1
@@ -491,7 +528,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[35] || (_cache[35] = _createElementVNode("div", { class: "text-subtitle-2 font-weight-medium" }, "未处理异常总数", -1)),
+                _cache[39] || (_cache[39] = _createElementVNode("div", { class: "text-subtitle-2 font-weight-medium" }, "未处理异常总数", -1)),
                 _createElementVNode("div", _hoisted_6, _toDisplayString(summary.value.total || 0), 1)
               ]),
               _: 1
@@ -511,7 +548,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[36] || (_cache[36] = _createElementVNode("div", { class: "text-subtitle-2" }, "多文件覆盖冲突", -1)),
+                _cache[40] || (_cache[40] = _createElementVNode("div", { class: "text-subtitle-2" }, "多文件覆盖冲突", -1)),
                 _createElementVNode("div", _hoisted_7, _toDisplayString(summary.value.merged_files || 0), 1)
               ]),
               _: 1
@@ -531,7 +568,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[37] || (_cache[37] = _createElementVNode("div", { class: "text-subtitle-2 font-weight-bold" }, "中文名差异 / 错配", -1)),
+                _cache[41] || (_cache[41] = _createElementVNode("div", { class: "text-subtitle-2 font-weight-bold" }, "中文名差异 / 错配", -1)),
                 _createElementVNode("div", _hoisted_8, _toDisplayString(summary.value.title_mismatch || 0), 1)
               ]),
               _: 1
@@ -551,7 +588,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[38] || (_cache[38] = _createElementVNode("div", { class: "text-subtitle-2" }, "英文标题未中文化", -1)),
+                _cache[42] || (_cache[42] = _createElementVNode("div", { class: "text-subtitle-2" }, "英文标题未中文化", -1)),
                 _createElementVNode("div", _hoisted_9, _toDisplayString(summary.value.english_title || 0), 1)
               ]),
               _: 1
@@ -571,7 +608,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[39] || (_cache[39] = _createElementVNode("div", { class: "text-subtitle-2" }, "未识别 / TMDB缺失", -1)),
+                _cache[43] || (_cache[43] = _createElementVNode("div", { class: "text-subtitle-2" }, "未识别 / TMDB缺失", -1)),
                 _createElementVNode("div", _hoisted_10, _toDisplayString(summary.value.unidentified || 0), 1)
               ]),
               _: 1
@@ -591,7 +628,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[40] || (_cache[40] = _createElementVNode("div", { class: "text-subtitle-2" }, "整理运行失败", -1)),
+                _cache[44] || (_cache[44] = _createElementVNode("div", { class: "text-subtitle-2" }, "整理运行失败", -1)),
                 _createElementVNode("div", _hoisted_11, _toDisplayString(summary.value.failed_status || 0), 1)
               ]),
               _: 1
@@ -611,7 +648,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[41] || (_cache[41] = _createElementVNode("div", { class: "text-subtitle-2" }, "重复季集冲突", -1)),
+                _cache[45] || (_cache[45] = _createElementVNode("div", { class: "text-subtitle-2" }, "重复季集冲突", -1)),
                 _createElementVNode("div", _hoisted_12, _toDisplayString(summary.value.duplicate_episode || 0), 1)
               ]),
               _: 1
@@ -631,7 +668,7 @@ return (_ctx, _cache) => {
               class: "pa-3"
             }, {
               default: _withCtx(() => [
-                _cache[42] || (_cache[42] = _createElementVNode("div", { class: "text-subtitle-2" }, "目标缺失/0字节", -1)),
+                _cache[46] || (_cache[46] = _createElementVNode("div", { class: "text-subtitle-2" }, "目标缺失/0字节", -1)),
                 _createElementVNode("div", _hoisted_13, _toDisplayString(summary.value.missing_dest || 0), 1)
               ]),
               _: 1
@@ -667,19 +704,19 @@ return (_ctx, _cache) => {
                 }, {
                   default: _withCtx(() => [
                     _createVNode(_component_v_btn, { value: "active" }, {
-                      default: _withCtx(() => [...(_cache[43] || (_cache[43] = [
+                      default: _withCtx(() => [...(_cache[47] || (_cache[47] = [
                         _createTextVNode("未处理", -1)
                       ]))]),
                       _: 1
                     }),
                     _createVNode(_component_v_btn, { value: "ignored" }, {
-                      default: _withCtx(() => [...(_cache[44] || (_cache[44] = [
+                      default: _withCtx(() => [...(_cache[48] || (_cache[48] = [
                         _createTextVNode("已忽略", -1)
                       ]))]),
                       _: 1
                     }),
                     _createVNode(_component_v_btn, { value: "all" }, {
-                      default: _withCtx(() => [...(_cache[45] || (_cache[45] = [
+                      default: _withCtx(() => [...(_cache[49] || (_cache[49] = [
                         _createTextVNode("全部", -1)
                       ]))]),
                       _: 1
@@ -739,9 +776,11 @@ return (_ctx, _cache) => {
                 _createVNode(_component_v_text_field, {
                   modelValue: keyword.value,
                   "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((keyword).value = $event)),
-                  onKeyup: _withKeys(fetchExceptions, ["enter"]),
-                  "onClick:appendInner": fetchExceptions,
-                  label: "搜索标题/路径关键字",
+                  onKeyup: _cache[11] || (_cache[11] = _withKeys(() => { pagination.value.page = 1; fetchExceptions(); }, ["enter"])),
+                  "onClick:appendInner": _cache[12] || (_cache[12] = () => { pagination.value.page = 1; fetchExceptions(); }),
+                  "onClick:clear": _cache[13] || (_cache[13] = () => { keyword.value = ''; pagination.value.page = 1; fetchExceptions(); }),
+                  clearable: "",
+                  label: "搜索标题/路径关键字 (回车筛选)",
                   density: "compact",
                   "hide-details": "",
                   "append-inner-icon": "mdi-magnify"
@@ -759,7 +798,7 @@ return (_ctx, _cache) => {
       default: _withCtx(() => [
         _createVNode(_component_v_table, { hover: "" }, {
           default: _withCtx(() => [
-            _cache[48] || (_cache[48] = _createElementVNode("thead", null, [
+            _cache[52] || (_cache[52] = _createElementVNode("thead", null, [
               _createElementVNode("tr", null, [
                 _createElementVNode("th", {
                   class: "text-left",
@@ -785,11 +824,11 @@ return (_ctx, _cache) => {
                         width: "2",
                         class: "mr-2"
                       }),
-                      _cache[46] || (_cache[46] = _createTextVNode(" 加载中... ", -1))
+                      _cache[50] || (_cache[50] = _createTextVNode(" 加载中... ", -1))
                     ])
                   ]))
                 : (exceptions.value.length === 0)
-                  ? (_openBlock(), _createElementBlock("tr", _hoisted_16, [...(_cache[47] || (_cache[47] = [
+                  ? (_openBlock(), _createElementBlock("tr", _hoisted_16, [...(_cache[51] || (_cache[51] = [
                       _createElementVNode("td", {
                         colspan: "6",
                         class: "text-center text-medium-emphasis py-6"
@@ -892,7 +931,7 @@ return (_ctx, _cache) => {
         (pagination.value.total > 0)
           ? (_openBlock(), _createElementBlock("div", _hoisted_23, [
               _createElementVNode("div", _hoisted_24, [
-                _cache[49] || (_cache[49] = _createTextVNode(" 共 ", -1)),
+                _cache[53] || (_cache[53] = _createTextVNode(" 共 ", -1)),
                 _createElementVNode("strong", null, _toDisplayString(pagination.value.total), 1),
                 _createTextVNode(" 条，当前第 " + _toDisplayString(pagination.value.page) + " / " + _toDisplayString(pagination.value.total_pages) + " 页 ", 1)
               ]),
@@ -900,8 +939,8 @@ return (_ctx, _cache) => {
                 _createVNode(_component_v_select, {
                   modelValue: pagination.value.page_size,
                   "onUpdate:modelValue": [
-                    _cache[11] || (_cache[11] = $event => ((pagination.value.page_size) = $event)),
-                    _cache[12] || (_cache[12] = () => { pagination.value.page = 1; fetchExceptions(); })
+                    _cache[14] || (_cache[14] = $event => ((pagination.value.page_size) = $event)),
+                    _cache[15] || (_cache[15] = () => { pagination.value.page = 1; fetchExceptions(); })
                   ],
                   items: [20, 50, 100, 200],
                   label: "每页条数",
@@ -912,7 +951,7 @@ return (_ctx, _cache) => {
                 _createVNode(_component_v_pagination, {
                   modelValue: pagination.value.page,
                   "onUpdate:modelValue": [
-                    _cache[13] || (_cache[13] = $event => ((pagination.value.page) = $event)),
+                    _cache[16] || (_cache[16] = $event => ((pagination.value.page) = $event)),
                     fetchExceptions
                   ],
                   length: pagination.value.total_pages,
@@ -927,7 +966,7 @@ return (_ctx, _cache) => {
     }),
     _createVNode(_component_v_dialog, {
       modelValue: showPathDialog.value,
-      "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((showPathDialog).value = $event)),
+      "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((showPathDialog).value = $event)),
       "max-width": "600px"
     }, {
       default: _withCtx(() => [
@@ -940,16 +979,16 @@ return (_ctx, _cache) => {
                   class: "mr-2",
                   color: "teal"
                 }),
-                _cache[50] || (_cache[50] = _createTextVNode(" 指定路径异常分析 ", -1))
+                _cache[54] || (_cache[54] = _createTextVNode(" 指定路径异常分析 ", -1))
               ]),
               _: 1
             }),
             _createVNode(_component_v_card_text, { class: "pa-4" }, {
               default: _withCtx(() => [
-                _cache[51] || (_cache[51] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-3" }, " 指定整理前（源路径）或整理后（目标路径）的文件夹/关键字，针对性扫描该目录下的整理异常记录。 ", -1)),
+                _cache[55] || (_cache[55] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-3" }, " 指定整理前（源路径）或整理后（目标路径）的文件夹/关键字，针对性扫描该目录下的整理异常记录。 ", -1)),
                 _createVNode(_component_v_text_field, {
                   modelValue: pathForm.value.path,
-                  "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((pathForm.value.path) = $event)),
+                  "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((pathForm.value.path) = $event)),
                   label: "输入待分析的目标路径 / 目录关键字",
                   placeholder: "/mnt/data/mp2/shareStrm/港剧合集",
                   clearable: "",
@@ -960,7 +999,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"]),
                 _createVNode(_component_v_select, {
                   modelValue: pathForm.value.path_type,
-                  "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((pathForm.value.path_type) = $event)),
+                  "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((pathForm.value.path_type) = $event)),
                   label: "路径匹配范围",
                   density: "compact",
                   class: "mb-3",
@@ -972,7 +1011,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"]),
                 _createVNode(_component_v_select, {
                   modelValue: pathForm.value.mode,
-                  "onUpdate:modelValue": _cache[16] || (_cache[16] = $event => ((pathForm.value.mode) = $event)),
+                  "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((pathForm.value.mode) = $event)),
                   label: "分析执行模式",
                   density: "compact",
                   items: [
@@ -988,9 +1027,9 @@ return (_ctx, _cache) => {
                 _createVNode(_component_v_spacer),
                 _createVNode(_component_v_btn, {
                   variant: "text",
-                  onClick: _cache[17] || (_cache[17] = $event => (showPathDialog.value = false))
+                  onClick: _cache[20] || (_cache[20] = $event => (showPathDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[52] || (_cache[52] = [
+                  default: _withCtx(() => [...(_cache[56] || (_cache[56] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -1002,7 +1041,7 @@ return (_ctx, _cache) => {
                   disabled: !pathForm.value.path,
                   onClick: triggerPathAnalyze
                 }, {
-                  default: _withCtx(() => [...(_cache[53] || (_cache[53] = [
+                  default: _withCtx(() => [...(_cache[57] || (_cache[57] = [
                     _createTextVNode(" 开始路径分析 ", -1)
                   ]))]),
                   _: 1
@@ -1018,14 +1057,14 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode(_component_v_dialog, {
       modelValue: showCronDialog.value,
-      "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((showCronDialog).value = $event)),
+      "onUpdate:modelValue": _cache[27] || (_cache[27] = $event => ((showCronDialog).value = $event)),
       "max-width": "550px"
     }, {
       default: _withCtx(() => [
         _createVNode(_component_v_card, null, {
           default: _withCtx(() => [
             _createVNode(_component_v_card_title, { class: "text-h6 pa-4" }, {
-              default: _withCtx(() => [...(_cache[54] || (_cache[54] = [
+              default: _withCtx(() => [...(_cache[58] || (_cache[58] = [
                 _createTextVNode("定时分析详细配置", -1)
               ]))]),
               _: 1
@@ -1034,20 +1073,20 @@ return (_ctx, _cache) => {
               default: _withCtx(() => [
                 _createVNode(_component_v_switch, {
                   modelValue: cronForm.value.cron_enabled,
-                  "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((cronForm.value.cron_enabled) = $event)),
+                  "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((cronForm.value.cron_enabled) = $event)),
                   label: "开启后台定时自动分析",
                   color: "primary"
                 }, null, 8, ["modelValue"]),
                 _createVNode(_component_v_select, {
                   modelValue: cronForm.value.cron_mode,
-                  "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((cronForm.value.cron_mode) = $event)),
+                  "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((cronForm.value.cron_mode) = $event)),
                   label: "定时分析执行模式",
                   class: "mt-2",
                   items: cronModeOptions
                 }, null, 8, ["modelValue"]),
                 _createVNode(_component_v_text_field, {
                   modelValue: cronForm.value.cron,
-                  "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((cronForm.value.cron) = $event)),
+                  "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((cronForm.value.cron) = $event)),
                   label: "Cron 表达式",
                   placeholder: "0 3 * * *",
                   hint: "默认 0 3 * * * 代表每天凌晨 3:00 执行",
@@ -1056,7 +1095,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"]),
                 _createVNode(_component_v_switch, {
                   modelValue: cronForm.value.notify,
-                  "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((cronForm.value.notify) = $event)),
+                  "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((cronForm.value.notify) = $event)),
                   label: "分析完成后发送 Telegram/系统通知报告",
                   color: "primary",
                   class: "mt-2"
@@ -1069,9 +1108,9 @@ return (_ctx, _cache) => {
                 _createVNode(_component_v_spacer),
                 _createVNode(_component_v_btn, {
                   variant: "text",
-                  onClick: _cache[23] || (_cache[23] = $event => (showCronDialog.value = false))
+                  onClick: _cache[26] || (_cache[26] = $event => (showCronDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[55] || (_cache[55] = [
+                  default: _withCtx(() => [...(_cache[59] || (_cache[59] = [
                     _createTextVNode("取消", -1)
                   ]))]),
                   _: 1
@@ -1081,7 +1120,7 @@ return (_ctx, _cache) => {
                   variant: "elevated",
                   onClick: saveCronConfig
                 }, {
-                  default: _withCtx(() => [...(_cache[56] || (_cache[56] = [
+                  default: _withCtx(() => [...(_cache[60] || (_cache[60] = [
                     _createTextVNode("保存生效", -1)
                   ]))]),
                   _: 1
@@ -1097,9 +1136,9 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode(_component_v_snackbar, {
       modelValue: snackbar.value.show,
-      "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((snackbar.value.show) = $event)),
+      "onUpdate:modelValue": _cache[28] || (_cache[28] = $event => ((snackbar.value.show) = $event)),
       color: snackbar.value.color,
-      timeout: "2000",
+      timeout: "3000",
       location: "top"
     }, {
       default: _withCtx(() => [
@@ -1112,6 +1151,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-13c3b58b"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0e799d92"]]);
 
 export { AppPage as default };

@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import or_
+from fastapi import Request
 
 from app.plugins import _PluginBase
 from app.log import logger
@@ -19,7 +20,7 @@ class OrganizeAnalyzer(_PluginBase):
     plugin_name = "媒体整理异常分析"
     plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、中文名差异错配、整理失败及重集等异常。"
     plugin_icon = "mdi-file-find-outline"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "organizeanalyzer_"
     plugin_order = 15
@@ -170,17 +171,45 @@ class OrganizeAnalyzer(_PluginBase):
 
         exceptions, max_id = OrganizeAnalyzerCore.analyze(histories, self._config, path_filter=path, path_type=path_type)
         
-        # 如果是指定路径分析，采用增量模式合并，以免覆盖全部其他分析结果
-        save_mode = "incremental" if (mode == "incremental" or bool(path)) else "full"
-        result_data = self._storage.update_analysis_results(exceptions, mode=save_mode, max_history_id=max_id)
+        # 计算本次路径扫描所发现的异常统计
+        path_summary = {
+            "total": len([x for x in exceptions if x.get("status") != "ignored"]),
+            "merged_files": len([x for x in exceptions if x.get("type") == "merged_files" and x.get("status") != "ignored"]),
+            "english_title": len([x for x in exceptions if x.get("type") == "english_title" and x.get("status") != "ignored"]),
+            "title_mismatch": len([x for x in exceptions if x.get("type") == "title_mismatch" and x.get("status") != "ignored"]),
+            "unidentified": len([x for x in exceptions if x.get("type") == "unidentified" and x.get("status") != "ignored"]),
+            "failed_status": len([x for x in exceptions if x.get("type") == "failed_status" and x.get("status") != "ignored"]),
+            "duplicate_episode": len([x for x in exceptions if x.get("type") == "duplicate_episode" and x.get("status") != "ignored"]),
+            "missing_dest": len([x for x in exceptions if x.get("type") == "missing_dest" and x.get("status") != "ignored"]),
+            "invalid_episode": len([x for x in exceptions if x.get("type") == "invalid_episode" and x.get("status") != "ignored"]),
+        }
+
+        # 更新持久化数据
+        result_data = self._storage.update_analysis_results(
+            exceptions,
+            mode=mode,
+            max_history_id=max_id,
+            path=path,
+            path_type=path_type
+        )
+        result_data["path_summary"] = path_summary
 
         summary = result_data.get("summary", {})
-        logger.info(f"【{self.plugin_name}】✅ 分析完成！本次识别到未处理异常总数: {summary.get('total', 0)} (多文件覆盖: {summary.get('merged_files', 0)}, 英文未中文化: {summary.get('english_title', 0)}, 中文名差异: {summary.get('title_mismatch', 0)}, 未识别: {summary.get('unidentified', 0)}, 失败: {summary.get('failed_status', 0)}, 重复集: {summary.get('duplicate_episode', 0)})")
+        logger.info(f"【{self.plugin_name}】✅ 分析完成！库中未处理异常总数: {summary.get('total', 0)} (本次路径扫描异常数: {path_summary['total']}, 多文件覆盖: {summary.get('merged_files', 0)}, 英文未中文化: {summary.get('english_title', 0)}, 中文名差异: {summary.get('title_mismatch', 0)}, 未识别: {summary.get('unidentified', 0)}, 失败: {summary.get('failed_status', 0)}, 重复集: {summary.get('duplicate_episode', 0)})")
 
         # 消息推送
-        if self._notify and summary.get("total", 0) > 0:
-            logger.info(f"【{self.plugin_name}】正在触发系统消息通知...")
-            self._send_notification(summary, result_data.get("exceptions", []), mode=mode)
+        if self._notify:
+            notify_target = path_summary if path else summary
+            if notify_target.get("total", 0) > 0:
+                logger.info(f"【{self.plugin_name}】正在触发系统消息通知...")
+                self._send_notification(
+                    summary=summary,
+                    exceptions=exceptions if path else result_data.get("exceptions", []),
+                    mode=mode,
+                    path=path,
+                    path_type=path_type,
+                    path_summary=path_summary
+                )
 
         return result_data
 
@@ -189,26 +218,45 @@ class OrganizeAnalyzer(_PluginBase):
         logger.info(f"【{self.plugin_name}】⏰ 触发定时 [{self._cron_mode}] 巡检分析...")
         self.run_analysis(mode=self._cron_mode)
 
-    def _send_notification(self, summary: dict, exceptions: list, mode: str = "incremental"):
+    def _send_notification(self, summary: dict, exceptions: list, mode: str = "incremental", path: Optional[str] = None, path_type: str = "all", path_summary: Optional[dict] = None):
         """发送异常报告系统通知"""
-        mode_desc = "全量" if mode == "full" else "增量"
-        msg_lines = [
-            f"🔍 **{self.plugin_name} [{mode_desc}分析] 报告**",
-            f"━━━━━━━━━━━━━━━━━━",
-            f"📊 未处理异常总数: **{summary.get('total', 0)}**",
-            f"• 多文件合并冲突: {summary.get('merged_files', 0)}",
-            f"• 英文标题未中文化: {summary.get('english_title', 0)}",
-            f"• 中文名差异/错配: {summary.get('title_mismatch', 0)}",
-            f"• 未识别/TMDB缺失: {summary.get('unidentified', 0)}",
-            f"• 整理运行失败: {summary.get('failed_status', 0)}",
-            f"• 重复季集冲突: {summary.get('duplicate_episode', 0)}",
-            f"• 目标文件缺失/损坏: {summary.get('missing_dest', 0)}",
-        ]
+        if path:
+            type_map = {"src": "整理前源路径 (src)", "dest": "整理后目标路径 (dest)", "all": "任意路径"}
+            path_scope = type_map.get(path_type, "指定路径")
+            s = path_summary or summary
+            msg_lines = [
+                f"🔍 **{self.plugin_name} [指定路径分析] 报告**",
+                f"━━━━━━━━━━━━━━━━━━",
+                f"📁 **分析路径**: `{path}`",
+                f"🎯 **匹配范围**: {path_scope}",
+                f"📊 本次路径发现异常: **{s.get('total', 0)}** (库中未处理总数: {summary.get('total', 0)})",
+                f"• 中文名差异/错配: {s.get('title_mismatch', 0)}",
+                f"• 多文件合并冲突: {s.get('merged_files', 0)}",
+                f"• 英文标题未中文化: {s.get('english_title', 0)}",
+                f"• 未识别/TMDB缺失: {s.get('unidentified', 0)}",
+                f"• 整理运行失败: {s.get('failed_status', 0)}",
+                f"• 重复季集冲突: {s.get('duplicate_episode', 0)}",
+                f"• 目标文件缺失/损坏: {s.get('missing_dest', 0)}",
+            ]
+        else:
+            mode_desc = "全量" if mode == "full" else "增量"
+            msg_lines = [
+                f"🔍 **{self.plugin_name} [{mode_desc}分析] 报告**",
+                f"━━━━━━━━━━━━━━━━━━",
+                f"📊 未处理异常总数: **{summary.get('total', 0)}**",
+                f"• 中文名差异/错配: {summary.get('title_mismatch', 0)}",
+                f"• 多文件合并冲突: {summary.get('merged_files', 0)}",
+                f"• 英文标题未中文化: {summary.get('english_title', 0)}",
+                f"• 未识别/TMDB缺失: {summary.get('unidentified', 0)}",
+                f"• 整理运行失败: {summary.get('failed_status', 0)}",
+                f"• 重复季集冲突: {summary.get('duplicate_episode', 0)}",
+                f"• 目标文件缺失/损坏: {summary.get('missing_dest', 0)}",
+            ]
 
         # 附带前 5 条未处理异常简明摘要
         active_items = [x for x in exceptions if x.get("status") != "ignored"][:5]
         if active_items:
-            msg_lines.append("\n⚠️ **最新未处理条目示例:**")
+            msg_lines.append("\n⚠️ **本次未处理条目示例:**")
             for item in active_items:
                 msg_lines.append(f"• [{item.get('type_name')}] {item.get('title')} -> {item.get('detail')}")
 
@@ -343,14 +391,26 @@ class OrganizeAnalyzer(_PluginBase):
             "total_pages": (total + page_size - 1) // page_size if total > 0 else 1
         }
 
-    async def api_run_analyze(self, mode: str = "incremental", path: str = "", path_type: str = "all") -> dict:
+    async def api_run_analyze(self, mode: str = "incremental", path: str = "", path_type: str = "all", request: Optional[Request] = None) -> dict:
+        # 支持从 request body 中读取 JSON 参数
+        if request:
+            try:
+                body = await request.json()
+                if isinstance(body, dict):
+                    mode = body.get("mode", mode) or mode
+                    path = body.get("path", path) or path
+                    path_type = body.get("path_type", path_type) or path_type
+            except Exception:
+                pass
+
         logger.info(f"【{self.plugin_name}】API 请求 [POST /analyze] (mode={mode}, path={path}, path_type={path_type})")
         result = self.run_analysis(mode=mode, path=path, path_type=path_type)
         scope_info = f" (指定路径: {path})" if path else ""
         return {
             "code": 0,
             "msg": f"[{'全量' if mode=='full' else '增量'}]分析完成{scope_info}",
-            "data": result.get("summary", {})
+            "data": result.get("summary", {}),
+            "path_summary": result.get("path_summary", {})
         }
 
     async def api_ignore_exception(self, key: str = "") -> dict:
