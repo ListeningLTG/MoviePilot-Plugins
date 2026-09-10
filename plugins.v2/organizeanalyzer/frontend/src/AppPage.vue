@@ -1,7 +1,7 @@
 <template>
   <div class="pa-4 organize-analyzer-page">
     <!-- 顶部工具栏 Header -->
-    <div class="d-flex align-center justify-space-between mb-4">
+    <div class="d-flex align-center justify-space-between mb-4 flex-wrap ga-2">
       <div>
         <h2 class="text-h5 font-weight-bold d-flex align-center">
           <v-icon icon="mdi-file-find-outline" class="mr-2" color="primary"></v-icon>
@@ -18,27 +18,30 @@
           </v-chip>
         </div>
       </div>
-      <div class="d-flex ga-2">
+      <div class="d-flex ga-2 flex-wrap">
         <v-btn color="primary" :disabled="analyzing" @click="triggerAnalyze('incremental')">
           <template v-slot:prepend>
-            <v-progress-circular v-if="analyzing" indeterminate size="20" width="2"></v-progress-circular>
+            <v-progress-circular v-if="analyzing && analyzeScope === 'incremental'" indeterminate size="20" width="2"></v-progress-circular>
             <v-icon v-else>mdi-play</v-icon>
           </template>
           立即增量分析
         </v-btn>
         <v-btn color="secondary" :disabled="analyzing" @click="triggerAnalyze('full')">
           <template v-slot:prepend>
-            <v-progress-circular v-if="analyzing" indeterminate size="20" width="2"></v-progress-circular>
+            <v-progress-circular v-if="analyzing && analyzeScope === 'full'" indeterminate size="20" width="2"></v-progress-circular>
             <v-icon v-else>mdi-refresh</v-icon>
           </template>
           立即全量分析
+        </v-btn>
+        <v-btn color="teal" variant="elevated" :disabled="analyzing" prepend-icon="mdi-folder-search-outline" @click="showPathDialog = true">
+          按路径分析
         </v-btn>
         <v-btn color="info" variant="tonal" prepend-icon="mdi-clock-outline" @click="showCronDialog = true">定时配置</v-btn>
         <v-btn color="warning" variant="outlined" prepend-icon="mdi-delete-sweep" @click="clearIgnored">清空忽略</v-btn>
       </div>
     </div>
 
-    <!-- 7 大统计卡片 Metrics Row -->
+    <!-- 8 大统计卡片 Metrics Row -->
     <v-row class="mb-4">
       <v-col cols="12" sm="6" md="3">
         <v-card variant="tonal" :color="summary.total > 0 ? 'error' : 'success'" class="pa-3">
@@ -50,6 +53,12 @@
         <v-card variant="tonal" color="warning" class="pa-3">
           <div class="text-subtitle-2">多文件覆盖冲突</div>
           <div class="text-h5 font-weight-bold mt-1">{{ summary.merged_files || 0 }}</div>
+        </v-card>
+      </v-col>
+      <v-col cols="12" sm="6" md="3">
+        <v-card variant="tonal" color="deep-purple-accent-2" class="pa-3">
+          <div class="text-subtitle-2 font-weight-bold">中文名差异 / 错配</div>
+          <div class="text-h5 font-weight-bold mt-1">{{ summary.title_mismatch || 0 }}</div>
         </v-card>
       </v-col>
       <v-col cols="12" sm="6" md="3">
@@ -185,7 +194,7 @@
             >
               {{ item.dest || '-' }}
             </td>
-            <td class="text-body-2 text-warning">{{ item.detail || '-' }}</td>
+            <td class="text-body-2" :class="item.type === 'title_mismatch' ? 'text-deep-purple-accent-2' : 'text-warning'">{{ item.detail || '-' }}</td>
             <td class="text-center">
               <div class="d-flex align-center justify-center ga-1">
                 <!-- 复制 TMDB ID -->
@@ -258,6 +267,64 @@
       </div>
     </v-card>
 
+    <!-- 指定路径分析弹窗 Path Analyze Dialog -->
+    <v-dialog v-model="showPathDialog" max-width="600px">
+      <v-card>
+        <v-card-title class="text-h6 pa-4 d-flex align-center">
+          <v-icon icon="mdi-folder-search-outline" class="mr-2" color="teal"></v-icon>
+          指定路径异常分析
+        </v-card-title>
+        <v-card-text class="pa-4">
+          <div class="text-caption text-medium-emphasis mb-3">
+            指定整理前（源路径）或整理后（目标路径）的文件夹/关键字，针对性扫描该目录下的整理异常记录。
+          </div>
+          <v-text-field
+            v-model="pathForm.path"
+            label="输入待分析的目标路径 / 目录关键字"
+            placeholder="/mnt/data/mp2/shareStrm/港剧合集"
+            clearable
+            density="compact"
+            persistent-hint
+            hint="例如: /mnt/data/mp2/shareStrm/港剧合集 或 港剧合集"
+            class="mb-3"
+          ></v-text-field>
+          <v-select
+            v-model="pathForm.path_type"
+            label="路径匹配范围"
+            density="compact"
+            class="mb-3"
+            :items="[
+              { title: '匹配整理前源路径 (src)', value: 'src' },
+              { title: '匹配整理后目标路径 (dest)', value: 'dest' },
+              { title: '匹配任意路径 (源或目标均可)', value: 'all' }
+            ]"
+          ></v-select>
+          <v-select
+            v-model="pathForm.mode"
+            label="分析执行模式"
+            density="compact"
+            :items="[
+              { title: '全量扫描指定路径 (推荐)', value: 'full' },
+              { title: '增量扫描指定路径', value: 'incremental' }
+            ]"
+          ></v-select>
+        </v-card-text>
+        <v-card-actions class="pa-4 pt-0">
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="showPathDialog = false">取消</v-btn>
+          <v-btn
+            color="teal"
+            variant="elevated"
+            :loading="analyzing"
+            :disabled="!pathForm.path"
+            @click="triggerPathAnalyze"
+          >
+            开始路径分析
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <!-- 定时分析配置弹窗 Cron Config Dialog -->
     <v-dialog v-model="showCronDialog" max-width="550px">
       <v-card>
@@ -315,17 +382,26 @@ const props = defineProps({
 
 const loading = ref(false);
 const analyzing = ref(false);
+const analyzeScope = ref('');
 const showCronDialog = ref(false);
+const showPathDialog = ref(false);
 const keyword = ref('');
 const statusFilter = ref('active');
 const typeFilter = ref('');
 const pagination = ref({ page: 1, page_size: 50, total: 0, total_pages: 1 });
+
+const pathForm = ref({
+  path: '',
+  path_type: 'src',
+  mode: 'full'
+});
 
 const stats = ref({
   summary: {
     total: 0,
     merged_files: 0,
     english_title: 0,
+    title_mismatch: 0,
     unidentified: 0,
     failed_status: 0,
     duplicate_episode: 0,
@@ -352,6 +428,7 @@ const cronForm = ref({
 const typeOptions = [
   { title: '全部类型', value: '' },
   { title: '多文件合并覆盖', value: 'merged_files' },
+  { title: '中文名差异/错配', value: 'title_mismatch' },
   { title: '英文标题未中文化', value: 'english_title' },
   { title: '未识别/TMDB缺失', value: 'unidentified' },
   { title: '整理运行失败', value: 'failed_status' },
@@ -438,12 +515,34 @@ const fetchExceptions = async () => {
 
 const triggerAnalyze = async (mode = 'incremental') => {
   analyzing.value = true;
+  analyzeScope.value = mode;
   try {
     await props.api.post(`plugin/${props.pluginId}/analyze?mode=${mode}`);
     await fetchStats();
     await fetchExceptions();
+    snackbar.value = { show: true, text: `[${mode === 'full' ? '全量' : '增量'}]分析完成！`, color: 'success' };
   } catch (err) {
     console.error('[OrganizeAnalyzer] Trigger analyze failed', err);
+    snackbar.value = { show: true, text: '分析请求失败', color: 'error' };
+  } finally {
+    analyzing.value = false;
+    analyzeScope.value = '';
+  }
+};
+
+const triggerPathAnalyze = async () => {
+  if (!pathForm.value.path) return;
+  analyzing.value = true;
+  try {
+    const pathEncoded = encodeURIComponent(pathForm.value.path.trim());
+    await props.api.post(`plugin/${props.pluginId}/analyze?mode=${pathForm.value.mode}&path=${pathEncoded}&path_type=${pathForm.value.path_type}`);
+    showPathDialog.value = false;
+    await fetchStats();
+    await fetchExceptions();
+    snackbar.value = { show: true, text: `指定路径 [${pathForm.value.path}] 分析完成！`, color: 'success' };
+  } catch (err) {
+    console.error('[OrganizeAnalyzer] Trigger path analyze failed', err);
+    snackbar.value = { show: true, text: '指定路径分析请求失败', color: 'error' };
   } finally {
     analyzing.value = false;
   }
@@ -464,6 +563,7 @@ const clearIgnored = async () => {
     await props.api.post(`plugin/${props.pluginId}/clear_ignored`);
     await fetchStats();
     await fetchExceptions();
+    snackbar.value = { show: true, text: '已清空全部忽略记录！', color: 'success' };
   } catch (err) {
     console.error('[OrganizeAnalyzer] Clear ignored failed', err);
   }
@@ -474,14 +574,17 @@ const saveCronConfig = async () => {
     await props.api.post(`plugin/${props.pluginId}/save_cron_config`, cronForm.value);
     showCronDialog.value = false;
     await fetchStats();
+    snackbar.value = { show: true, text: '定时分析配置已保存！', color: 'success' };
   } catch (err) {
     console.error('[OrganizeAnalyzer] Save cron config failed', err);
+    snackbar.value = { show: true, text: '保存定时配置失败', color: 'error' };
   }
 };
 
 const getTypeColor = (type) => {
   switch (type) {
     case 'merged_files': return 'warning';
+    case 'title_mismatch': return 'deep-purple-accent-2';
     case 'english_title': return 'info';
     case 'unidentified': return 'purple';
     case 'failed_status': return 'error';

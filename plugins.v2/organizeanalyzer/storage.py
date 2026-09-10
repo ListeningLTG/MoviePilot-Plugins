@@ -32,11 +32,13 @@ class AnalyzerStorage:
                     "total": 0,
                     "merged_files": 0,
                     "english_title": 0,
+                    "title_mismatch": 0,
                     "unidentified": 0,
                     "failed_status": 0,
                     "duplicate_episode": 0,
                     "missing_dest": 0,
                     "invalid_episode": 0,
+                    "ignored": 0,
                 }
             }
         try:
@@ -106,6 +108,7 @@ class AnalyzerStorage:
             "total": 0,
             "merged_files": 0,
             "english_title": 0,
+            "title_mismatch": 0,
             "unidentified": 0,
             "failed_status": 0,
             "duplicate_episode": 0,
@@ -168,6 +171,7 @@ class AnalyzerStorage:
             "total": 0,
             "merged_files": 0,
             "english_title": 0,
+            "title_mismatch": 0,
             "unidentified": 0,
             "failed_status": 0,
             "duplicate_episode": 0,

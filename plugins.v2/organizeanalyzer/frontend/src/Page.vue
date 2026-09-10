@@ -99,13 +99,23 @@
         </v-col>
       </v-row>
 
-      <!-- 7 项细分异常指标 Chips Row -->
+      <!-- 8 项细分异常指标 Chips Row -->
       <v-card variant="outlined" class="pa-3 mb-4 rounded-lg">
         <div class="text-subtitle-2 font-weight-bold mb-2 d-flex align-center">
           <v-icon icon="mdi-chart-box-outline" size="18" class="mr-1 text-primary"></v-icon>
           最近分析异常细项分布
         </div>
         <div class="d-flex flex-wrap gap-2">
+          <v-chip
+            size="small"
+            variant="tonal"
+            color="deep-purple-accent-2"
+            class="font-weight-medium"
+          >
+            <v-icon start icon="mdi-book-sync-outline" size="14"></v-icon>
+            中文名差异/错配: {{ summary.title_mismatch || 0 }}
+          </v-chip>
+
           <v-chip
             size="small"
             variant="tonal"
@@ -240,6 +250,15 @@
         <div class="d-flex flex-wrap gap-2">
           <v-chip
             size="small"
+            :color="effectiveConfig.detect_title_mismatch !== false ? 'success' : 'grey'"
+            :variant="effectiveConfig.detect_title_mismatch !== false ? 'tonal' : 'outlined'"
+          >
+            <v-icon start :icon="effectiveConfig.detect_title_mismatch !== false ? 'mdi-check' : 'mdi-close'" size="14"></v-icon>
+            中文名差异/错配检测
+          </v-chip>
+
+          <v-chip
+            size="small"
             :color="effectiveConfig.detect_english_title !== false ? 'success' : 'grey'"
             :variant="effectiveConfig.detect_english_title !== false ? 'tonal' : 'outlined'"
           >
@@ -312,7 +331,7 @@
       >
         <div class="font-weight-medium">💡 想要查看全部异常文件明细或批量处理？</div>
         <div class="text-caption text-medium-emphasis mt-1">
-          本插件已在 MoviePilot 左侧主导航栏<strong>【整理】</strong>分类下注册了<strong>【异常整理分析】</strong>独立大屏，支持分页筛选、复制路径、直达 TMDB 与一键忽略异常等完整操作。
+          本插件已在 MoviePilot 左侧主导航栏<strong>【整理】</strong>分类下注册了<strong>【异常整理分析】</strong>独立大屏，支持分页筛选、指定路径分析、复制路径、直达 TMDB 与一键忽略异常等完整操作。
         </div>
       </v-alert>
     </div>
@@ -374,6 +393,8 @@ const effectiveConfig = computed(() => {
   if (cfg.cron_mode === undefined) cfg.cron_mode = 'incremental'
   if (cfg.cron === undefined) cfg.cron = '0 3 * * *'
   if (cfg.invalid_episode_threshold === undefined) cfg.invalid_episode_threshold = 500
+  if (cfg.detect_title_mismatch === undefined) cfg.detect_title_mismatch = true
+  if (cfg.title_mismatch_threshold === undefined) cfg.title_mismatch_threshold = 0.3
   return cfg
 })
 

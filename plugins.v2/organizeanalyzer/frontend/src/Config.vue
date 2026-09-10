@@ -29,6 +29,12 @@
       </div>
       <v-row dense>
         <v-col cols="12" md="6">
+          <v-switch v-model="config.detect_title_mismatch" label="检测整理前后中文名差异/识别错配" color="primary" density="compact" hide-details></v-switch>
+        </v-col>
+        <v-col cols="12" md="6">
+          <v-text-field v-model="config.title_mismatch_threshold" type="number" step="0.1" label="中文名相似度容差阈值 (0~1，默认0.3)" density="compact" hide-details></v-text-field>
+        </v-col>
+        <v-col cols="12" md="6">
           <v-switch v-model="config.detect_merged_files" label="检测多文件归并/覆盖同一目标" color="primary" density="compact" hide-details></v-switch>
         </v-col>
         <v-col cols="12" md="6">
@@ -88,11 +94,14 @@ if (config.value.min_merged_files === undefined) config.value.min_merged_files =
 if (config.value.cron_mode === undefined) config.value.cron_mode = 'incremental'
 if (config.value.cron === undefined) config.value.cron = '0 3 * * *'
 if (config.value.invalid_episode_threshold === undefined) config.value.invalid_episode_threshold = 500
+if (config.value.detect_title_mismatch === undefined) config.value.detect_title_mismatch = true
+if (config.value.title_mismatch_threshold === undefined) config.value.title_mismatch_threshold = 0.3
 
 const save = () => {
   // 转换部分类型
   config.value.min_merged_files = parseInt(config.value.min_merged_files) || 2
   config.value.invalid_episode_threshold = parseInt(config.value.invalid_episode_threshold) || 500
+  config.value.title_mismatch_threshold = parseFloat(config.value.title_mismatch_threshold) || 0.3
   emit('save', config.value)
 }
 </script>

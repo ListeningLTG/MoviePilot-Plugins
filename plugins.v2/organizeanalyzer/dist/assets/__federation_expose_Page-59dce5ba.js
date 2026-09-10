@@ -1,7 +1,7 @@
 import { importShared } from './__federation_fn_import-054b33c3.js';
 import { _ as _export_sfc } from './_plugin-vue_export-helper-c4c0bc37.js';
 
-const Page_vue_vue_type_style_index_0_scoped_3514b6fe_lang = '';
+const Page_vue_vue_type_style_index_0_scoped_fd1535ec_lang = '';
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createBlock:_createBlock} = await importShared('vue');
 
@@ -65,6 +65,8 @@ const effectiveConfig = computed(() => {
   if (cfg.cron_mode === undefined) cfg.cron_mode = 'incremental';
   if (cfg.cron === undefined) cfg.cron = '0 3 * * *';
   if (cfg.invalid_episode_threshold === undefined) cfg.invalid_episode_threshold = 500;
+  if (cfg.detect_title_mismatch === undefined) cfg.detect_title_mismatch = true;
+  if (cfg.title_mismatch_threshold === undefined) cfg.title_mismatch_threshold = 0.3;
   return cfg
 });
 
@@ -309,6 +311,22 @@ return (_ctx, _cache) => {
                   _createVNode(_component_v_chip, {
                     size: "small",
                     variant: "tonal",
+                    color: "deep-purple-accent-2",
+                    class: "font-weight-medium"
+                  }, {
+                    default: _withCtx(() => [
+                      _createVNode(_component_v_icon, {
+                        start: "",
+                        icon: "mdi-book-sync-outline",
+                        size: "14"
+                      }),
+                      _createTextVNode(" 中文名差异/错配: " + _toDisplayString(summary.value.title_mismatch || 0), 1)
+                    ]),
+                    _: 1
+                  }),
+                  _createVNode(_component_v_chip, {
+                    size: "small",
+                    variant: "tonal",
                     color: "info",
                     class: "font-weight-medium"
                   }, {
@@ -515,8 +533,23 @@ return (_ctx, _cache) => {
                   _: 1
                 }),
                 _createVNode(_component_v_divider, { class: "my-2" }),
-                _cache[20] || (_cache[20] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-2" }, "异常检测规则生效状态：", -1)),
+                _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-2" }, "异常检测规则生效状态：", -1)),
                 _createElementVNode("div", _hoisted_18, [
+                  _createVNode(_component_v_chip, {
+                    size: "small",
+                    color: effectiveConfig.value.detect_title_mismatch !== false ? 'success' : 'grey',
+                    variant: effectiveConfig.value.detect_title_mismatch !== false ? 'tonal' : 'outlined'
+                  }, {
+                    default: _withCtx(() => [
+                      _createVNode(_component_v_icon, {
+                        start: "",
+                        icon: effectiveConfig.value.detect_title_mismatch !== false ? 'mdi-check' : 'mdi-close',
+                        size: "14"
+                      }, null, 8, ["icon"]),
+                      _cache[15] || (_cache[15] = _createTextVNode(" 中文名差异/错配检测 ", -1))
+                    ]),
+                    _: 1
+                  }, 8, ["color", "variant"]),
                   _createVNode(_component_v_chip, {
                     size: "small",
                     color: effectiveConfig.value.detect_english_title !== false ? 'success' : 'grey',
@@ -528,7 +561,7 @@ return (_ctx, _cache) => {
                         icon: effectiveConfig.value.detect_english_title !== false ? 'mdi-check' : 'mdi-close',
                         size: "14"
                       }, null, 8, ["icon"]),
-                      _cache[15] || (_cache[15] = _createTextVNode(" 英文/纯数字未中文化检测 ", -1))
+                      _cache[16] || (_cache[16] = _createTextVNode(" 英文/纯数字未中文化检测 ", -1))
                     ]),
                     _: 1
                   }, 8, ["color", "variant"]),
@@ -558,7 +591,7 @@ return (_ctx, _cache) => {
                         icon: effectiveConfig.value.detect_unidentified !== false ? 'mdi-check' : 'mdi-close',
                         size: "14"
                       }, null, 8, ["icon"]),
-                      _cache[16] || (_cache[16] = _createTextVNode(" 未识别 / TMDB缺失 ", -1))
+                      _cache[17] || (_cache[17] = _createTextVNode(" 未识别 / TMDB缺失 ", -1))
                     ]),
                     _: 1
                   }, 8, ["color", "variant"]),
@@ -573,7 +606,7 @@ return (_ctx, _cache) => {
                         icon: effectiveConfig.value.detect_failed_status !== false ? 'mdi-check' : 'mdi-close',
                         size: "14"
                       }, null, 8, ["icon"]),
-                      _cache[17] || (_cache[17] = _createTextVNode(" 整理运行失败记录 ", -1))
+                      _cache[18] || (_cache[18] = _createTextVNode(" 整理运行失败记录 ", -1))
                     ]),
                     _: 1
                   }, 8, ["color", "variant"]),
@@ -588,7 +621,7 @@ return (_ctx, _cache) => {
                         icon: effectiveConfig.value.detect_duplicate_episode !== false ? 'mdi-check' : 'mdi-close',
                         size: "14"
                       }, null, 8, ["icon"]),
-                      _cache[18] || (_cache[18] = _createTextVNode(" 重复季集冲突 ", -1))
+                      _cache[19] || (_cache[19] = _createTextVNode(" 重复季集冲突 ", -1))
                     ]),
                     _: 1
                   }, 8, ["color", "variant"]),
@@ -603,7 +636,7 @@ return (_ctx, _cache) => {
                         icon: effectiveConfig.value.detect_missing_dest ? 'mdi-check' : 'mdi-close',
                         size: "14"
                       }, null, 8, ["icon"]),
-                      _cache[19] || (_cache[19] = _createTextVNode(" 目标物理文件缺失/0字节 ", -1))
+                      _cache[20] || (_cache[20] = _createTextVNode(" 目标物理文件缺失/0字节 ", -1))
                     ]),
                     _: 1
                   }, 8, ["color", "variant"]),
@@ -632,14 +665,14 @@ return (_ctx, _cache) => {
               icon: "mdi-monitor-dashboard",
               class: "mb-4 text-body-2 rounded-lg"
             }, {
-              default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
+              default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
                 _createElementVNode("div", { class: "font-weight-medium" }, "💡 想要查看全部异常文件明细或批量处理？", -1),
                 _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-1" }, [
                   _createTextVNode(" 本插件已在 MoviePilot 左侧主导航栏"),
                   _createElementVNode("strong", null, "【整理】"),
                   _createTextVNode("分类下注册了"),
                   _createElementVNode("strong", null, "【异常整理分析】"),
-                  _createTextVNode("独立大屏，支持分页筛选、复制路径、直达 TMDB 与一键忽略异常等完整操作。 ")
+                  _createTextVNode("独立大屏，支持分页筛选、指定路径分析、复制路径、直达 TMDB 与一键忽略异常等完整操作。 ")
                 ], -1)
               ]))]),
               _: 1
@@ -653,7 +686,7 @@ return (_ctx, _cache) => {
             "prepend-icon": "mdi-cog",
             onClick: goToConfig
           }, {
-            default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
+            default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
               _createTextVNode(" 前往设置 ", -1)
             ]))]),
             _: 1
@@ -664,7 +697,7 @@ return (_ctx, _cache) => {
             "prepend-icon": "mdi-check",
             onClick: _cache[0] || (_cache[0] = $event => (_ctx.$emit('close')))
           }, {
-            default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
+            default: _withCtx(() => [...(_cache[24] || (_cache[24] = [
               _createTextVNode(" 我知道了，关闭 ", -1)
             ]))]),
             _: 1
@@ -691,6 +724,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-3514b6fe"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-fd1535ec"]]);
 
 export { Page as default };

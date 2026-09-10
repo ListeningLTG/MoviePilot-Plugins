@@ -1,9 +1,9 @@
 
-.path-cell[data-v-1c4b3b55] {
+.path-cell[data-v-13c3b58b] {
   cursor: pointer;
   transition: background-color 0.2s, color 0.2s;
 }
-.path-cell[data-v-1c4b3b55]:hover {
+.path-cell[data-v-13c3b58b]:hover {
   color: rgb(var(--v-theme-primary));
   text-decoration: underline;
 }

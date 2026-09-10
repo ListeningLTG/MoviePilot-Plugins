@@ -60,16 +60,16 @@ const currentImports = {};
       const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
       let moduleMap = {
 "./AppPage":()=>{
-      dynamicLoadingCss(["AppPage-c719119a.css"], false, './AppPage');
-      return __federation_import('./__federation_expose_AppPage-4f2bb188.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      dynamicLoadingCss(["AppPage-f7b16923.css"], false, './AppPage');
+      return __federation_import('./__federation_expose_AppPage-d45de1a7.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Page":()=>{
-      dynamicLoadingCss(["Page-e150eb7d.css"], false, './Page');
-      return __federation_import('./__federation_expose_Page-5a956ab5.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      dynamicLoadingCss(["Page-c15e1e66.css"], false, './Page');
+      return __federation_import('./__federation_expose_Page-59dce5ba.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Config":()=>{
       dynamicLoadingCss([], false, './Config');
-      return __federation_import('./__federation_expose_Config-8d2fa751.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      return __federation_import('./__federation_expose_Config-1d3bb643.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Dashboard":()=>{
-      dynamicLoadingCss(["AppPage-c719119a.css"], false, './Dashboard');
+      dynamicLoadingCss(["AppPage-f7b16923.css"], false, './Dashboard');
       return __federation_import('${__federation_expose_./Dashboard}').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
       const seen = {};
       const dynamicLoadingCss = (cssFilePaths, dontAppendStylesToHead, exposeItemName) => {

@@ -9,6 +9,26 @@ class OrganizeAnalyzerCore:
     整理异常分析核心逻辑引擎
     """
 
+    # 常见无意义或标签类中文字符串/关键词黑名单
+    NOISE_KEYWORDS = {
+        "合集", "剧集", "电视剧", "电影", "动漫", "纪录片", "综艺", "系列", "全集",
+        "国粤双语", "国语", "粤语", "英语", "韩语", "日语", "双语", "双字", "简繁",
+        "简繁双字", "简繁中字", "简日双字", "繁日双字", "简英双字", "繁英双字", "中文字幕",
+        "内封简繁", "内封中字", "内封字幕", "内嵌简繁", "内嵌字幕", "外挂字幕", "特效字幕",
+        "压制", "重温", "修复", "高清", "超清", "无删减", "未删减", "加长版", "导演剪辑版",
+        "特别篇", "剧场版", "最终版", "原盘", "蓝光", "首播", "完结", "更新", "分享",
+        "本地", "夸克", "阿里", "百度", "迅雷", "网盘", "转存", "整理", "电影合集", "剧集合集",
+        "港剧合集", "华语合集", "国产剧", "欧美剧", "日韩剧", "港台剧", "未命名", "其他"
+    }
+
+    # 匹配各类集数、季度、容量、数量噪声的正则
+    NOISE_REGEX = re.compile(
+        r"^(\d+|全\d+[集话期]?|第\d+[季集话期]|S\d+|E\d+|EP\d+|\d+部|\d+个|\d+(\.\d+)?[TGMK]B?|"
+        r"4K|1080P|720P|2160P|H264|H265|x264|x265|HEVC|AVC|AAC|DTS|TrueHD|Atmos|FLAC|"
+        r"REMUX|BluRay|WEB-DL|WEBRip|HDTV|DVD|MKV|MP4|STRM|ISO)$",
+        re.IGNORECASE
+    )
+
     @staticmethod
     def _generate_key(rule_type: str, identifier: str) -> str:
         """生成基于规则和标识符的唯一 key"""
@@ -16,15 +36,97 @@ class OrganizeAnalyzerCore:
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
     @classmethod
+    def extract_source_chinese_titles(cls, src_path: str) -> List[str]:
+        """
+        从源路径中智能提取候选中文片名
+        """
+        if not src_path:
+            return []
+
+        # 规范化路径分隔符
+        norm_path = src_path.replace("\\", "/")
+        parts = [p.strip() for p in norm_path.split("/") if p.strip()]
+        if not parts:
+            return []
+
+        candidates: List[str] = []
+
+        # 从最底层的目录/文件名开始向上回溯（最多回溯 4 层）
+        inspect_parts = list(reversed(parts[-4:]))
+
+        for part in inspect_parts:
+            # 去除扩展名
+            part_stem = os.path.splitext(part)[0]
+
+            # 1. 提取方括号 [ ]、大括号 { }、中文括号 【 】、（ ） 中的内容
+            bracket_blocks = re.findall(r"[\[\(\{【（]([^\]\)\}】）]+)[\]\)\}】）]", part_stem)
+            for block in bracket_blocks:
+                block_clean = block.strip()
+                # 检查是否为纯中文或包含中文
+                cn_matches = re.findall(r"[\u4e00-\u9fff]+", block_clean)
+                for cn_str in cn_matches:
+                    cn_str = cn_str.strip()
+                    if len(cn_str) >= 2 and cn_str not in cls.NOISE_KEYWORDS and not cls.NOISE_REGEX.match(cn_str):
+                        # 排除如 "全20集"、"941部"、"200部" 等复合词
+                        if not re.match(r"^(全?\d+[集话期部个]|第\d+[季集话期]|内封.*|内嵌.*|简繁.*|双字.*|中字.*|\d+部.*|\d+个.*)$", cn_str):
+                            if cn_str not in candidates:
+                                candidates.append(cn_str)
+
+            # 2. 从未被括号包裹的完整名称中分析（例如 中华英雄.1991.1080p 或 中华英雄之中华傲决）
+            # 将常见分隔符替换为空格
+            cleaned_part = re.sub(r"[\[\]\(\)\{\}【】（）._\-+]+", " ", part_stem)
+            for segment in cleaned_part.split():
+                cn_matches = re.findall(r"[\u4e00-\u9fff]+", segment)
+                for cn_str in cn_matches:
+                    cn_str = cn_str.strip()
+                    if len(cn_str) >= 2 and cn_str not in cls.NOISE_KEYWORDS and not cls.NOISE_REGEX.match(cn_str):
+                        if not re.match(r"^(全?\d+[集话期部个]|第\d+[季集话期]|内封.*|内嵌.*|简繁.*|双字.*|中字.*|\d+部.*|\d+个.*)$", cn_str):
+                            if cn_str not in candidates:
+                                candidates.append(cn_str)
+
+        return candidates
+
+    @classmethod
+    def calc_title_similarity(cls, str1: str, str2: str) -> float:
+        """
+        计算两个中文标题的字符集合重合度 (Jaccard-like & 包含关系)
+        """
+        s1 = "".join(re.findall(r"[\u4e00-\u9fff0-9a-zA-Z]+", str1)).lower()
+        s2 = "".join(re.findall(r"[\u4e00-\u9fff0-9a-zA-Z]+", str2)).lower()
+
+        if not s1 or not s2:
+            return 0.0
+
+        # 完全匹配或互为子串
+        if s1 == s2:
+            return 1.0
+        if s1 in s2 or s2 in s1:
+            # 子串匹配赋予高相似度 (例如: "中华英雄" in "中华英雄之中华傲决")
+            return min(len(s1), len(s2)) / max(len(s1), len(s2)) * 0.9 + 0.1
+
+        set1 = set(s1)
+        set2 = set(s2)
+        intersection = set1 & set2
+        if not intersection:
+            return 0.0
+
+        union = set1 | set2
+        return len(intersection) / len(union)
+
+    @classmethod
     def analyze(
         cls,
         histories: List[Any],
         config: Dict[str, Any],
+        path_filter: Optional[str] = None,
+        path_type: str = "all",
     ) -> Tuple[List[Dict[str, Any]], int]:
         """
         根据配置检测历史记录中的异常
         :param histories: TransferHistory ORM 对象或字典列表
         :param config: 插件配置选项
+        :param path_filter: 指定路径过滤关键字
+        :param path_type: 指定路径过滤模式 ('src', 'dest', 'all')
         :return: (异常对象列表, 本次最高 history ID)
         """
         exceptions: List[Dict[str, Any]] = []
@@ -34,6 +136,8 @@ class OrganizeAnalyzerCore:
         min_merged_files = int(config.get("min_merged_files", 2))
         detect_merged = bool(config.get("detect_merged_files", True))
         detect_english = bool(config.get("detect_english_title", True))
+        detect_title_mismatch = bool(config.get("detect_title_mismatch", True))
+        title_mismatch_threshold = float(config.get("title_mismatch_threshold", 0.3))
         detect_unidentified = bool(config.get("detect_unidentified", True))
         detect_failed = bool(config.get("detect_failed_status", True))
         detect_duplicate = bool(config.get("detect_duplicate_episode", True))
@@ -43,6 +147,8 @@ class OrganizeAnalyzerCore:
         # 忽略路径白名单
         ignore_paths_raw = config.get("ignore_paths", "")
         ignore_paths = [p.strip() for p in ignore_paths_raw.split(",") if p.strip()]
+
+        pf = (path_filter or "").strip().lower()
 
         # 预处理 history 数据字典，加速归并分组
         records = []
@@ -80,6 +186,17 @@ class OrganizeAnalyzerCore:
             # 白名单路径过滤
             if any(p in src or p in dest for p in ignore_paths):
                 continue
+
+            # 指定路径过滤 (支持 src / dest / all)
+            if pf:
+                src_lower = src.lower()
+                dest_lower = dest.lower()
+                if path_type == "src" and pf not in src_lower:
+                    continue
+                elif path_type == "dest" and pf not in dest_lower:
+                    continue
+                elif path_type == "all" and pf not in src_lower and pf not in dest_lower:
+                    continue
 
             records.append({
                 "id": hid,
@@ -120,17 +237,8 @@ class OrganizeAnalyzerCore:
                 title = r["title"] or ""
                 has_tmdbid = r["tmdbid"] and int(r["tmdbid"]) > 0
                 if has_tmdbid:
-                    # 有有效 TMDB ID 则已识别，不进行标记（避免误报"未知死亡"等带"未知"的正常标题）
                     is_unk = False
                 else:
-                    # 无 TMDB ID 时，进一步用标题关键字兜底：标题为空、纯"未知"、或 Unknown
-                    title_strip = title.strip()
-                    is_unk = (
-                        not title_strip
-                        or title_strip in ("未知", "Unknown", "unknown")
-                        or title_strip.lower() == "unknown"
-                    )
-                    # 也接受任何 TMDB ID 缺失的情况（无论标题如何），因为核心就是 TMDB 匹配失败
                     is_unk = True
 
                 if is_unk:
@@ -167,7 +275,50 @@ class OrganizeAnalyzerCore:
                         "status": "active"
                     })
 
-        # 4. 检测多文件合并归并到同一个目标文件 (detect_merged_files)
+        # 4. 检测整理前后中文名差异/错配 (detect_title_mismatch)
+        if detect_title_mismatch:
+            for r in records:
+                target_title = (r["title"] or "").strip()
+                # 仅在目标包含中文且整理记录有效的情况下检测
+                if not target_title or not re.search(r"[\u4e00-\u9fff]", target_title):
+                    continue
+
+                src_path = r["src"]
+                if not src_path:
+                    continue
+
+                # 提取源路径中的中文片名候选
+                candidates = cls.extract_source_chinese_titles(src_path)
+                if not candidates:
+                    continue
+
+                # 计算与目标标题的最大相似度
+                max_sim = 0.0
+                best_cand = candidates[0]
+                for cand in candidates:
+                    sim = cls.calc_title_similarity(cand, target_title)
+                    if sim > max_sim:
+                        max_sim = sim
+                        best_cand = cand
+
+                # 若所有候选的相似度都低于阈值，且目标中文名在源路径中完全不存在
+                target_cn_only = "".join(re.findall(r"[\u4e00-\u9fff]+", target_title))
+                if max_sim < title_mismatch_threshold and target_cn_only not in src_path:
+                    key = cls._generate_key("title_mismatch", str(r["id"]))
+                    exceptions.append({
+                        "key": key,
+                        "type": "title_mismatch",
+                        "type_name": "中文名差异/错配",
+                        "title": f"{target_title} (源: {best_cand})",
+                        "history_id": r["id"],
+                        "src": r["src"],
+                        "dest": r["dest"],
+                        "date": r["date"],
+                        "detail": f"源路径提取中文名 [{best_cand}] 与 整理后中文标题 [{target_title}] 差异过大 (相似度: {int(max_sim * 100)}%)，疑似刮削错误",
+                        "status": "active"
+                    })
+
+        # 5. 检测多文件合并归并到同一个目标文件 (detect_merged_files)
         if detect_merged:
             dest_to_srcs: Dict[str, Set[str]] = {}
             dest_to_histories: Dict[str, List[Dict[str, Any]]] = {}
@@ -208,7 +359,7 @@ class OrganizeAnalyzerCore:
                         "file_count": len(srcs)
                     })
 
-        # 5. 检测重复季集 (detect_duplicate_episode)
+        # 6. 检测重复季集 (detect_duplicate_episode)
         if detect_duplicate:
             ep_map: Dict[str, List[Dict[str, Any]]] = {}
             for r in records:
@@ -242,7 +393,7 @@ class OrganizeAnalyzerCore:
                         "file_count": len(dests)
                     })
 
-        # 6. 检测目标文件缺失/0字节 (detect_missing_dest)
+        # 7. 检测目标文件缺失/0字节 (detect_missing_dest)
         if detect_missing:
             for r in records:
                 dest = r["dest"]
@@ -279,7 +430,7 @@ class OrganizeAnalyzerCore:
                     except Exception:
                         pass
 
-        # 7. 检测离群/格式异常集数 (detect_invalid_episode，仅对电视剧/非电影生效)
+        # 8. 检测离群/格式异常集数 (detect_invalid_episode，仅对电视剧/非电影生效)
         if detect_invalid_ep:
             invalid_ep_threshold = int(config.get("invalid_episode_threshold", 500))
             

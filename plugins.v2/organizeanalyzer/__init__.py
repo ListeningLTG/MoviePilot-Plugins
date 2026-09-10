@@ -2,6 +2,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import or_
 
 from app.plugins import _PluginBase
 from app.log import logger
@@ -16,9 +17,9 @@ from .analyzer import OrganizeAnalyzerCore
 class OrganizeAnalyzer(_PluginBase):
     # 插件元数据
     plugin_name = "媒体整理异常分析"
-    plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、整理失败及重集等异常。"
+    plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、中文名差异错配、整理失败及重集等异常。"
     plugin_icon = "mdi-file-find-outline"
-    plugin_version = "1.1.8"
+    plugin_version = "1.2.0"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "organizeanalyzer_"
     plugin_order = 15
@@ -100,7 +101,7 @@ class OrganizeAnalyzer(_PluginBase):
             return []
 
     @db_query
-    def _query_transfer_histories(self, db: Session, date_after: Optional[str] = None):
+    def _query_transfer_histories(self, db: Session, date_after: Optional[str] = None, path: Optional[str] = None, path_type: str = "all"):
         """查询整理历史（已优化内存：分块查询并直接转换为轻量级字典）"""
         query = db.query(
             TransferHistory.id,
@@ -119,6 +120,15 @@ class OrganizeAnalyzer(_PluginBase):
         if date_after:
             query = query.filter(TransferHistory.date > date_after)
             
+        if path and path.strip():
+            p = f"%{path.strip()}%"
+            if path_type == "src":
+                query = query.filter(TransferHistory.src.ilike(p))
+            elif path_type == "dest":
+                query = query.filter(TransferHistory.dest.ilike(p))
+            else:
+                query = query.filter(or_(TransferHistory.src.ilike(p), TransferHistory.dest.ilike(p)))
+
         query = query.order_by(TransferHistory.id.asc()).yield_per(2000)
         
         records = []
@@ -139,28 +149,33 @@ class OrganizeAnalyzer(_PluginBase):
             })
         return records
 
-    def run_analysis(self, mode: str = "incremental") -> Dict[str, Any]:
+    def run_analysis(self, mode: str = "incremental", path: Optional[str] = None, path_type: str = "all") -> Dict[str, Any]:
         """
         执行整理异常分析
         :param mode: 'full' 全量分析, 'incremental' 增量分析
+        :param path: 指定路径过滤
+        :param path_type: 指定路径过滤类型 ('src', 'dest', 'all')
         """
         if not self._storage:
             self._storage = AnalyzerStorage(self.get_data_path())
 
         current_data = self._storage.load_data()
         date_after = None
-        if mode == "incremental":
+        if mode == "incremental" and not path:
             date_after = current_data.get("last_run_time") or None
 
-        logger.info(f"【{self.plugin_name}】🚀 开始执行 [{mode}] 分析... (检索过滤时间: {date_after or '全量扫描'})")
-        histories = self._query_transfer_histories(date_after=date_after)
+        logger.info(f"【{self.plugin_name}】🚀 开始执行 [{mode}] 分析... (检索过滤时间: {date_after or '全量扫描'}, 指定路径: {path or '全部'}[{path_type}])")
+        histories = self._query_transfer_histories(date_after=date_after, path=path, path_type=path_type)
         logger.info(f"【{self.plugin_name}】从数据库读取到了 {len(histories)} 条 TransferHistory 历史记录")
 
-        exceptions, max_id = OrganizeAnalyzerCore.analyze(histories, self._config)
-        result_data = self._storage.update_analysis_results(exceptions, mode=mode, max_history_id=max_id)
+        exceptions, max_id = OrganizeAnalyzerCore.analyze(histories, self._config, path_filter=path, path_type=path_type)
+        
+        # 如果是指定路径分析，采用增量模式合并，以免覆盖全部其他分析结果
+        save_mode = "incremental" if (mode == "incremental" or bool(path)) else "full"
+        result_data = self._storage.update_analysis_results(exceptions, mode=save_mode, max_history_id=max_id)
 
         summary = result_data.get("summary", {})
-        logger.info(f"【{self.plugin_name}】✅ 分析完成！本次识别到未处理异常总数: {summary.get('total', 0)} (多文件覆盖: {summary.get('merged_files', 0)}, 英文未中文化: {summary.get('english_title', 0)}, 未识别: {summary.get('unidentified', 0)}, 失败: {summary.get('failed_status', 0)}, 重复集: {summary.get('duplicate_episode', 0)})")
+        logger.info(f"【{self.plugin_name}】✅ 分析完成！本次识别到未处理异常总数: {summary.get('total', 0)} (多文件覆盖: {summary.get('merged_files', 0)}, 英文未中文化: {summary.get('english_title', 0)}, 中文名差异: {summary.get('title_mismatch', 0)}, 未识别: {summary.get('unidentified', 0)}, 失败: {summary.get('failed_status', 0)}, 重复集: {summary.get('duplicate_episode', 0)})")
 
         # 消息推送
         if self._notify and summary.get("total", 0) > 0:
@@ -183,6 +198,7 @@ class OrganizeAnalyzer(_PluginBase):
             f"📊 未处理异常总数: **{summary.get('total', 0)}**",
             f"• 多文件合并冲突: {summary.get('merged_files', 0)}",
             f"• 英文标题未中文化: {summary.get('english_title', 0)}",
+            f"• 中文名差异/错配: {summary.get('title_mismatch', 0)}",
             f"• 未识别/TMDB缺失: {summary.get('unidentified', 0)}",
             f"• 整理运行失败: {summary.get('failed_status', 0)}",
             f"• 重复季集冲突: {summary.get('duplicate_episode', 0)}",
@@ -327,12 +343,13 @@ class OrganizeAnalyzer(_PluginBase):
             "total_pages": (total + page_size - 1) // page_size if total > 0 else 1
         }
 
-    async def api_run_analyze(self, mode: str = "incremental") -> dict:
-        logger.info(f"【{self.plugin_name}】API 请求 [POST /analyze] (mode={mode})")
-        result = self.run_analysis(mode=mode)
+    async def api_run_analyze(self, mode: str = "incremental", path: str = "", path_type: str = "all") -> dict:
+        logger.info(f"【{self.plugin_name}】API 请求 [POST /analyze] (mode={mode}, path={path}, path_type={path_type})")
+        result = self.run_analysis(mode=mode, path=path, path_type=path_type)
+        scope_info = f" (指定路径: {path})" if path else ""
         return {
             "code": 0,
-            "msg": f"[{'全量' if mode=='full' else '增量'}]分析完成",
+            "msg": f"[{'全量' if mode=='full' else '增量'}]分析完成{scope_info}",
             "data": result.get("summary", {})
         }
 
