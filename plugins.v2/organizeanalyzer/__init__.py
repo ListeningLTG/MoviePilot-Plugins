@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import or_
-from fastapi import Request
 
 from app.plugins import _PluginBase
 from app.log import logger
@@ -20,7 +19,7 @@ class OrganizeAnalyzer(_PluginBase):
     plugin_name = "媒体整理异常分析"
     plugin_desc = "分析 MP 媒体整理历史记录，识别多文件归并/覆盖冲突、英文未识别标题、中文名差异错配、整理失败及重集等异常。"
     plugin_icon = "mdi-file-find-outline"
-    plugin_version = "1.2.1"
+    plugin_version = "1.2.2"
     plugin_author = "ListeningLTG"
     plugin_config_prefix = "organizeanalyzer_"
     plugin_order = 15
@@ -391,18 +390,7 @@ class OrganizeAnalyzer(_PluginBase):
             "total_pages": (total + page_size - 1) // page_size if total > 0 else 1
         }
 
-    async def api_run_analyze(self, mode: str = "incremental", path: str = "", path_type: str = "all", request: Optional[Request] = None) -> dict:
-        # 支持从 request body 中读取 JSON 参数
-        if request:
-            try:
-                body = await request.json()
-                if isinstance(body, dict):
-                    mode = body.get("mode", mode) or mode
-                    path = body.get("path", path) or path
-                    path_type = body.get("path_type", path_type) or path_type
-            except Exception:
-                pass
-
+    async def api_run_analyze(self, mode: str = "incremental", path: str = "", path_type: str = "all") -> dict:
         logger.info(f"【{self.plugin_name}】API 请求 [POST /analyze] (mode={mode}, path={path}, path_type={path_type})")
         result = self.run_analysis(mode=mode, path=path, path_type=path_type)
         scope_info = f" (指定路径: {path})" if path else ""

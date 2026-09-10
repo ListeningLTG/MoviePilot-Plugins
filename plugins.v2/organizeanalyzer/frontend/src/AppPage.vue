@@ -523,7 +523,7 @@ const triggerAnalyze = async (mode = 'incremental') => {
   analyzing.value = true;
   analyzeScope.value = mode;
   try {
-    await props.api.post(`plugin/${props.pluginId}/analyze?mode=${mode}`, { mode: mode });
+    await props.api.post(`plugin/${props.pluginId}/analyze?mode=${mode}`);
     await fetchStats();
     await fetchExceptions();
     snackbar.value = { show: true, text: `[${mode === 'full' ? '全量' : '增量'}]分析完成！`, color: 'success' };
@@ -542,15 +542,9 @@ const triggerPathAnalyze = async () => {
   analyzing.value = true;
   analyzeScope.value = 'path';
   try {
-    const payload = {
-      mode: pathForm.value.mode,
-      path: searchPath,
-      path_type: pathForm.value.path_type
-    };
     const pathEncoded = encodeURIComponent(searchPath);
     const res = await props.api.post(
-      `plugin/${props.pluginId}/analyze?mode=${pathForm.value.mode}&path=${pathEncoded}&path_type=${pathForm.value.path_type}`,
-      payload
+      `plugin/${props.pluginId}/analyze?mode=${pathForm.value.mode}&path=${pathEncoded}&path_type=${pathForm.value.path_type}`
     );
     showPathDialog.value = false;
     
@@ -564,7 +558,7 @@ const triggerPathAnalyze = async () => {
     const pathCnt = res?.path_summary?.total ?? res?.data?.total ?? 0;
     snackbar.value = { 
       show: true, 
-      text: `指定路径 [${searchPath}] 分析完成！本次发现 ${pathCnt} 条异常，已为您自动筛选展示。`, 
+      text: `指定路径 [${searchPath}] 分析完成！已为您自动筛选展示该路径异常。`, 
       color: 'success' 
     };
   } catch (err) {
