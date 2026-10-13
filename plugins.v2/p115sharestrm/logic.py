@@ -1103,6 +1103,27 @@ def _load_scan_from_subtitle_job(share_code: str) -> Optional[Tuple[List[dict], 
     return media_files, subtitle_files
 
 
+def is_blacklisted(name: str, blacklist: Optional[List[str]] = None) -> Optional[str]:
+    """
+    检查名称（目录、文件或路径）是否命中黑名单。
+    如果命中，返回命中的关键词；否则返回 None。
+    """
+    if not name:
+        return None
+    if blacklist is None:
+        try:
+            blacklist = configer.get_file_filter_blacklist()
+        except Exception:
+            blacklist = ["bdmv", "certificate"]
+    if not blacklist:
+        return None
+    name_lower = name.lower()
+    for kw in blacklist:
+        if kw and kw in name_lower:
+            return kw
+    return None
+
+
 def _resolve_share_file_lists(
     client: "ShareP115Client",
     share_code: str,
@@ -1120,6 +1141,15 @@ def _resolve_share_file_lists(
     )
     if cached:
         media_files, subtitle_files = cached
+        # 对缓存应用黑名单过滤，确保用户更新黑名单后即时生效
+        media_files = [
+            m for m in media_files
+            if not is_blacklisted(m.get("name", "")) and not is_blacklisted(m.get("_full_path", ""))
+        ]
+        subtitle_files = [
+            s for s in subtitle_files
+            if not is_blacklisted(s.get("name", "")) and not is_blacklisted(s.get("_full_path", ""))
+        ]
         if subtitle_exts and not subtitle_files and sub_only:
             pass  # 仍可用 media；字幕列表可能为空
         return media_files, subtitle_files
@@ -1127,7 +1157,16 @@ def _resolve_share_file_lists(
     if sub_only and not force_live_scan:
         job_cached = _load_scan_from_subtitle_job(share_code)
         if job_cached:
-            return job_cached
+            media_files, subtitle_files = job_cached
+            media_files = [
+                m for m in media_files
+                if not is_blacklisted(m.get("name", "")) and not is_blacklisted(m.get("_full_path", ""))
+            ]
+            subtitle_files = [
+                s for s in subtitle_files
+                if not is_blacklisted(s.get("name", "")) and not is_blacklisted(s.get("_full_path", ""))
+            ]
+            return media_files, subtitle_files
 
     if force_live_scan:
         logger.info(f"【P115ShareStrm】强制在线扫描分享内容（绕过缓存）: {share_code}")
@@ -1287,11 +1326,12 @@ def iter_share_files(
             item = normalize_attr(item)
             name = item.get("name", "")
             current_path = f"{path_prefix}/{name}" if path_prefix else f"/{name}"
+            hit_kw = is_blacklisted(name)
             if item.get("is_dir"):
-                if name.upper() in ("BDMV", "CERTIFICATE"):
+                if hit_kw:
                     logger.info(
-                        f"【P115ShareStrm】检测到蓝光原盘标志性目录 '{name}' "
-                        f"(路径: {current_path})，跳过该目录的遍历"
+                        f"【P115ShareStrm】检测到黑名单目录 '{name}' "
+                        f"(命中关键词: '{hit_kw}', 路径: {current_path})，跳过该目录的遍历"
                     )
                     continue
                 yield from iter_share_files(
@@ -1299,6 +1339,12 @@ def iter_share_files(
                     max_retries, _fetcher,
                 )
             else:
+                if hit_kw:
+                    logger.info(
+                        f"【P115ShareStrm】检测到黑名单文件 '{name}' "
+                        f"(命中关键词: '{hit_kw}', 路径: {current_path})，跳过该文件"
+                    )
+                    continue
                 item["_full_path"] = current_path
                 yield item
 

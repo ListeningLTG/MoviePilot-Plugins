@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -643,6 +643,27 @@ class p115sharestrm(_PluginBase):
                                             },
                                         ],
                                     },
+                                    # ── 第六行：文件与目录排除黑名单 ──
+                                    {
+                                        "component": "VRow",
+                                        "content": [
+                                            {
+                                                "component": "VCol",
+                                                "props": {"cols": 12},
+                                                "content": [
+                                                    {
+                                                        "component": "VTextField",
+                                                        "props": {
+                                                            "model": "file_filter_blacklist",
+                                                            "label": "文件与目录排除黑名单",
+                                                            "hint": "英文逗号分隔，不区分大小写。目录名或文件名包含任意关键词时将自动跳过（例如 BDMV, CERTIFICATE, Sample, _预告）",
+                                                            "persistent-hint": True,
+                                                        },
+                                                    }
+                                                ],
+                                            },
+                                        ],
+                                    },
                                     # ── 说明区 ──
                                     {
                                         "component": "VRow",
@@ -783,6 +804,7 @@ class p115sharestrm(_PluginBase):
             "user_rmt_mediaext": "mp4,mkv,ts,iso,rmvb,avi,mov,mpeg,mpg,wmv,3gp,asf,m4v,flv,m2ts,tp,f4v",
             "video_min_size_filter": False,
             "video_min_size": 100,
+            "file_filter_blacklist": "BDMV, CERTIFICATE",
             "download_subtitle": False,
             "user_subtitle_ext": "srt,ass,ssa",
             "subtitle_audit_poll_timeout_hours": 6,

@@ -60,6 +60,23 @@ class ConfigManager(BaseModel):
     )
     video_min_size_filter: bool = Field(default=False, description="过滤小于指定大小的视频文件")
     video_min_size: int = Field(default=100, ge=0, description="最小视频文件大小(MB)")
+    file_filter_blacklist: Optional[str] = Field(
+        default="BDMV, CERTIFICATE",
+        description="文件与目录排除黑名单（英文逗号隔开）",
+    )
+
+    def get_file_filter_blacklist(self) -> list[str]:
+        """
+        获取解析后的文件/目录排除黑名单关键词列表（英文逗号隔开，统一小写，去重与去空白）
+        保底包含 bdmv 和 certificate，防止误扫蓝光切片。
+        """
+        raw = self.file_filter_blacklist or ""
+        keywords = {k.strip().lower() for k in raw.split(",") if k.strip()}
+        # 保底加入原盘关键标识
+        keywords.add("bdmv")
+        keywords.add("certificate")
+        return [k for k in keywords if k]
+
     download_subtitle: bool = Field(default=False, description="同步下载分享中的字幕文件")
     user_subtitle_ext: str = Field(
         default="srt,ass,ssa",
