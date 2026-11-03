@@ -64,6 +64,18 @@
         <v-col cols="12">
           <v-textarea v-model="config.ignore_paths" label="忽略路径关键词白名单 (英文逗号分隔)" placeholder="/downloads/, /temp/" rows="2" density="compact" class="mt-2" hide-details></v-textarea>
         </v-col>
+        <v-col cols="12">
+          <v-textarea
+            v-model="config.custom_noise_keywords"
+            label="自定义片名噪声词黑名单 (支持逗号/空格/换行分隔)"
+            placeholder="例如: 首发, 独家, 稀缺资源, 某某压制组"
+            rows="2"
+            density="compact"
+            class="mt-2"
+            hint="插件已内置常见标签词（转存、网盘、阿里、夸克、合集、国语、双语等），此处只需追加个性化需要排除的词汇"
+            persistent-hint
+          ></v-textarea>
+        </v-col>
       </v-row>
     </v-card-text>
 
@@ -96,6 +108,7 @@ if (config.value.cron === undefined) config.value.cron = '0 3 * * *'
 if (config.value.invalid_episode_threshold === undefined) config.value.invalid_episode_threshold = 500
 if (config.value.detect_title_mismatch === undefined) config.value.detect_title_mismatch = true
 if (config.value.title_mismatch_threshold === undefined) config.value.title_mismatch_threshold = 0.3
+if (config.value.custom_noise_keywords === undefined) config.value.custom_noise_keywords = ''
 
 const save = () => {
   // 转换部分类型

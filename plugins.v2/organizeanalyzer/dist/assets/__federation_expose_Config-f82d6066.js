@@ -30,6 +30,7 @@ if (config.value.cron === undefined) config.value.cron = '0 3 * * *';
 if (config.value.invalid_episode_threshold === undefined) config.value.invalid_episode_threshold = 500;
 if (config.value.detect_title_mismatch === undefined) config.value.detect_title_mismatch = true;
 if (config.value.title_mismatch_threshold === undefined) config.value.title_mismatch_threshold = 0.3;
+if (config.value.custom_noise_keywords === undefined) config.value.custom_noise_keywords = '';
 
 const save = () => {
   // 转换部分类型
@@ -57,7 +58,7 @@ return (_ctx, _cache) => {
     default: _withCtx(() => [
       _createVNode(_component_v_card_text, null, {
         default: _withCtx(() => [
-          _cache[18] || (_cache[18] = _createElementVNode("div", { class: "text-subtitle-1 mb-4 font-weight-bold" }, " 全局设置 ", -1)),
+          _cache[19] || (_cache[19] = _createElementVNode("div", { class: "text-subtitle-1 mb-4 font-weight-bold" }, " 全局设置 ", -1)),
           _createVNode(_component_v_row, { dense: "" }, {
             default: _withCtx(() => [
               _createVNode(_component_v_col, {
@@ -146,7 +147,7 @@ return (_ctx, _cache) => {
             _: 1
           }),
           _createVNode(_component_v_divider, { class: "my-4" }),
-          _cache[19] || (_cache[19] = _createElementVNode("div", { class: "text-subtitle-1 mb-4 font-weight-bold" }, " 异常检测规则开关及参数 ", -1)),
+          _cache[20] || (_cache[20] = _createElementVNode("div", { class: "text-subtitle-1 mb-4 font-weight-bold" }, " 异常检测规则开关及参数 ", -1)),
           _createVNode(_component_v_row, { dense: "" }, {
             default: _withCtx(() => [
               _createVNode(_component_v_col, {
@@ -340,6 +341,22 @@ return (_ctx, _cache) => {
                   }, null, 8, ["modelValue"])
                 ]),
                 _: 1
+              }),
+              _createVNode(_component_v_col, { cols: "12" }, {
+                default: _withCtx(() => [
+                  _createVNode(_component_v_textarea, {
+                    modelValue: config.value.custom_noise_keywords,
+                    "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((config.value.custom_noise_keywords) = $event)),
+                    label: "自定义片名噪声词黑名单 (支持逗号/空格/换行分隔)",
+                    placeholder: "例如: 首发, 独家, 稀缺资源, 某某压制组",
+                    rows: "2",
+                    density: "compact",
+                    class: "mt-2",
+                    hint: "插件已内置常见标签词（转存、网盘、阿里、夸克、合集、国语、双语等），此处只需追加个性化需要排除的词汇",
+                    "persistent-hint": ""
+                  }, null, 8, ["modelValue"])
+                ]),
+                _: 1
               })
             ]),
             _: 1
@@ -352,9 +369,9 @@ return (_ctx, _cache) => {
           _createVNode(_component_v_spacer),
           _createVNode(_component_v_btn, {
             variant: "text",
-            onClick: _cache[17] || (_cache[17] = $event => (_ctx.$emit('close')))
+            onClick: _cache[18] || (_cache[18] = $event => (_ctx.$emit('close')))
           }, {
-            default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
+            default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
               _createTextVNode("取消", -1)
             ]))]),
             _: 1
@@ -364,7 +381,7 @@ return (_ctx, _cache) => {
             variant: "elevated",
             onClick: save
           }, {
-            default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
+            default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
               _createTextVNode("保存设置", -1)
             ]))]),
             _: 1

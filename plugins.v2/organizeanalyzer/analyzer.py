@@ -9,8 +9,8 @@ class OrganizeAnalyzerCore:
     整理异常分析核心逻辑引擎
     """
 
-    # 常见无意义或标签类中文字符串/关键词黑名单
-    NOISE_KEYWORDS = {
+    # 常见无意义或标签类中文字符串/关键词黑名单（内置默认）
+    DEFAULT_NOISE_KEYWORDS = {
         "合集", "剧集", "电视剧", "电影", "动漫", "纪录片", "综艺", "系列", "全集",
         "国粤双语", "国语", "粤语", "英语", "韩语", "日语", "双语", "双字", "简繁",
         "简繁双字", "简繁中字", "简日双字", "繁日双字", "简英双字", "繁英双字", "中文字幕",
@@ -20,6 +20,8 @@ class OrganizeAnalyzerCore:
         "本地", "夸克", "阿里", "百度", "迅雷", "网盘", "转存", "整理", "电影合集", "剧集合集",
         "港剧合集", "华语合集", "国产剧", "欧美剧", "日韩剧", "港台剧", "未命名", "其他"
     }
+    # 兼容历史引用
+    NOISE_KEYWORDS = DEFAULT_NOISE_KEYWORDS
 
     # 匹配各类集数、季度、容量、数量噪声的正则
     NOISE_REGEX = re.compile(
@@ -36,12 +38,31 @@ class OrganizeAnalyzerCore:
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
     @classmethod
-    def extract_source_chinese_titles(cls, src_path: str) -> List[str]:
+    def get_effective_noise_keywords(cls, custom_noise: Optional[str] = None) -> Set[str]:
+        """
+        获取生效的噪声词黑名单集合 (内置默认 + 用户自定义)
+        :param custom_noise: 用户配置的自定义黑名单字符串，支持逗号/空格/换行分隔
+        """
+        keywords = set(cls.DEFAULT_NOISE_KEYWORDS)
+        if custom_noise and isinstance(custom_noise, str):
+            words = re.split(r"[,，\s\n\r]+", custom_noise.strip())
+            for w in words:
+                w_clean = w.strip()
+                if w_clean:
+                    keywords.add(w_clean)
+        return keywords
+
+    @classmethod
+    def extract_source_chinese_titles(cls, src_path: str, noise_keywords: Optional[Set[str]] = None) -> List[str]:
         """
         从源路径中智能提取候选中文片名
+        :param src_path: 源路径
+        :param noise_keywords: 生效的噪声词黑名单集合，缺省使用内置黑名单
         """
         if not src_path:
             return []
+
+        effective_noise = noise_keywords if noise_keywords is not None else cls.DEFAULT_NOISE_KEYWORDS
 
         # 规范化路径分隔符
         norm_path = src_path.replace("\\", "/")
@@ -66,7 +87,7 @@ class OrganizeAnalyzerCore:
                 cn_matches = re.findall(r"[\u4e00-\u9fff]+", block_clean)
                 for cn_str in cn_matches:
                     cn_str = cn_str.strip()
-                    if len(cn_str) >= 2 and cn_str not in cls.NOISE_KEYWORDS and not cls.NOISE_REGEX.match(cn_str):
+                    if len(cn_str) >= 2 and cn_str not in effective_noise and not cls.NOISE_REGEX.match(cn_str):
                         # 排除如 "全20集"、"941部"、"200部" 等复合词
                         if not re.match(r"^(全?\d+[集话期部个]|第\d+[季集话期]|内封.*|内嵌.*|简繁.*|双字.*|中字.*|\d+部.*|\d+个.*)$", cn_str):
                             if cn_str not in candidates:
@@ -79,7 +100,7 @@ class OrganizeAnalyzerCore:
                 cn_matches = re.findall(r"[\u4e00-\u9fff]+", segment)
                 for cn_str in cn_matches:
                     cn_str = cn_str.strip()
-                    if len(cn_str) >= 2 and cn_str not in cls.NOISE_KEYWORDS and not cls.NOISE_REGEX.match(cn_str):
+                    if len(cn_str) >= 2 and cn_str not in effective_noise and not cls.NOISE_REGEX.match(cn_str):
                         if not re.match(r"^(全?\d+[集话期部个]|第\d+[季集话期]|内封.*|内嵌.*|简繁.*|双字.*|中字.*|\d+部.*|\d+个.*)$", cn_str):
                             if cn_str not in candidates:
                                 candidates.append(cn_str)
@@ -147,6 +168,10 @@ class OrganizeAnalyzerCore:
         # 忽略路径白名单
         ignore_paths_raw = config.get("ignore_paths", "")
         ignore_paths = [p.strip() for p in ignore_paths_raw.split(",") if p.strip()]
+
+        # 生效的片名噪声词黑名单 (内置默认 + 自定义追加)
+        custom_noise = config.get("custom_noise_keywords", "")
+        effective_noise = cls.get_effective_noise_keywords(custom_noise)
 
         pf = (path_filter or "").strip().lower()
 
@@ -288,7 +313,7 @@ class OrganizeAnalyzerCore:
                     continue
 
                 # 提取源路径中的中文片名候选
-                candidates = cls.extract_source_chinese_titles(src_path)
+                candidates = cls.extract_source_chinese_titles(src_path, noise_keywords=effective_noise)
                 if not candidates:
                     continue
 
