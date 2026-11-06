@@ -336,6 +336,12 @@ def _place_subtitles_to_targets(
     place_fallback = 0
     dir_to_media_stems = _build_dir_to_media_stems(media_files)
 
+    def _same_content(path_a: Path, path_b: Path) -> bool:
+        try:
+            return path_a.exists() and path_a.read_bytes() == path_b.read_bytes()
+        except Exception:
+            return False
+
     for sub_item, local_path in zip(subtitle_files, downloaded_subtitle_paths):
         sub_full_path = sub_item.get("_full_path", sub_item.get("name", ""))
         sub_name = Path(sub_full_path).name
@@ -368,22 +374,35 @@ def _place_subtitles_to_targets(
             continue
 
         lang_tag = _extract_subtitle_lang_tag(sub_name)
-        new_name = _truncate_filename(strm_target.stem + lang_tag + local_path.suffix)
+        base_prefix = strm_target.stem + lang_tag
+        new_name = _truncate_filename(base_prefix + local_path.suffix)
         dest_path = strm_target.parent / new_name
-        try:
-            if dest_path.exists() and dest_path.read_bytes() == local_path.read_bytes():
-                logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
-                place_ok += 1
-                if used_fallback:
-                    place_fallback += 1
-                continue
-        except Exception:
-            pass
-        idx = 1
-        while dest_path.exists():
-            new_name = _truncate_filename(strm_target.stem + lang_tag + f".{idx}" + local_path.suffix)
-            dest_path = strm_target.parent / new_name
-            idx += 1
+        if _same_content(dest_path, local_path):
+            logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
+            place_ok += 1
+            if used_fallback:
+                place_fallback += 1
+            continue
+
+        if dest_path.exists():
+            variant_tag = _extract_subtitle_variant_tag(sub_name, matched_stem or strm_target.stem)
+            variant_prefix = base_prefix
+            if variant_tag:
+                variant_prefix = base_prefix + "." + variant_tag
+                new_name = _truncate_filename(variant_prefix + local_path.suffix)
+                dest_path = strm_target.parent / new_name
+                if _same_content(dest_path, local_path):
+                    logger.debug(f"【P115ShareStrm】字幕已存在且内容相同，跳过: {new_name}")
+                    place_ok += 1
+                    if used_fallback:
+                        place_fallback += 1
+                    continue
+
+            idx = 1
+            while dest_path.exists():
+                new_name = _truncate_filename(variant_prefix + f".alt{idx}" + local_path.suffix)
+                dest_path = strm_target.parent / new_name
+                idx += 1
         try:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(local_path), str(dest_path))
@@ -1384,6 +1403,16 @@ _JA_SUB_RE = (
     r"|日本語|日語"
 )
 _ENG_SUB_RE = r"[.\[(\s]eng[.\])\s]"
+_BILINGUAL_ENG_HINT_RE = re.compile(
+    r"(?:中英|英中|双语|雙語|bilingual|multi(?:-|\s*)sub)",
+    re.IGNORECASE,
+)
+_SUBTITLE_VARIANT_STOP_WORDS = {
+    "zh", "cn", "sc", "tc", "cht", "chs", "chi", "chs", "cht", "zho",
+    "eng", "english", "jpn", "jp", "ja", "japanese",
+    "sub", "subs", "subtitle", "subtitles", "chseng",
+    "简中", "繁中", "简英", "繁英", "中英", "英中", "双语", "雙語", "中字", "字幕",
+}
 
 
 def _extract_subtitle_lang_tag(sub_filename: str) -> str:
@@ -1406,29 +1435,81 @@ def _extract_subtitle_lang_tag(sub_filename: str) -> str:
     # 拼接一个前导点，以解决如 Hans.srt、hk.srt 等位于文件名开头无前导边界符的情况
     test_name = f".{sub_filename}"
 
-    if re.search(_ZHCN_SUB_RE, test_name, re.I):
+    has_zh_cn = bool(re.search(_ZHCN_SUB_RE, test_name, re.I))
+    has_zh_hk = bool(re.search(_ZHHK_SUB_RE, test_name, re.I))
+    has_zh_tw = bool(re.search(_ZHTW_SUB_RE, test_name, re.I))
+    has_ja = bool(re.search(_JA_SUB_RE, test_name, re.I))
+    has_eng = bool(re.search(_ENG_SUB_RE, test_name, re.I))
+
+    # 兼容 “简中英/繁中英/双语” 等纯中文标注，不依赖 eng 字样
+    if not has_eng and _BILINGUAL_ENG_HINT_RE.search(sub_filename):
+        has_eng = True
+
+    if has_zh_cn:
         lang_code = "zh-cn"
         lang = ".chi.zh-cn"
-    elif re.search(_ZHHK_SUB_RE, test_name, re.I):
+    elif has_zh_hk:
         lang_code = "zh-hk"
         lang = ".zh-hk"
-    elif re.search(_ZHTW_SUB_RE, test_name, re.I):
+    elif has_zh_tw:
         lang_code = "zh-tw"
         lang = ".zh-tw"
-    elif re.search(_JA_SUB_RE, test_name, re.I):
+    elif has_ja:
         lang_code = "ja"
         lang = ".ja"
-    elif re.search(_ENG_SUB_RE, test_name, re.I):
+    elif has_eng:
         lang_code = "eng"
         lang = ".eng"
     else:
         return ""
+
+    # 尽量保留双语信息，避免同语言字幕落成 .1/.2 后缀
+    if has_eng and lang_code != "eng":
+        lang += ".eng"
 
     # 与 MP transhandler 保持一致：当字幕语言 == settings.DEFAULT_SUB 时加 .default
     default_sub = getattr(settings, "DEFAULT_SUB", "") or ""
     if default_sub.lower() == lang_code.lower():
         return ".default" + lang
     return lang
+
+
+def _extract_subtitle_variant_tag(sub_filename: str, media_stem: str) -> str:
+    """
+    从原字幕名中提取区分标签（供重名冲突时使用）。
+    提取失败返回空字符串，上层将继续走 alt 序号兜底。
+    """
+    sub_stem = Path(sub_filename).stem
+    if not sub_stem:
+        return ""
+
+    candidate = sub_stem
+    if media_stem:
+        esc_stem = re.escape(media_stem)
+        candidate = re.sub(esc_stem, "", candidate, count=1, flags=re.IGNORECASE)
+
+    chunks = re.split(r"[\s\.\-_\[\]\(\)（）【】《》]+", candidate)
+    tokens: List[str] = []
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        low = chunk.lower()
+        if low in _SUBTITLE_VARIANT_STOP_WORDS or chunk in _SUBTITLE_VARIANT_STOP_WORDS:
+            continue
+        if re.fullmatch(r"(?:\d{3,4}p|x26[45]|h\.?26[45]|hevc|aac|eac3|ac3|dts|atmos|hdr|sdr|webrip|web[-_. ]?dl|bluray)", low):
+            continue
+        tokens.append(chunk)
+
+    if not tokens:
+        return ""
+
+    tag = ".".join(tokens[:3])
+    tag = re.sub(r"[^\w\u4e00-\u9fff\.]+", "", tag, flags=re.UNICODE)
+    tag = re.sub(r"\.+", ".", tag).strip(".")
+    if not tag:
+        return ""
+    return _truncate_filename(tag, max_bytes=64)
 
 
 def _match_subtitle_to_media(
