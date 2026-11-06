@@ -451,7 +451,7 @@ def _schedule_subtitle_receive_retry(
         if task_queue._cancel_event.is_set():
             return
         task_queue.subtitle_job_update_stage(job_id, "placing")
-        client = get_client_for_share(share_code, receive_code)
+        client = get_default_client()
         retry_btn = [[{
             "text": "🔁 重试下载字幕",
             "callback_data": f"[PLUGIN]p115sharestrm|retry_sub:{share_code}:{receive_code}",
@@ -608,7 +608,7 @@ def _finalize_subtitles_async(
         )
         task_queue.subtitle_job_update_stage(job_id, "waiting_transfer")
 
-        client = get_client_for_share(share_code, receive_code)
+        client = get_default_client()
         interval = 10
         attempt = 0
 
@@ -801,6 +801,19 @@ def get_account_clients() -> Dict[int, ShareP115Client]:
         except Exception as e:
             logger.warning(f"【P115ShareStrm】初始化 115 客户端失败 (Cookie #{idx+1}): {e}")
     return clients
+
+
+def get_default_client() -> ShareP115Client:
+    """
+    获取默认账号客户端（按配置顺序取第一个可用 Cookie）。
+    """
+    cookie_list = configer.get_cookie_list()
+    for idx, c in enumerate(cookie_list):
+        try:
+            return ShareP115Client(c)
+        except Exception as e:
+            logger.warning(f"【P115ShareStrm】初始化默认 115 客户端失败 (Cookie #{idx+1}): {e}")
+    raise ValueError("未配置有效的 115 Cookie")
 
 
 def get_client_for_share(share_code: str, receive_code: str = "") -> ShareP115Client:
@@ -2842,7 +2855,7 @@ class ShareTaskQueue:
                             if result.get("subtitle_fail_count"):
                                 msg += f"，失败 {result.get('subtitle_fail_count')} 个"
                         if result.get("subtitle_in_background"):
-                            msg += f"\n⏳ STRM 已完成 / 字幕后台处理中（审核通过并整理后自动放置）"
+                            msg += f"\n⏳ STRM 已完成 / 字幕后台处理中（下载并按整理结果自动放置）"
 
                     buttons = None
                     if not sub_only and result.get("subtitle_fail_count", 0) > 0:

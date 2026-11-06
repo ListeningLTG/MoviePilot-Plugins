@@ -23,7 +23,7 @@ class p115sharestrm(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/ListeningLTG/MoviePilot-Plugins/refs/heads/main/icons/u115.png"
     # 插件版本
-    plugin_version = "1.1.5"
+    plugin_version = "1.1.6"
     # 插件作者
     plugin_author = "ListeningLTG"
     # 作者主页
@@ -291,7 +291,7 @@ class p115sharestrm(_PluginBase):
                                                         "props": {
                                                             "model": "user_subtitle_ext",
                                                             "label": "字幕文件后缀",
-                                                            "hint": "逗号分隔，开启后将此类后缀文件从分享转存下载到本地，例如 srt,ass,ssa",
+                                                            "hint": "逗号分隔，开启后将此类后缀文件通过直链下载到本地（直链由默认账号，即第一个 Cookie 生成），例如 srt,ass,ssa",
                                                             "persistent-hint": True,
                                                         },
                                                     }
@@ -305,9 +305,9 @@ class p115sharestrm(_PluginBase):
                                                         "component": "VTextField",
                                                         "props": {
                                                             "model": "subtitle_audit_poll_timeout_hours",
-                                                            "label": "审核轮询超时（小时）",
+                                                            "label": "字幕后台重试超时（小时）",
                                                             "type": "number",
-                                                            "hint": "分享链接审核中时，后台等待审核通过的最长时间，默认 6 小时；超时后可点通知按钮重试",
+                                                            "hint": "分享快照生成中/接口暂不可用时，字幕后台自动重试的最长等待时长，默认 6 小时；超时后可点通知按钮重试",
                                                             "persistent-hint": True,
                                                         },
                                                     }
@@ -495,9 +495,9 @@ class p115sharestrm(_PluginBase):
                                                         "component": "VTextField",
                                                         "props": {
                                                             "model": "audit_poll_min_sec",
-                                                            "label": "审核轮询最小间隔（秒）",
+                                                            "label": "后台重试最小间隔（秒）",
                                                             "type": "number",
-                                                            "hint": "字幕后台等待审核通过时的轮询起点，默认 60",
+                                                            "hint": "字幕后台自动重试的轮询起点，默认 60",
                                                             "persistent-hint": True,
                                                         },
                                                     }
@@ -511,7 +511,7 @@ class p115sharestrm(_PluginBase):
                                                         "component": "VTextField",
                                                         "props": {
                                                             "model": "audit_poll_max_sec",
-                                                            "label": "审核轮询最大间隔（秒）",
+                                                            "label": "后台重试最大间隔（秒）",
                                                             "type": "number",
                                                             "hint": "轮询间隔上限，默认 300",
                                                             "persistent-hint": True,

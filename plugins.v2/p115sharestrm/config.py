@@ -88,7 +88,7 @@ class ConfigManager(BaseModel):
     )
     subtitle_audit_poll_timeout_hours: int = Field(
         default=6,
-        description="字幕审核轮询超时时间（小时），分享链接审核中时后台最长等待时长",
+        description="字幕后台重试超时时间（小时），快照生成中/接口暂不可用时后台最长等待时长",
     )
     subtitle_finalize_timeout_hours: int = Field(
         default=6,
@@ -124,12 +124,12 @@ class ConfigManager(BaseModel):
     audit_poll_min_sec: int = Field(
         default=60,
         ge=10,
-        description="字幕审核轮询最小间隔（秒）",
+        description="字幕后台重试最小间隔（秒）",
     )
     audit_poll_max_sec: int = Field(
         default=300,
         ge=30,
-        description="字幕审核轮询最大间隔（秒）",
+        description="字幕后台重试最大间隔（秒）",
     )
     share_receive_retry_hours: int = Field(
         default=3,
